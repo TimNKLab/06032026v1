@@ -28,27 +28,3 @@ def get_odoo_connection():
     except Exception as e:
         print(f"Error connecting to Odoo: {e}")
         return None
-
-def get_odoo_data():
-    """
-    Connects to Odoo and fetches sales data.
-    This is a synchronous and blocking call.
-    """
-    odoo = get_odoo_connection()
-    
-    if odoo is None:
-        return []
-        
-    # Example: Fetch sales order data
-    if 'sale.order' in odoo.env:
-        SaleOrder = odoo.env['sale.order']
-        # Fetch up to 10 sales orders for initial setup testing
-        sale_orders = SaleOrder.search_read([], ['name', 'amount_total'], limit=10)
-        return sale_orders
-    else:
-        return []
-
-if __name__ == '__main__':
-    # For testing the connection
-    data = get_odoo_data()
-    print(data)

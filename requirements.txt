@@ -2,3 +2,4 @@ dash
 odoorpc
 gunicorn
 python-dotenv
+dash-mantine-components

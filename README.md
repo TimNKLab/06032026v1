@@ -32,6 +32,8 @@ This initial version (MVP) of the dashboard focuses on core UI functionality and
 
 ### Configuration
 
+The UI uses [Dash Mantine Components](https://github.com/snehilvj/dash-mantine-components) for styling, so make sure the dependencies from `requirements.txt` are installed (Dash automatically loads Mantine styles via `dmc.styles.ALL`).
+
 The Odoo connection parameters are loaded from a local `.env` file using `python-dotenv`.
 
 1. Create a file named `.env` in the root directory.
