@@ -3,3 +3,6 @@ odoorpc
 gunicorn
 python-dotenv
 dash-mantine-components
+polars
+plotly
+pandas

@@ -1,58 +1,65 @@
 import dash
 from dash import dcc, Output, Input, State
 import dash_mantine_components as dmc
-import plotly.graph_objects as go
+import plotly.express as px
+import pandas as pd
 from datetime import date
 
 from services.overview_metrics import get_total_overview_summary
 
 
-def _build_total_overview_figure(target_date):
-    summary = get_total_overview_summary(target_date)
-    target_date = summary['target_date']
+def _build_total_overview_figure(date_start, date_end=None):
+    summary = get_total_overview_summary(date_start, date_end)
+    date_start = summary['target_date_start']
+    date_end = summary['target_date_end']
     today_amount = summary['today_amount']
     today_qty = summary['today_qty']
-    today_categories = summary['categories']
+    categories_nested = summary['categories_nested']
     prev_amount = summary['prev_amount']
 
-    fig = go.Figure()
-
-    if today_categories:
-        labels = list(today_categories.keys())
-        values = list(today_categories.values())
-        fig.add_trace(
-        go.Pie(
-            labels=labels,
-            values=values,
-            hole=0,
-            marker=dict(line=dict(color='white', width=2)),
-            hovertemplate='Category: %{label}<br>Contribution: %{percent}<br>Revenue: Rp %{value:,.0f}<extra></extra>',
-            textinfo='label+percent',
-            # MODIFICATION: Set textposition to 'inside'
-            textposition='inside', 
+    if categories_nested:
+        records = [
+            {
+                'parent_category': parent,
+                'category': child,
+                'amount': amt,
+            }
+            for parent, child_map in categories_nested.items()
+            for child, amt in child_map.items()
+        ]
+        df = pd.DataFrame(records)
+        fig = px.sunburst(
+            df,
+            path=['parent_category', 'category'],
+            values='amount',
+            color='parent_category',
+            color_discrete_sequence=px.colors.qualitative.Set3,
         )
-    )
     else:
-        fig.add_annotation(
-            text='No POS data available for the selected date.',
-            x=0.5,
-            y=0.5,
-            xref='paper',
-            yref='paper',
-            showarrow=False,
-            font=dict(size=14, color='gray'),
+        df = pd.DataFrame()
+        fig = px.sunburst()
+
+    if df.empty:
+        fig.update_layout(
+            annotations=[dict(text='No POS data available for the selected date.', x=0.5, y=0.5, showarrow=False, font=dict(size=14, color='gray'))]
         )
 
     delta_amount = today_amount - prev_amount
     delta_pct = (delta_amount / prev_amount * 100) if prev_amount else None
 
     if delta_pct is None:
-        delta_text = f"Δ vs prev day: Rp {delta_amount:,.0f}"
+        delta_text = f" vs prev period: Rp {delta_amount:,.0f}"
     else:
-        delta_text = f"Δ vs prev day: Rp {delta_amount:,.0f} ({delta_pct:+.1f}%)"
+        delta_text = f" vs prev period: Rp {delta_amount:,.0f} ({delta_pct:+.1f}%)"
+
+    # Title shows single date or range
+    if date_start == date_end:
+        title_str = f"Total Overview – {date_start.strftime('%d %b %Y')}"
+    else:
+        title_str = f"Total Overview – {date_start.strftime('%d %b %Y')} to {date_end.strftime('%d %b %Y')}"
 
     fig.update_layout(
-        title=f"Total Overview – {target_date.strftime('%d %b %Y')}",
+        title=title_str,
         legend_title_text='Product Category',
         template='plotly_white',
         height=420,
@@ -159,7 +166,7 @@ layout = dmc.Container(
                     dmc.Paper(
                         dcc.Graph(
                             id='total-overview-fig',
-                            figure=_build_total_overview_figure(date.today()),
+                            figure=_build_total_overview_figure(date.today(), date.today()),
                             config={'displayModeBar': False},
                         ),
                         p='md',
@@ -196,11 +203,8 @@ layout = dmc.Container(
 
 @dash.callback(
     Output('total-overview-fig', 'figure'),
-    # Listen to both the button click AND the date-from change
     Input('btn-apply-dates', 'n_clicks'),
-    Input('date-from', 'value'), 
-    
-    # Use other inputs as state
+    State('date-from', 'value'),
     State('date-until', 'value'),
     State('time-from', 'value'),
     State('time-until', 'value'),
@@ -224,4 +228,13 @@ def update_total_overview(n_clicks, date_from_input, date_until, time_from, time
         except (ValueError, TypeError):
             pass # Keep default date.today()
 
-    return _build_total_overview_figure(selected_date)
+    # Parse start and end dates
+    start_date = selected_date
+    end_date = start_date
+    if date_until:
+        try:
+            end_date = date.fromisoformat(date_until)
+        except (ValueError, TypeError):
+            pass
+
+    return _build_total_overview_figure(start_date, end_date)

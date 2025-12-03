@@ -1,15 +1,42 @@
 import odoorpc
 from dotenv import load_dotenv
 import os
+from functools import wraps
+import time
 
 # Ensure environment variables are loaded immediately upon import
 load_dotenv()
 
-def get_odoo_connection():
-    """
-    Loads Odoo credentials from environment variables and establishes a connection.
-    Returns a logged-in odoorpc.ODOO object or None if configuration is missing or connection fails.
-    """
+class OdooConnectionManager:
+    _instance = None
+    _connection = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def get_connection(self):
+        if self._connection is None:
+            self._connection = _create_connection()
+        return self._connection
+
+def retry_odoo(max_retries=3, delay=1):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(delay * (2 ** attempt))  # Exponential backoff
+            return None
+        return wrapper
+    return decorator
+
+def _create_connection():
     host = os.environ.get('ODOO_HOST')
     port = int(os.environ.get('ODOO_PORT', 443))
     protocol = os.environ.get('ODOO_PROTOCOL', 'jsonrpc+ssl')
@@ -28,3 +55,10 @@ def get_odoo_connection():
     except Exception as e:
         print(f"Error connecting to Odoo: {e}")
         return None
+
+def get_odoo_connection():
+    """
+    Gets a reusable Odoo connection using the connection manager.
+    Returns a logged-in odoorpc.ODOO object or None if configuration is missing or connection fails.
+    """
+    return OdooConnectionManager().get_connection()
