@@ -1,8 +1,12 @@
-dash
+dash==2.14.2
 odoorpc
-gunicorn
+gunicorn==23.0.0
 python-dotenv
-dash-mantine-components
+dash-mantine-components==2.4.0
+
 polars
 plotly
 pandas
+celery[redis]
+redis
+duckdb==0.9.2

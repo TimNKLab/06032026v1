@@ -36,7 +36,7 @@ def get_pos_order_lines_for_date(target_date):
         print(f"Error fetching pos.order.line data: {exc}")
         return []
 
-    # Batch fetch product categories to reduce API calls
+    # Batch fetch product categories and brands to reduce API calls
     product_ids = {
         line['product_id'][0]
         for line in lines
@@ -44,16 +44,22 @@ def get_pos_order_lines_for_date(target_date):
     }
 
     category_by_product = {}
+    brand_by_product = {}
     if product_ids and 'product.product' in odoo.env:
         try:
             Product = odoo.env['product.product']
-            products = Product.read(list(product_ids), ['categ_id'])
+            # Fetch both category and brand information
+            products = Product.read(list(product_ids), ['categ_id', 'x_studio_brand_id'])
             category_by_product = {
                 prod['id']: prod.get('categ_id')
                 for prod in products
             }
+            brand_by_product = {
+                prod['id']: prod.get('x_studio_brand_id')
+                for prod in products
+            }
         except Exception as exc:
-            print(f"Error fetching product categories: {exc}")
+            print(f"Error fetching product categories/brands: {exc}")
 
     # Process lines in chunks to manage memory
     processed_lines = []
@@ -61,7 +67,7 @@ def get_pos_order_lines_for_date(target_date):
     
     for i in range(0, len(lines), chunk_size):
         chunk = lines[i:i + chunk_size]
-        processed_chunk = _process_lines_chunk(chunk, category_by_product)
+        processed_chunk = _process_lines_chunk(chunk, category_by_product, brand_by_product)
         processed_lines.extend(processed_chunk)
         
         # Clear memory
@@ -70,13 +76,19 @@ def get_pos_order_lines_for_date(target_date):
 
     return processed_lines
 
-def _process_lines_chunk(lines_chunk, category_by_product):
-    """Process a chunk of POS lines to add category information."""
+def _process_lines_chunk(lines_chunk, category_by_product, brand_by_product=None):
+    """Process a chunk of POS lines to add category and brand information."""
+    if brand_by_product is None:
+        brand_by_product = {}
+        
     for line in lines_chunk:
         product = line.get('product_id')
         product_id = product[0] if isinstance(product, (list, tuple)) and product else None
         categ_value = category_by_product.get(product_id)
+        brand_value = brand_by_product.get(product_id)
+        
         line['product_categ_id'] = categ_value
+        line['x_studio_brand_id'] = brand_value
 
         # Odoo stores Many2one as (id, "Parent/Child"). Extract human-friendly parts.
         categ_name = None
@@ -95,6 +107,15 @@ def _process_lines_chunk(lines_chunk, category_by_product):
 
         line['product_parent_category'] = parent_category
         line['product_category'] = leaf_category
+        
+        # Extract brand name
+        brand_name = None
+        if isinstance(brand_value, (list, tuple)) and len(brand_value) >= 2:
+            brand_name = brand_value[1]
+        elif isinstance(brand_value, str):
+            brand_name = brand_value
+        
+        line['product_brand'] = brand_name or 'Unknown'
 
     return lines_chunk
 
@@ -142,7 +163,7 @@ def get_pos_order_lines_for_date_range(start_date, end_date):
         print(f"Error fetching pos.order.line data for range: {exc}")
         return []
 
-    # Process categories (same as single-day function)
+    # Process categories and brands (same as single-day function)
     product_ids = {
         line['product_id'][0]
         for line in lines
@@ -150,18 +171,24 @@ def get_pos_order_lines_for_date_range(start_date, end_date):
     }
 
     category_by_product = {}
+    brand_by_product = {}
     if product_ids and 'product.product' in odoo.env:
         try:
             Product = odoo.env['product.product']
-            products = Product.read(list(product_ids), ['categ_id'])
+            # Fetch both category and brand information
+            products = Product.read(list(product_ids), ['categ_id', 'x_studio_brand_id'])
             category_by_product = {
                 prod['id']: prod.get('categ_id')
                 for prod in products
             }
+            brand_by_product = {
+                prod['id']: prod.get('x_studio_brand_id')
+                for prod in products
+            }
         except Exception as exc:
-            print(f"Error fetching product categories: {exc}")
+            print(f"Error fetching product categories/brands: {exc}")
 
-    return _process_lines_chunk(lines, category_by_product)
+    return _process_lines_chunk(lines, category_by_product, brand_by_product)
 
 def create_fact_dataframe(lines):
     """Create a pandas DataFrame simulating a fact table for optimized processing."""

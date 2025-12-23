@@ -166,7 +166,7 @@ layout = dmc.Container(
                     dmc.Paper(
                         dcc.Graph(
                             id='total-overview-fig',
-                            figure=_build_total_overview_figure(date.today(), date.today()),
+                            # figure=_build_total_overview_figure(date.today(), date.today()),
                             config={'displayModeBar': False},
                         ),
                         p='md',

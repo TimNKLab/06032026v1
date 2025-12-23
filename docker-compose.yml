@@ -1,0 +1,84 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  celery-worker:
+    build: .
+    command: >
+      sh -c "celery -A etl_tasks worker 
+      --loglevel=info 
+      --concurrency=2"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - ODOO_HOST=${ODOO_HOST}
+      - ODOO_PORT=${ODOO_PORT:-443}
+      - ODOO_PROTOCOL=${ODOO_PROTOCOL:-jsonrpc+ssl}
+      - ODOO_DB=${ODOO_DB}
+      - ODOO_USERNAME=${ODOO_USERNAME}
+      - ODOO_API_KEY=${ODOO_API_KEY}
+    volumes:
+      - ./data-lake:/app/data-lake
+      - ./logs:/app/logs
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  celery-beat:
+    build: .
+    command: >
+      sh -c "mkdir -p /var/run/celery /var/log/celery && 
+      celery -A etl_tasks beat 
+      --loglevel=info 
+      --schedule=/var/run/celery/beat-schedule"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - ODOO_HOST=${ODOO_HOST}
+      - ODOO_PORT=${ODOO_PORT:-443}
+      - ODOO_PROTOCOL=${ODOO_PROTOCOL:-jsonrpc+ssl}
+      - ODOO_DB=${ODOO_DB}
+      - ODOO_USERNAME=${ODOO_USERNAME}
+      - ODOO_API_KEY=${ODOO_API_KEY}
+    volumes:
+      - ./data-lake:/app/data-lake
+      - ./logs:/app/logs
+      - celerybeat_data:/var/run/celery
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dash-app:
+    build: .
+    command: gunicorn --workers 1 --threads 1 -b 0.0.0.0:8050 app:server
+    ports:
+      - "8050:8050"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+      - REDIS_CONNECTION_POOL_SIZE=10
+      - REDIS_MAX_CONNECTIONS=20
+    volumes:
+      - ./data-lake:/app/data-lake
+      - ./logs:/app/logs
+      - ./assets:/app/assets
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  celerybeat_data:

@@ -2,13 +2,15 @@ from datetime import date, timedelta
 from typing import Dict, List, Tuple
 import pandas as pd
 import polars as pl
+import pytz
 
 from services.pos_data import get_pos_order_lines_batched, create_fact_dataframe
+from services.duckdb_connector import query_sales_trends, query_hourly_sales_pattern, query_top_products, query_revenue_comparison
 
 
 def get_sales_trends_data(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """
-    Get revenue trend data for the specified date range and period using Polars.
+    Get revenue trend data for the specified date range and period using DuckDB.
     
     Args:
         start_date: Start date for the analysis
@@ -21,6 +23,15 @@ def get_sales_trends_data(start_date: date, end_date: date, period: str = 'daily
     if start_date > end_date:
         start_date, end_date = end_date, start_date
     
+    try:
+        # Use DuckDB for faster queries
+        return query_sales_trends(start_date, end_date, period)
+    except Exception as e:
+        print(f"DuckDB query failed in get_sales_trends_data: {e}, falling back to Odoo")
+        return _get_sales_trends_data_odoo_fallback(start_date, end_date, period)
+
+def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
+    """Odoo fallback for sales trends if DuckDB fails."""
     # Get POS data for the date range
     lines = get_pos_order_lines_batched(start_date, end_date)
     if not lines:
@@ -34,7 +45,7 @@ def get_sales_trends_data(start_date: date, end_date: date, period: str = 'daily
     try:
         df = pl.from_pandas(df_pandas)
     except Exception as e:
-        print(f"Polars conversion failed in get_sales_trends_data: {e}, falling back to pandas")
+        print(f"Polars conversion failed in fallback: {e}, using pandas")
         return _get_sales_trends_data_pandas_fallback(df_pandas, start_date, end_date, period)
     
     # Add period grouping using Polars expressions
@@ -119,7 +130,7 @@ def _get_sales_trends_data_pandas_fallback(df, start_date: date, end_date: date,
 
 def get_revenue_comparison(start_date: date, end_date: date) -> Dict:
     """
-    Compare revenue between current period and previous period of same length.
+    Compare revenue between current period and previous period of same length using DuckDB.
     
     Args:
         start_date: Current period start date
@@ -128,6 +139,16 @@ def get_revenue_comparison(start_date: date, end_date: date) -> Dict:
     Returns:
         Dict with current and previous period metrics
     """
+    try:
+        # Use DuckDB for faster queries
+        return query_revenue_comparison(start_date, end_date)
+    except Exception as e:
+        print(f"DuckDB query failed in get_revenue_comparison: {e}, falling back to Odoo")
+        return _get_revenue_comparison_odoo_fallback(start_date, end_date)
+
+
+def _get_revenue_comparison_odoo_fallback(start_date: date, end_date: date) -> Dict:
+    """Odoo fallback for revenue comparison if DuckDB fails."""
     # Current period data
     current_trends = get_sales_trends_data(start_date, end_date, 'daily')
     current_revenue = current_trends['revenue'].sum()
@@ -175,84 +196,272 @@ def get_revenue_comparison(start_date: date, end_date: date) -> Dict:
         }
     }
 
-
 def get_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     """
-    Get hourly sales pattern for a specific date using Polars.
+    Get hourly sales pattern for a specific date using DuckDB.
+    Times are converted to Bangkok timezone (UTC+7) and filtered to store hours (7:00-23:00).
     
     Args:
         target_date: Date to analyze
     
     Returns:
-        DataFrame with hourly revenue and transaction counts
+        DataFrame with hourly revenue and transaction counts for active hours only
     """
+    try:
+        # Use DuckDB for faster queries
+        return query_hourly_sales_pattern(target_date)
+    except Exception as e:
+        print(f"DuckDB query failed in get_hourly_sales_pattern: {e}, falling back to Odoo")
+        return _get_hourly_sales_pattern_odoo_fallback(target_date)
+
+
+def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
+    """Odoo fallback for hourly sales pattern if DuckDB fails."""
     lines = get_pos_order_lines_batched(target_date, target_date)
     if not lines:
         return pd.DataFrame(columns=['hour', 'revenue', 'transactions'])
     
     df_pandas = create_fact_dataframe(lines)
-    df = pl.from_pandas(df_pandas)
+    if df_pandas.empty:
+        return pd.DataFrame(columns=['hour', 'revenue', 'transactions'])
     
-    # Extract hour using Polars
-    df = df.with_columns(
-        pl.col('order_date').dt.hour().alias('hour')
-    )
+    try:
+        # Validate DataFrame before Polars conversion
+        required_columns = ['order_date', 'price_subtotal_incl']
+        missing_cols = [col for col in required_columns if col not in df_pandas.columns]
+        if missing_cols:
+            print(f"Missing required columns: {missing_cols}")
+            return pd.DataFrame(columns=['hour', 'revenue', 'transactions'])
+        
+        # Convert to Bangkok timezone (UTC+7)
+        bangkok_tz = pytz.timezone('Asia/Bangkok')
+        # Ensure order_date is datetime and localize to UTC first, then convert to Bangkok
+        df_pandas['order_date'] = pd.to_datetime(df_pandas['order_date'], errors='coerce')
+        # If timezone naive, assume UTC
+        if df_pandas['order_date'].dt.tz is None:
+            df_pandas['order_date'] = df_pandas['order_date'].dt.tz_localize('UTC')
+        df_pandas['order_date'] = df_pandas['order_date'].dt.tz_convert('Asia/Bangkok')
+        
+        # Drop rows with invalid dates
+        df_pandas = df_pandas.dropna(subset=['order_date'])
+        
+        if df_pandas.empty:
+            return pd.DataFrame(columns=['hour', 'revenue', 'transactions'])
+        
+        # Clean data for Polars conversion - remove problematic columns
+        # Only keep columns we actually need for hourly analysis
+        columns_to_keep = ['order_date', 'price_subtotal_incl']
+        if 'order_id' in df_pandas.columns:
+            columns_to_keep.append('order_id')
+        
+        df_clean = df_pandas[columns_to_keep].copy()
+        
+        # Ensure numeric columns are properly typed
+        df_clean['price_subtotal_incl'] = pd.to_numeric(df_clean['price_subtotal_incl'], errors='coerce').fillna(0)
+        
+        # Convert to Polars with explicit schema handling
+        df = pl.from_pandas(df_clean)
+        
+        # Extract hour using Polars (Bangkok time)
+        df = df.with_columns(
+            pl.col('order_date').dt.hour().alias('hour')
+        )
+        
+        # Filter to store active hours (7:00-23:00)
+        df = df.filter((pl.col('hour') >= 7) & (pl.col('hour') <= 23))
+        
+        # Aggregate by hour using Polars
+        hourly = (
+            df
+            .group_by('hour')
+            .agg([
+                pl.col('price_subtotal_incl').sum().alias('revenue'),
+                pl.col('order_date').n_unique().alias('transactions')
+            ])
+            .sort('hour')
+        )
+        
+        # Fill missing active hours (7-23) with zeros
+        active_hours = pl.DataFrame({'hour': range(7, 24)})
+        hourly = active_hours.join(hourly, on='hour', how='left').fill_null(0)
+        
+        return hourly.to_pandas()
     
-    # Aggregate by hour using Polars
+    except Exception as e:
+        print(f"Error in Polars processing for hourly pattern: {e}")
+        # Fallback to pandas processing
+        return _get_hourly_sales_pattern_pandas_fallback(df_pandas)
+
+def _get_hourly_sales_pattern_pandas_fallback(df_pandas) -> pd.DataFrame:
+    """Pandas fallback for hourly sales pattern if Polars conversion fails."""
+    # Convert to Bangkok timezone (UTC+7)
+    df_pandas['order_date'] = pd.to_datetime(df_pandas['order_date'], errors='coerce')
+    # If timezone naive, assume UTC
+    if df_pandas['order_date'].dt.tz is None:
+        df_pandas['order_date'] = df_pandas['order_date'].dt.tz_localize('UTC')
+    df_pandas['order_date'] = df_pandas['order_date'].dt.tz_convert('Asia/Bangkok')
+    
+    # Drop rows with invalid dates
+    df_pandas = df_pandas.dropna(subset=['order_date'])
+    
+    if df_pandas.empty:
+        return pd.DataFrame(columns=['hour', 'revenue', 'transactions'])
+    
+    # Extract hour
+    df_pandas['hour'] = df_pandas['order_date'].dt.hour
+    
+    # Filter to store active hours (7:00-23:00)
+    df_pandas = df_pandas[(df_pandas['hour'] >= 7) & (df_pandas['hour'] <= 23)]
+    
+    if df_pandas.empty:
+        # Return empty DataFrame with active hours
+        return pd.DataFrame({'hour': range(7, 24), 'revenue': 0, 'transactions': 0})
+    
+    # Aggregate by hour
     hourly = (
-        df
-        .group_by('hour')
-        .agg([
-            pl.col('price_subtotal_incl').sum().alias('revenue'),
-            pl.col('order_date').n_unique().alias('transactions')
-        ])
-        .sort('hour')
+        df_pandas.groupby('hour')
+        .agg({
+            'price_subtotal_incl': 'sum',
+            'order_date': 'nunique'
+        })
+        .reset_index()
+        .rename(columns={
+            'price_subtotal_incl': 'revenue',
+            'order_date': 'transactions'
+        })
     )
     
-    # Fill missing hours (0-23) with zeros
-    all_hours = pl.DataFrame({'hour': range(24)})
-    hourly = all_hours.join(hourly, on='hour', how='left').fill_null(0)
+    # Sort by hour (use pandas sort_values)
+    hourly = hourly.sort_values('hour')
     
-    return hourly.to_pandas()
+    # Fill missing active hours (7-23) with zeros
+    active_hours = pd.DataFrame({'hour': range(7, 24)})
+    hourly = active_hours.merge(hourly, on='hour', how='left').fillna(0)
+    
+    return hourly
 
 
-def get_top_products(start_date: date, end_date: date, limit: int = 10) -> pd.DataFrame:
+def get_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     """
-    Get top selling products by revenue for the specified date range using Polars.
+    Get top selling products by revenue for the specified date range using DuckDB.
     
     Args:
         start_date: Start date
         end_date: End date
-        limit: Number of top products to return
+        limit: Number of top products to return (default 20)
     
     Returns:
-        DataFrame with top products metrics
+        DataFrame with top products metrics including name, category, quantity, and total revenue
     """
+    try:
+        # Use DuckDB for faster queries
+        return query_top_products(start_date, end_date, limit)
+    except Exception as e:
+        print(f"DuckDB query failed in get_top_products: {e}, falling back to Odoo")
+        return _get_top_products_odoo_fallback(start_date, end_date, limit)
+
+
+def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
+    """Odoo fallback for top products if DuckDB fails."""
     lines = get_pos_order_lines_batched(start_date, end_date)
     if not lines:
-        return pd.DataFrame(columns=['product_name', 'revenue', 'quantity', 'avg_price'])
+        return pd.DataFrame(columns=['product_name', 'category', 'quantity_sold', 'total_unit_price'])
     
     df_pandas = create_fact_dataframe(lines)
-    df = pl.from_pandas(df_pandas)
+    if df_pandas.empty:
+        return pd.DataFrame(columns=['product_name', 'category', 'quantity_sold', 'total_unit_price'])
     
-    # Group by product_id and aggregate using Polars
-    top_products = (
-        df
-        .group_by('product_id')
-        .agg([
-            pl.col('price_subtotal_incl').sum().alias('revenue'),
-            pl.col('qty').sum().alias('quantity')
-        ])
-        .with_columns(
-            (pl.col('revenue') / pl.col('quantity').replace(0, 1)).alias('avg_price')
+    try:
+        # Validate DataFrame before Polars conversion
+        required_columns = ['product_id', 'price_subtotal_incl', 'qty']
+        missing_cols = [col for col in required_columns if col not in df_pandas.columns]
+        if missing_cols:
+            print(f"Missing required columns for top products: {missing_cols}")
+            return pd.DataFrame(columns=['product_name', 'category', 'quantity_sold', 'total_unit_price'])
+        
+        # Clean data for Polars conversion - only keep columns we need
+        columns_to_keep = ['product_id', 'price_subtotal_incl', 'qty', 'product_category']
+        # Add product_name if available
+        if 'product_id' in df_pandas.columns:
+            columns_to_keep.append('product_id')
+        
+        df_clean = df_pandas[columns_to_keep].copy()
+        
+        # Ensure numeric columns are properly typed
+        df_clean['price_subtotal_incl'] = pd.to_numeric(df_clean['price_subtotal_incl'], errors='coerce').fillna(0)
+        df_clean['qty'] = pd.to_numeric(df_clean['qty'], errors='coerce').fillna(0)
+        
+        # Convert to Polars with explicit schema handling
+        df = pl.from_pandas(df_clean)
+        
+        # Group by product_id and aggregate using Polars
+        top_products = (
+            df
+            .group_by(['product_id', 'product_category'])
+            .agg([
+                pl.col('price_subtotal_incl').sum().alias('total_unit_price'),
+                pl.col('qty').sum().alias('quantity_sold')
+            ])
+            .sort('total_unit_price', descending=True)
+            .limit(limit)
         )
-        .sort('revenue', descending=True)
-        .limit(limit)
+        
+        # Create product name from product_id
+        top_products = top_products.with_columns(
+            ('Product ' + pl.col('product_id').cast(str)).alias('product_name')
+        )
+        
+        # Handle missing categories
+        top_products = top_products.with_columns(
+            pl.col('product_category').fill_null('Unknown Category').alias('category')
+        )
+        
+        # Select and reorder columns for final output
+        result = top_products.select([
+            'product_name',
+            'category', 
+            'quantity_sold',
+            'total_unit_price'
+        ])
+        
+        return result.to_pandas()
+    
+    except Exception as e:
+        print(f"Error in Polars processing for top products: {e}")
+        # Fallback to pandas processing
+        return _get_top_products_pandas_fallback(df_pandas, limit)
+
+def _get_top_products_pandas_fallback(df_pandas, limit: int = 20) -> pd.DataFrame:
+    """Pandas fallback for top products if Polars conversion fails."""
+    # Group by product_id and category using pandas
+    group_cols = ['product_id']
+    if 'product_category' in df_pandas.columns:
+        group_cols.append('product_category')
+    
+    top_products = (
+        df_pandas.groupby(group_cols)
+        .agg({
+            'price_subtotal_incl': 'sum',
+            'qty': 'sum'
+        })
+        .reset_index()
+        .rename(columns={
+            'price_subtotal_incl': 'total_unit_price',
+            'qty': 'quantity_sold'
+        })
     )
     
-    # Convert product_id to string for display
-    top_products = top_products.with_columns(
-        ('Product ' + pl.col('product_id').cast(str)).alias('product_name')
-    )
+    # Handle missing category
+    if 'product_category' not in top_products.columns:
+        top_products['product_category'] = 'Unknown Category'
     
-    return top_products.to_pandas()
+    # Sort by total revenue and limit
+    top_products = top_products.sort_values('total_unit_price', ascending=False).head(limit)
+    
+    # Create product name
+    top_products['product_name'] = 'Product ' + top_products['product_id'].astype(str)
+    
+    # Rename category column for consistency
+    top_products = top_products.rename(columns={'product_category': 'category'})
+    
+    return top_products[['product_name', 'category', 'quantity_sold', 'total_unit_price']]

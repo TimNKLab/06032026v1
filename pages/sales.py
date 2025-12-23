@@ -3,7 +3,7 @@ from dash import dcc, html, Output, Input, State
 import dash_mantine_components as dmc
 from datetime import date
 
-from services.sales_charts import build_revenue_trend_chart, build_category_breakdown_chart
+from services.sales_charts import build_revenue_trend_chart, build_category_sankey_chart, build_hourly_heatmap_chart
 from services.sales_metrics import get_revenue_comparison, get_top_products, get_hourly_sales_pattern
 
 dash.register_page(
@@ -33,7 +33,7 @@ def layout():
                             radius='md',
                             withBorder=True,
                         ),
-                        span=3,
+                        span={"base": 6, "sm": 3},  
                     ),
                     dmc.GridCol(
                         dmc.Paper(
@@ -46,7 +46,7 @@ def layout():
                             radius='md',
                             withBorder=True,
                         ),
-                        span=3,
+                        span={"base": 6, "sm": 3},
                     ),
                     dmc.GridCol(
                         dmc.Paper(
@@ -59,7 +59,7 @@ def layout():
                             radius='md',
                             withBorder=True,
                         ),
-                        span=3,
+                        span={"base": 6, "sm": 3},
                     ),
                     dmc.GridCol(
                         dmc.Paper(
@@ -72,10 +72,10 @@ def layout():
                             radius='md',
                             withBorder=True,
                         ),
-                        span=3,
+                        span={"base": 6, "sm": 3},
                     ),
                 ],
-                gutter='lg',
+                gutter={"base": "md", "lg": "lg"},  
                 mt='md',
             ),
             
@@ -115,36 +115,44 @@ def layout():
                         dmc.Paper(
                             dmc.Stack([
                                 dmc.Text('Revenue Trend', fw=600, mb='md'),
-                                dcc.Graph(
-                                    id='sales-revenue-trend',
-                                    figure={},  # Placeholder
-                                    config={'displayModeBar': False},
+                                dmc.Box(
+                                    dcc.Graph(
+                                        id='sales-revenue-trend',
+                                        figure={},  # Placeholder
+                                        config={'displayModeBar': False},
+                                        style={'height': {'base': '300px', 'sm': '400px', 'lg': '500px'}},
+                                        responsive=True,
+                                    )
                                 )
                             ]),
                             p='md',
                             radius='md',
                             withBorder=True,
                         ),
-                        span=8,
+                        span={"base": 12, "sm": 8},  
                     ),
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Sales by Category', fw=600, mb='md'),
-                                dcc.Graph(
-                                    id='sales-category-breakdown',
-                                    figure={},  # Placeholder
-                                    config={'displayModeBar': False},
+                                dmc.Text('Sales by Principal', fw=600, mb='md'),
+                                dmc.Box(
+                                    dcc.Graph(
+                                        id='sales-by-principal',
+                                        figure={},  # Placeholder
+                                        config={'displayModeBar': False},
+                                        style={'height': {'base': '250px', 'sm': '350px', 'lg': '400px'}},
+                                        responsive=True,
+                                    )
                                 )
                             ]),
                             p='md',
                             radius='md',
                             withBorder=True,
                         ),
-                        span=4,
+                        span={"base": 12, "sm": 4},  
                     ),
                 ],
-                gutter='lg',
+                gutter={"base": "md", "lg": "lg"},  
                 mt='lg',
             ),
             
@@ -155,25 +163,75 @@ def layout():
                         dmc.Paper(
                             dmc.Stack([
                                 dmc.Text('Top Products', fw=600, mb='md'),
-                                dmc.Text('Top products table placeholder', c='dimmed')
+                                dmc.Box(
+                                    dmc.Table(
+                                        id='sales-top-products-table',
+                                        striped=True,
+                                        highlightOnHover=True,
+                                        withTableBorder=True,
+                                        horizontalSpacing="md",
+                                        verticalSpacing="xs",
+                                        fz='xs',
+                                        # Table data will be populated via callback
+                                        data={},  # Placeholder
+                                    ),
+                                    h=400,  # Fixed height
+                                    style={"overflowY": "auto"}  # Vertical scrolling
+                                )
                             ]),
                             p='md',
                             radius='md',
                             withBorder=True,
                         ),
-                        span=6,
+                        span={"base": 12, "sm": 6},  
                     ),
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
                                 dmc.Text('Hourly Sales Pattern', fw=600, mb='md'),
-                                dmc.Text('Hourly heatmap placeholder', c='dimmed')
+                                dmc.Box(
+                                    dcc.Graph(
+                                        id='sales-hourly-pattern',
+                                        figure={},  # Placeholder
+                                        config={'displayModeBar': False},
+                                        style={'height': {'base': '250px', 'sm': '350px', 'lg': '400px'}},
+                                        responsive=True,
+                                    )
+                                )
                             ]),
                             p='md',
                             radius='md',
                             withBorder=True,
                         ),
-                        span=6,
+                        span={"base": 12, "sm": 6},  
+                    ),
+                ],
+                gutter={"base": "md", "lg": "lg"},  
+                mt='lg',
+            ),
+            
+            # Sales Flow Hierarchy Row
+            dmc.Grid(
+                [
+                    dmc.GridCol(
+                        dmc.Paper(
+                            dmc.Stack([
+                                dmc.Text('Sales Flow Hierarchy', fw=600, mb='md'),
+                                dmc.Box(
+                                    dcc.Graph(
+                                        id='sales-category-breakdown',
+                                        figure={},  # Placeholder
+                                        config={'displayModeBar': False},
+                                        style={'height': {'base': '400px', 'sm': '500px', 'lg': '600px'}},
+                                        responsive=True,
+                                    )
+                                )
+                            ]),
+                            p='md',
+                            radius='md',
+                            withBorder=True,
+                        ),
+                        span=12,
                     ),
                 ],
                 gutter='lg',
@@ -188,7 +246,7 @@ def layout():
 # Callbacks for sales dashboard
 @dash.callback(
     Output('sales-revenue-trend', 'figure'),
-    Output('sales-category-breakdown', 'figure'),
+    Output('sales-category-placeholder', 'figure'),
     Input('sales-btn-apply', 'n_clicks'),
     State('sales-date-from', 'value'),
     State('sales-date-until', 'value'),
@@ -213,9 +271,60 @@ def update_sales_charts(n_clicks, date_from, date_until):
     
     # Build charts
     revenue_fig = build_revenue_trend_chart(start_date, end_date, 'daily')
-    category_fig = build_category_breakdown_chart(start_date, end_date)
+    placeholder_fig = {
+        'layout': {
+            'xaxis': {'visible': False},
+            'yaxis': {'visible': False},
+            'annotations': [
+                {
+                    'text': 'Sales by Category Chart Placeholder',
+                    'xref': 'paper',
+                    'yref': 'paper',
+                    'x': 0.5,
+                    'y': 0.5,
+                    'xanchor': 'center',
+                    'yanchor': 'middle',
+                    'font': {'size': 16, 'color': 'gray'}
+                }
+            ]
+        }
+    }
     
-    return revenue_fig, category_fig
+    return revenue_fig, placeholder_fig
+
+
+@dash.callback(
+    Output('sales-category-breakdown', 'figure'),
+    Output('sales-hourly-pattern', 'figure'),
+    Input('sales-btn-apply', 'n_clicks'),
+    State('sales-date-from', 'value'),
+    State('sales-date-until', 'value'),
+    prevent_initial_call=True,
+)
+def update_additional_charts(n_clicks, date_from, date_until):
+    # Parse dates
+    start_date = date.today()
+    end_date = start_date
+    
+    if date_from:
+        try:
+            start_date = date.fromisoformat(date_from)
+        except (ValueError, TypeError):
+            pass
+    
+    if date_until:
+        try:
+            end_date = date.fromisoformat(date_until)
+        except (ValueError, TypeError):
+            pass
+    
+    # Build Sankey chart
+    sankey_fig = build_category_sankey_chart(start_date, end_date)
+    
+    # Build hourly heatmap
+    hourly_fig = build_hourly_heatmap_chart(start_date, end_date)
+    
+    return sankey_fig, hourly_fig
 
 
 @dash.callback(
@@ -293,3 +402,61 @@ def update_kpi_cards(n_clicks, date_from, date_until):
         atv_change_text,
         items_change_text
     )
+
+
+@dash.callback(
+    Output('sales-top-products-table', 'data'),
+    Input('sales-btn-apply', 'n_clicks'),
+    State('sales-date-from', 'value'),
+    State('sales-date-until', 'value'),
+    prevent_initial_call=True,
+)
+def update_top_products_table(n_clicks, date_from, date_until):
+    # Parse dates
+    start_date = date.today()
+    end_date = start_date
+    
+    if date_from:
+        try:
+            start_date = date.fromisoformat(date_from)
+        except (ValueError, TypeError):
+            pass
+    
+    if date_until:
+        try:
+            end_date = date.fromisoformat(date_until)
+        except (ValueError, TypeError):
+            pass
+    
+    try:
+        # Get top products data
+        top_products_df = get_top_products(start_date, end_date, limit=20)
+        
+        if top_products_df.empty:
+            return {
+                'head': ['Name', 'Category', 'Quantity Sold', 'Total Unit Price'],
+                'body': [['No data available', '', '', '']]
+            }
+        
+        # Format the data for dmc.Table
+        table_data = {
+            'head': ['Name', 'Category', 'Quantity Sold', 'Total Unit Price'],
+            'body': []
+        }
+        
+        for _, row in top_products_df.iterrows():
+            table_data['body'].append([
+                str(row['product_name']),
+                str(row['category']),
+                f"{int(row['quantity_sold']):,}",
+                f"Rp {row['total_unit_price']:,.0f}"
+            ])
+        
+        return table_data
+        
+    except Exception as e:
+        print(f"Error updating top products table: {e}")
+        return {
+            'head': ['Name', 'Category', 'Quantity Sold', 'Total Unit Price'],
+            'body': [['Error loading data', '', '', '']]
+        }
