@@ -1,18 +1,93 @@
 import os
+import json
+import logging
+import time
+from datetime import datetime, date, timedelta
+from typing import Dict, List, Optional, Any, Tuple
+from enum import Enum
 import polars as pl
-from datetime import date, timedelta
-from celery import Celery
+from pydantic import BaseModel, Field, validator
+from celery import Celery, states
+from celery.exceptions import Ignore
 from odoorpc_connector import get_odoo_connection, retry_odoo
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('/app/logs/etl.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # Redis connection
-redis_url = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
+redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
 app = Celery('etl_tasks', broker=redis_url, backend=redis_url)
 
+# Constants
+MAX_RETRIES = 3
+RETRY_DELAY = 5  # seconds
+BATCH_SIZE = 1000  # Batch size for processing records
+
 # Data lake paths
-DATA_LAKE_ROOT = '/app/data-lake'
+DATA_LAKE_ROOT = os.environ.get('DATA_LAKE_ROOT', '/app/data-lake')
 RAW_PATH = f'{DATA_LAKE_ROOT}/raw/pos_order_lines'
 CLEAN_PATH = f'{DATA_LAKE_ROOT}/clean/pos_order_lines'
 STAR_SCHEMA_PATH = f'{DATA_LAKE_ROOT}/star-schema'
+
+# Create necessary directories
+os.makedirs(RAW_PATH, exist_ok=True)
+os.makedirs(CLEAN_PATH, exist_ok=True)
+os.makedirs(STAR_SCHEMA_PATH, exist_ok=True)
+os.makedirs('/app/logs', exist_ok=True)
+
+# Data Models
+class ETLStatus(str, Enum):
+    PENDING = 'PENDING'
+    EXTRACTING = 'EXTRACTING'
+    TRANSFORMING = 'TRANSFORMING'
+    LOADING = 'LOADING'
+    COMPLETED = 'COMPLETED'
+    FAILED = 'FAILED'
+
+class ETLTaskStatus(BaseModel):
+    task_id: str
+    status: ETLStatus
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    records_processed: int = 0
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = {}
+
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+def update_task_status(task_id: str, status: ETLStatus, **kwargs):
+    """Update task status in Redis."""
+    try:
+        task_status = ETLTaskStatus(
+            task_id=task_id,
+            status=status,
+            start_time=datetime.utcnow(),
+            **kwargs
+        )
+        app.backend.client.set(f'etl:status:{task_id}', task_status.json())
+    except Exception as e:
+        logger.error(f"Failed to update task status: {e}")
+
+def get_task_status(task_id: str) -> Optional[ETLTaskStatus]:
+    """Get task status from Redis."""
+    try:
+        status_json = app.backend.client.get(f'etl:status:{task_id}')
+        if status_json:
+            return ETLTaskStatus.parse_raw(status_json)
+    except Exception as e:
+        logger.error(f"Failed to get task status: {e}")
+    return None
 
 @app.task
 @retry_odoo(max_retries=3, delay=2)
@@ -25,8 +100,8 @@ def extract_pos_order_lines(target_date: str):
         raise Exception("Failed to connect to Odoo")
     
     # Query POS order lines
-    start_dt = target_dt.replace(hour=0, minute=0, second=0)
-    end_dt = target_dt.replace(hour=23, minute=59, second=59)
+    start_dt = datetime.combine(target_dt, datetime.min.time()).replace(hour=0, minute=0, second=0)
+    end_dt = datetime.combine(target_dt, datetime.min.time()).replace(hour=23, minute=59, second=59)
     
     domain = [
         ('x_studio_order_date', '>=', start_dt.strftime('%Y-%m-%d %H:%M:%S')),
@@ -240,21 +315,21 @@ def daily_etl_pipeline(target_date: str = None):
     if target_date is None:
         target_date = date.today().isoformat()
     
-    print(f"Starting ETL pipeline for {target_date}")
+    logger.info(f"Starting ETL pipeline for {target_date}")
     
-    # Extract
-    lines = extract_pos_order_lines.delay(target_date)
+    # Chain the tasks properly without .get() calls
+    from celery import chain
     
-    # Transform and Load
-    save_raw_task = save_raw_data.s(lines.get(), target_date)
-    clean_task = clean_pos_data.s(target_date)
-    update_task = update_star_schema.s(target_date)
+    # Create the chain: extract -> save -> clean -> update
+    pipeline = chain(
+        extract_pos_order_lines.s(target_date),
+        save_raw_data.s(target_date),
+        clean_pos_data.s(target_date),
+        update_star_schema.s(target_date)
+    )
     
-    # Chain the tasks
-    chain = save_raw_task | clean_task | update_task
-    result = chain()
-    
-    print(f"ETL pipeline completed for {target_date}")
+    result = pipeline()
+    logger.info(f"ETL pipeline submitted for {target_date}")
     return result
 
 # Schedule daily ETL at 2 AM

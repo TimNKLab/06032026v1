@@ -1,16 +1,20 @@
 services:
   redis:
     image: redis:7-alpine
+    container_name: redis_etl
+    hostname: redis
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 3
+      start_period: 30s
+    restart: unless-stopped
 
   celery-worker:
     build: .
@@ -27,8 +31,9 @@ services:
       - ODOO_USERNAME=${ODOO_USERNAME}
       - ODOO_API_KEY=${ODOO_API_KEY}
     volumes:
-      - ./data-lake:/app/data-lake
-      - ./logs:/app/logs
+      - D:\data-lake:/app/data-lake
+      - D:\logs:/app/logs
+      - .:/app
     depends_on:
       redis:
         condition: service_healthy
@@ -50,8 +55,9 @@ services:
       - ODOO_USERNAME=${ODOO_USERNAME}
       - ODOO_API_KEY=${ODOO_API_KEY}
     volumes:
-      - ./data-lake:/app/data-lake
-      - ./logs:/app/logs
+      - D:\data-lake:/app/data-lake
+      - D:\logs:/app/logs
+      - .:/app
       - celerybeat_data:/var/run/celery
     depends_on:
       redis:
@@ -69,8 +75,9 @@ services:
       - REDIS_CONNECTION_POOL_SIZE=10
       - REDIS_MAX_CONNECTIONS=20
     volumes:
-      - ./data-lake:/app/data-lake
-      - ./logs:/app/logs
+      - D:\data-lake:/app/data-lake
+      - D:\logs:/app/logs
+      - .:/app
       - ./assets:/app/assets
     depends_on:
       redis:
