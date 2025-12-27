@@ -26,8 +26,10 @@ def _summaries_for_dataframe(df):
         print(f"Polars conversion failed: {e}, falling back to pandas")
         return _summaries_for_dataframe_pandas_fallback(df)
     
+    revenue_col = 'price_paid' if 'price_paid' in df_pl.columns else 'price_subtotal_incl'
+
     # Total aggregations using Polars
-    total_amount = df_pl['price_subtotal_incl'].sum()
+    total_amount = df_pl[revenue_col].sum()
     total_qty = df_pl['qty'].sum()
     
     # Category hierarchy aggregation using Polars
@@ -35,7 +37,7 @@ def _summaries_for_dataframe(df):
         df_pl
         .group_by(['product_parent_category', 'product_category'])
         .agg([
-            pl.col('price_subtotal_incl').sum().alias('revenue')
+            pl.col(revenue_col).sum().alias('revenue')
         ])
     )
     
@@ -46,7 +48,7 @@ def _summaries_for_dataframe(df):
             df_pl
             .group_by(['product_parent_category', 'product_category', 'product_brand'])
             .agg([
-                pl.col('price_subtotal_incl').sum().alias('revenue')
+                pl.col(revenue_col).sum().alias('revenue')
             ])
         )
     
@@ -81,15 +83,17 @@ def _summaries_for_dataframe_pandas_fallback(df):
     """Fallback pandas aggregation if Polars conversion fails."""
     if df.empty:
         return 0, 0, {}
+
+    revenue_col = 'price_paid' if 'price_paid' in df.columns else 'price_subtotal_incl'
     
     # Total aggregations
-    total_amount = df['price_subtotal_incl'].sum()
+    total_amount = df[revenue_col].sum()
     total_qty = df['qty'].sum()
     
     # Category hierarchy aggregation
     category_summary = (
         df.groupby(['product_parent_category', 'product_category'])
-        .agg({'price_subtotal_incl': 'sum'})
+        .agg({revenue_col: 'sum'})
         .reset_index()
     )
     
@@ -98,7 +102,7 @@ def _summaries_for_dataframe_pandas_fallback(df):
     if 'product_brand' in df.columns:
         brand_summary = (
             df.groupby(['product_parent_category', 'product_category', 'product_brand'])
-            .agg({'price_subtotal_incl': 'sum'})
+            .agg({revenue_col: 'sum'})
             .reset_index()
         )
     
@@ -107,7 +111,7 @@ def _summaries_for_dataframe_pandas_fallback(df):
     for _, row in category_summary.iterrows():
         parent = row['product_parent_category'] or 'Unknown'
         child = row['product_category'] or 'Unknown'
-        amount = row['price_subtotal_incl']
+        amount = row[revenue_col]
         
         child_map = hierarchy.setdefault(parent, {})
         child_map[child] = child_map.get(child, 0) + amount
@@ -119,7 +123,7 @@ def _summaries_for_dataframe_pandas_fallback(df):
             parent = row['product_parent_category'] or 'Unknown'
             child = row['product_category'] or 'Unknown'
             brand = row['product_brand'] or 'Unknown'
-            amount = row['price_subtotal_incl']
+            amount = row[revenue_col]
             
             brand_map = brand_hierarchy.setdefault(parent, {})
             child_map = brand_map.setdefault(child, {})

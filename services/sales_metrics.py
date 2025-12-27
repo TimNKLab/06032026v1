@@ -5,7 +5,7 @@ import polars as pl
 import pytz
 
 from services.pos_data import get_pos_order_lines_batched, create_fact_dataframe
-from services.duckdb_connector import query_sales_trends, query_hourly_sales_pattern, query_top_products, query_revenue_comparison
+from services.duckdb_connector import query_sales_trends, query_hourly_sales_pattern, query_hourly_sales_heatmap, query_top_products, query_revenue_comparison
 
 
 def get_sales_trends_data(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
@@ -47,6 +47,8 @@ def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, perio
     except Exception as e:
         print(f"Polars conversion failed in fallback: {e}, using pandas")
         return _get_sales_trends_data_pandas_fallback(df_pandas, start_date, end_date, period)
+
+    revenue_col = 'price_paid' if 'price_paid' in df.columns else 'price_subtotal_incl'
     
     # Add period grouping using Polars expressions
     if period == 'daily':
@@ -69,7 +71,7 @@ def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, perio
         df
         .group_by('date_group')
         .agg([
-            pl.col('price_subtotal_incl').sum().alias('revenue'),
+            pl.col(revenue_col).sum().alias('revenue'),
             pl.col('order_date').n_unique().alias('transactions')
         ])
         .sort('date_group')
@@ -89,6 +91,7 @@ def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, perio
 
 def _get_sales_trends_data_pandas_fallback(df, start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Pandas fallback for sales trends if Polars conversion fails."""
+    revenue_col = 'price_paid' if 'price_paid' in df.columns else 'price_subtotal_incl'
     # Add period grouping using pandas
     if period == 'daily':
         df['date_group'] = df['order_date'].dt.date
@@ -103,12 +106,12 @@ def _get_sales_trends_data_pandas_fallback(df, start_date: date, end_date: date,
     trends = (
         df.groupby('date_group')
         .agg({
-            'price_subtotal_incl': 'sum',
+            revenue_col: 'sum',
             'order_date': 'nunique'
         })
         .reset_index()
         .rename(columns={
-            'price_subtotal_incl': 'revenue',
+            revenue_col: 'revenue',
             'order_date': 'transactions'
         })
     )
@@ -214,6 +217,34 @@ def get_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
         print(f"DuckDB query failed in get_hourly_sales_pattern: {e}, falling back to Odoo")
         return _get_hourly_sales_pattern_odoo_fallback(target_date)
 
+def get_hourly_sales_heatmap_data(start_date: date, end_date: date) -> pd.DataFrame:
+    """Get hourly sales heatmap data across a date range using DuckDB (single query)."""
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    try:
+        return query_hourly_sales_heatmap(start_date, end_date)
+    except Exception as e:
+        print(f"DuckDB query failed in get_hourly_sales_heatmap_data: {e}, falling back to per-day fetch")
+
+    all_data = []
+    current_date = start_date
+    while current_date <= end_date:
+        hourly_data = get_hourly_sales_pattern(current_date)
+        if not hourly_data.empty:
+            hourly_data['date'] = current_date
+            all_data.append(hourly_data)
+        current_date += timedelta(days=1)
+
+    if not all_data:
+        return pd.DataFrame(columns=['date', 'hour', 'revenue'])
+
+    combined = pd.concat(all_data, ignore_index=True)
+    if 'revenue' not in combined.columns:
+        return pd.DataFrame(columns=['date', 'hour', 'revenue'])
+
+    return combined[['date', 'hour', 'revenue']]
+
 
 def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
     """Odoo fallback for hourly sales pattern if DuckDB fails."""
@@ -227,7 +258,8 @@ def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
     
     try:
         # Validate DataFrame before Polars conversion
-        required_columns = ['order_date', 'price_subtotal_incl']
+        revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+        required_columns = ['order_date', revenue_col]
         missing_cols = [col for col in required_columns if col not in df_pandas.columns]
         if missing_cols:
             print(f"Missing required columns: {missing_cols}")
@@ -250,14 +282,14 @@ def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
         
         # Clean data for Polars conversion - remove problematic columns
         # Only keep columns we actually need for hourly analysis
-        columns_to_keep = ['order_date', 'price_subtotal_incl']
+        columns_to_keep = ['order_date', revenue_col]
         if 'order_id' in df_pandas.columns:
             columns_to_keep.append('order_id')
         
         df_clean = df_pandas[columns_to_keep].copy()
         
         # Ensure numeric columns are properly typed
-        df_clean['price_subtotal_incl'] = pd.to_numeric(df_clean['price_subtotal_incl'], errors='coerce').fillna(0)
+        df_clean[revenue_col] = pd.to_numeric(df_clean[revenue_col], errors='coerce').fillna(0)
         
         # Convert to Polars with explicit schema handling
         df = pl.from_pandas(df_clean)
@@ -275,7 +307,7 @@ def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
             df
             .group_by('hour')
             .agg([
-                pl.col('price_subtotal_incl').sum().alias('revenue'),
+                pl.col(revenue_col).sum().alias('revenue'),
                 pl.col('order_date').n_unique().alias('transactions')
             ])
             .sort('hour')
@@ -294,6 +326,8 @@ def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
 
 def _get_hourly_sales_pattern_pandas_fallback(df_pandas) -> pd.DataFrame:
     """Pandas fallback for hourly sales pattern if Polars conversion fails."""
+    revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+
     # Convert to Bangkok timezone (UTC+7)
     df_pandas['order_date'] = pd.to_datetime(df_pandas['order_date'], errors='coerce')
     # If timezone naive, assume UTC
@@ -321,12 +355,12 @@ def _get_hourly_sales_pattern_pandas_fallback(df_pandas) -> pd.DataFrame:
     hourly = (
         df_pandas.groupby('hour')
         .agg({
-            'price_subtotal_incl': 'sum',
+            revenue_col: 'sum',
             'order_date': 'nunique'
         })
         .reset_index()
         .rename(columns={
-            'price_subtotal_incl': 'revenue',
+            revenue_col: 'revenue',
             'order_date': 'transactions'
         })
     )
@@ -373,14 +407,15 @@ def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int
     
     try:
         # Validate DataFrame before Polars conversion
-        required_columns = ['product_id', 'price_subtotal_incl', 'qty']
+        revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+        required_columns = ['product_id', revenue_col, 'qty']
         missing_cols = [col for col in required_columns if col not in df_pandas.columns]
         if missing_cols:
             print(f"Missing required columns for top products: {missing_cols}")
             return pd.DataFrame(columns=['product_name', 'category', 'quantity_sold', 'total_unit_price'])
         
         # Clean data for Polars conversion - only keep columns we need
-        columns_to_keep = ['product_id', 'price_subtotal_incl', 'qty', 'product_category']
+        columns_to_keep = ['product_id', revenue_col, 'qty', 'product_category']
         # Add product_name if available
         if 'product_id' in df_pandas.columns:
             columns_to_keep.append('product_id')
@@ -388,7 +423,7 @@ def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int
         df_clean = df_pandas[columns_to_keep].copy()
         
         # Ensure numeric columns are properly typed
-        df_clean['price_subtotal_incl'] = pd.to_numeric(df_clean['price_subtotal_incl'], errors='coerce').fillna(0)
+        df_clean[revenue_col] = pd.to_numeric(df_clean[revenue_col], errors='coerce').fillna(0)
         df_clean['qty'] = pd.to_numeric(df_clean['qty'], errors='coerce').fillna(0)
         
         # Convert to Polars with explicit schema handling
@@ -399,7 +434,7 @@ def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int
             df
             .group_by(['product_id', 'product_category'])
             .agg([
-                pl.col('price_subtotal_incl').sum().alias('total_unit_price'),
+                pl.col(revenue_col).sum().alias('total_unit_price'),
                 pl.col('qty').sum().alias('quantity_sold')
             ])
             .sort('total_unit_price', descending=True)
@@ -433,6 +468,8 @@ def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int
 
 def _get_top_products_pandas_fallback(df_pandas, limit: int = 20) -> pd.DataFrame:
     """Pandas fallback for top products if Polars conversion fails."""
+    revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+
     # Group by product_id and category using pandas
     group_cols = ['product_id']
     if 'product_category' in df_pandas.columns:
@@ -441,12 +478,12 @@ def _get_top_products_pandas_fallback(df_pandas, limit: int = 20) -> pd.DataFram
     top_products = (
         df_pandas.groupby(group_cols)
         .agg({
-            'price_subtotal_incl': 'sum',
+            revenue_col: 'sum',
             'qty': 'sum'
         })
         .reset_index()
         .rename(columns={
-            'price_subtotal_incl': 'total_unit_price',
+            revenue_col: 'total_unit_price',
             'qty': 'quantity_sold'
         })
     )

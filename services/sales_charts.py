@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 import pandas as pd
 from datetime import date
 
-from services.sales_metrics import get_sales_trends_data, get_revenue_comparison, get_hourly_sales_pattern
+from services.sales_metrics import get_sales_trends_data, get_revenue_comparison, get_hourly_sales_pattern, get_hourly_sales_heatmap_data
 
 
 def build_revenue_trend_chart(start_date: date, end_date: date, period: str = 'daily') -> go.Figure:
@@ -395,19 +395,9 @@ def build_hourly_heatmap_chart(start_date: date, end_date: date) -> go.Figure:
     Returns:
         Plotly figure object with heatmap
     """
-    # Collect hourly data for each day in the range
-    all_data = []
-    current_date = start_date
-    
-    while current_date <= end_date:
-        hourly_data = get_hourly_sales_pattern(current_date)
-        if not hourly_data.empty:
-            # Add date column for y-axis
-            hourly_data['date'] = current_date.strftime('%Y-%m-%d')
-            all_data.append(hourly_data)
-        current_date += pd.Timedelta(days=1)
-    
-    if not all_data:
+    heatmap_df = get_hourly_sales_heatmap_data(start_date, end_date)
+
+    if heatmap_df.empty:
         # Create empty chart
         fig = go.Figure()
         fig.add_annotation(
@@ -423,12 +413,12 @@ def build_hourly_heatmap_chart(start_date: date, end_date: date) -> go.Figure:
             height=400
         )
         return fig
-    
-    # Combine all data
-    combined_df = pd.concat(all_data, ignore_index=True)
+
+    heatmap_df = heatmap_df.copy()
+    heatmap_df['date'] = pd.to_datetime(heatmap_df['date']).dt.strftime('%Y-%m-%d')
     
     # Create pivot table for heatmap
-    heatmap_data = combined_df.pivot_table(
+    heatmap_data = heatmap_df.pivot_table(
         values='revenue', 
         index='date', 
         columns='hour', 

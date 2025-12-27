@@ -30,10 +30,11 @@ services:
       - ODOO_DB=${ODOO_DB}
       - ODOO_USERNAME=${ODOO_USERNAME}
       - ODOO_API_KEY=${ODOO_API_KEY}
+      - DATA_LAKE_ROOT=/data-lake
     volumes:
-      - D:\data-lake:/app/data-lake
-      - D:\logs:/app/logs
       - .:/app
+      - D:\data-lake:/data-lake
+      - D:\logs:/app/logs
     depends_on:
       redis:
         condition: service_healthy
@@ -54,10 +55,11 @@ services:
       - ODOO_DB=${ODOO_DB}
       - ODOO_USERNAME=${ODOO_USERNAME}
       - ODOO_API_KEY=${ODOO_API_KEY}
+      - DATA_LAKE_ROOT=/data-lake
     volumes:
-      - D:\data-lake:/app/data-lake
-      - D:\logs:/app/logs
       - .:/app
+      - D:\data-lake:/data-lake
+      - D:\logs:/app/logs
       - celerybeat_data:/var/run/celery
     depends_on:
       redis:
@@ -75,9 +77,9 @@ services:
       - REDIS_CONNECTION_POOL_SIZE=10
       - REDIS_MAX_CONNECTIONS=20
     volumes:
-      - D:\data-lake:/app/data-lake
-      - D:\logs:/app/logs
       - .:/app
+      - D:\data-lake:/data-lake
+      - D:\logs:/app/logs
       - ./assets:/app/assets
     depends_on:
       redis:

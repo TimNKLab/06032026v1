@@ -115,21 +115,24 @@ def layout():
                         dmc.Paper(
                             dmc.Stack([
                                 dmc.Text('Revenue Trend', fw=600, mb='md'),
-                                dmc.Box(
+                                dmc.Container(
                                     dcc.Graph(
                                         id='sales-revenue-trend',
                                         figure={},  # Placeholder
                                         config={'displayModeBar': False},
-                                        style={'height': {'base': '300px', 'sm': '400px', 'lg': '500px'}},
-                                        responsive=True,
-                                    )
+                                        style={'height': '100%', 'width': '100%'},
+                                    ),
+                                    p=0,
+                                    fluid=True,
+                                    style={'height': '100%'}
                                 )
                             ]),
                             p='md',
                             radius='md',
                             withBorder=True,
+                            style={'height': '100%'}
                         ),
-                        span={"base": 12, "sm": 8},  
+                        span={"base": 12, "sm": 8},
                     ),
                     dmc.GridCol(
                         dmc.Paper(
