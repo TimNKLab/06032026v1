@@ -189,7 +189,6 @@ def get_pos_order_lines_for_date(target_date):
                 'qty': qty,
                 'price_subtotal_incl': price_subtotal_incl,
                 'discount_amount': discount_amount,
-                'price_paid': price_subtotal_incl - discount_amount,
                 'product_categ_id': category_by_product.get(product_id),
                 'x_studio_brand_id': brand_by_product.get(product_id),
             })
@@ -298,6 +297,5 @@ def create_fact_dataframe(lines):
     df['qty'] = pd.to_numeric(df['qty'], errors='coerce').fillna(0)
     df['price_subtotal_incl'] = pd.to_numeric(df.get('price_subtotal_incl', 0), errors='coerce').fillna(0)
     df['discount_amount'] = pd.to_numeric(df.get('discount_amount', 0), errors='coerce').fillna(0)
-    df['price_paid'] = pd.to_numeric(df.get('price_paid', df['price_subtotal_incl'] - df['discount_amount']), errors='coerce').fillna(0)
     
     return df

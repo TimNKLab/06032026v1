@@ -25,8 +25,8 @@ def _summaries_for_dataframe(df):
         # Fallback to pandas if Polars conversion fails
         print(f"Polars conversion failed: {e}, falling back to pandas")
         return _summaries_for_dataframe_pandas_fallback(df)
-    
-    revenue_col = 'price_paid' if 'price_paid' in df_pl.columns else 'price_subtotal_incl'
+
+    revenue_col = 'price_subtotal_incl'
 
     # Total aggregations using Polars
     total_amount = df_pl[revenue_col].sum()
@@ -84,7 +84,7 @@ def _summaries_for_dataframe_pandas_fallback(df):
     if df.empty:
         return 0, 0, {}
 
-    revenue_col = 'price_paid' if 'price_paid' in df.columns else 'price_subtotal_incl'
+    revenue_col = 'price_subtotal_incl'
     
     # Total aggregations
     total_amount = df[revenue_col].sum()

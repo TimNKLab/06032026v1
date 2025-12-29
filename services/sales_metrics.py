@@ -48,7 +48,7 @@ def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, perio
         print(f"Polars conversion failed in fallback: {e}, using pandas")
         return _get_sales_trends_data_pandas_fallback(df_pandas, start_date, end_date, period)
 
-    revenue_col = 'price_paid' if 'price_paid' in df.columns else 'price_subtotal_incl'
+    revenue_col = 'price_subtotal_incl'
     
     # Add period grouping using Polars expressions
     if period == 'daily':
@@ -91,7 +91,7 @@ def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, perio
 
 def _get_sales_trends_data_pandas_fallback(df, start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Pandas fallback for sales trends if Polars conversion fails."""
-    revenue_col = 'price_paid' if 'price_paid' in df.columns else 'price_subtotal_incl'
+    revenue_col = 'price_subtotal_incl'
     # Add period grouping using pandas
     if period == 'daily':
         df['date_group'] = df['order_date'].dt.date
@@ -258,7 +258,7 @@ def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
     
     try:
         # Validate DataFrame before Polars conversion
-        revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+        revenue_col = 'price_subtotal_incl'
         required_columns = ['order_date', revenue_col]
         missing_cols = [col for col in required_columns if col not in df_pandas.columns]
         if missing_cols:
@@ -326,7 +326,7 @@ def _get_hourly_sales_pattern_odoo_fallback(target_date: date) -> pd.DataFrame:
 
 def _get_hourly_sales_pattern_pandas_fallback(df_pandas) -> pd.DataFrame:
     """Pandas fallback for hourly sales pattern if Polars conversion fails."""
-    revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+    revenue_col = 'price_subtotal_incl'
 
     # Convert to Bangkok timezone (UTC+7)
     df_pandas['order_date'] = pd.to_datetime(df_pandas['order_date'], errors='coerce')
@@ -407,7 +407,7 @@ def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int
     
     try:
         # Validate DataFrame before Polars conversion
-        revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+        revenue_col = 'price_subtotal_incl'
         required_columns = ['product_id', revenue_col, 'qty']
         missing_cols = [col for col in required_columns if col not in df_pandas.columns]
         if missing_cols:
@@ -468,7 +468,7 @@ def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int
 
 def _get_top_products_pandas_fallback(df_pandas, limit: int = 20) -> pd.DataFrame:
     """Pandas fallback for top products if Polars conversion fails."""
-    revenue_col = 'price_paid' if 'price_paid' in df_pandas.columns else 'price_subtotal_incl'
+    revenue_col = 'price_subtotal_incl'
 
     # Group by product_id and category using pandas
     group_cols = ['product_id']

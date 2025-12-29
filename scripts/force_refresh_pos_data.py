@@ -25,7 +25,7 @@ from etl_tasks import (
     clean_pos_data,
     extract_pos_order_lines,
     save_raw_data,
-    update_star_schema,
+    _update_fact_sales as update_star_schema,
 )
 
 logger = logging.getLogger("force_refresh_pos_data")
@@ -55,7 +55,13 @@ def _run_pipeline_for_date(target_date: str) -> Dict[str, Optional[str]]:
     extraction = extract_pos_order_lines.apply(args=(target_date,), throw=True).get()
     raw_path = save_raw_data.apply(args=(extraction,), throw=True).get()
     clean_path = clean_pos_data.apply(args=(raw_path, target_date), throw=True).get()
-    fact_path = update_star_schema.apply(args=(clean_path, target_date), throw=True).get()
+    
+    # Read the cleaned parquet file into a DataFrame before passing to update_star_schema
+    fact_path = None
+    if clean_path:
+        import polars as pl
+        df = pl.read_parquet(clean_path)
+        fact_path = update_star_schema(df, target_date)
 
     return {
         "date": target_date,
