@@ -37,6 +37,19 @@ def get_pos_order_lines_for_date(target_date):
         ('date_order', '<', end_dt.strftime('%Y-%m-%d %H:%M:%S')),
     ]
 
+    # Odoo field name differs by version/customization.
+    # Some instances expose payments via `payment_ids` or `payments_ids` instead of `payments_id`.
+    payment_field = None
+    try:
+        PosOrderModel = odoo.env['pos.order']
+        meta = PosOrderModel.fields_get(['payments_id', 'payments_ids', 'payment_ids'])
+        for cand in ['payments_id', 'payments_ids', 'payment_ids']:
+            if cand in meta:
+                payment_field = cand
+                break
+    except Exception:
+        payment_field = None
+
     order_fields = [
         'date_order',
         'config_id',
@@ -45,8 +58,10 @@ def get_pos_order_lines_for_date(target_date):
         'name',
         'amount_total',
         'lines',
-        'payments_id',
     ]
+
+    if payment_field:
+        order_fields.append(payment_field)
 
     try:
         PosOrder = odoo.env['pos.order']
@@ -69,10 +84,12 @@ def get_pos_order_lines_for_date(target_date):
             order_ids.add(oid)
         for lid in _extract_o2m_ids(order.get('lines')):
             line_ids.add(lid)
-        for pid in _extract_o2m_ids(order.get('payments_id')):
-            payment_ids.add(pid)
-            if isinstance(oid, int):
-                payment_id_to_order_id[pid] = oid
+
+        if payment_field:
+            for pid in _extract_o2m_ids(order.get(payment_field)):
+                payment_ids.add(pid)
+                if isinstance(oid, int):
+                    payment_id_to_order_id[pid] = oid
 
     if not line_ids:
         return []

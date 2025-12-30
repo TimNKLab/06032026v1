@@ -49,6 +49,58 @@ class DuckDBManager:
         """Setup DuckDB views - fails fast on errors."""
         fact_path, dim_products, dim_categories, dim_brands = self._get_data_paths()
 
+        def _parquet_columns(parquet_path: str) -> set:
+            try:
+                rows = conn.execute(
+                    f"DESCRIBE SELECT * FROM read_parquet('{parquet_path}')"
+                ).fetchall()
+                # DESCRIBE returns rows like: (column_name, column_type, null, key, default, extra)
+                return {r[0] for r in rows if r and r[0]}
+            except Exception:
+                return set()
+
+        products_cols = _parquet_columns(dim_products)
+        categories_cols = _parquet_columns(dim_categories)
+        brands_cols = _parquet_columns(dim_brands)
+
+        product_name_col = (
+            "product_name" if "product_name" in products_cols
+            else "name" if "name" in products_cols
+            else None
+        )
+        product_category_col = (
+            "product_category" if "product_category" in products_cols
+            else "category_name" if "category_name" in products_cols
+            else None
+        )
+        product_parent_category_col = (
+            "product_parent_category" if "product_parent_category" in products_cols
+            else "parent_category_name" if "parent_category_name" in products_cols
+            else None
+        )
+        product_brand_col = (
+            "product_brand" if "product_brand" in products_cols
+            else "brand_name" if "brand_name" in products_cols
+            else None
+        )
+
+        category_leaf_col = (
+            "product_category" if "product_category" in categories_cols
+            else "category_name" if "category_name" in categories_cols
+            else None
+        )
+        category_parent_col = (
+            "product_parent_category" if "product_parent_category" in categories_cols
+            else "parent_category_name" if "parent_category_name" in categories_cols
+            else None
+        )
+
+        brand_name_col = (
+            "product_brand" if "product_brand" in brands_cols
+            else "brand_name" if "brand_name" in brands_cols
+            else None
+        )
+
         # Use TRY_CAST and COALESCE in view definition instead of DESCRIBE
         # This handles missing columns gracefully at query time
         conn.execute(f"""
@@ -70,19 +122,28 @@ class DuckDBManager:
 
         conn.execute(f"""
             CREATE OR REPLACE VIEW dim_products AS
-            SELECT product_id, product_name, product_category, product_parent_category, product_brand
-            FROM read_parquet('{dim_products}')
+            SELECT
+                product_id,
+                {f"COALESCE({product_name_col}, '')" if product_name_col else "''"} AS product_name,
+                {product_category_col if product_category_col else "NULL"} AS product_category,
+                {product_parent_category_col if product_parent_category_col else "NULL"} AS product_parent_category,
+                {f"COALESCE({product_brand_col}, '')" if product_brand_col else "''"} AS product_brand
+            FROM read_parquet('{dim_products}', union_by_name=True)
         """)
 
         conn.execute(f"""
             CREATE OR REPLACE VIEW dim_categories AS
-            SELECT product_category, product_parent_category
-            FROM read_parquet('{dim_categories}')
+            SELECT
+                {category_leaf_col if category_leaf_col else "NULL"} AS product_category,
+                {category_parent_col if category_parent_col else "NULL"} AS product_parent_category
+            FROM read_parquet('{dim_categories}', union_by_name=True)
         """)
 
         conn.execute(f"""
             CREATE OR REPLACE VIEW dim_brands AS
-            SELECT product_brand FROM read_parquet('{dim_brands}')
+            SELECT
+                {f"COALESCE({brand_name_col}, '')" if brand_name_col else "''"} AS product_brand
+            FROM read_parquet('{dim_brands}', union_by_name=True)
         """)
 
         logger.info("DuckDB views created successfully")

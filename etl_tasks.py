@@ -856,15 +856,13 @@ def _merge_dimension_table(new_df: pl.DataFrame, file_path: str, merge_key: str)
         
     except Exception as e:
         logger.error(f"Error merging dimension {file_path}: {e}", exc_info=True)
-
-# ============================================================================
 # DIMENSION REFRESH WITH INCREMENTAL UPDATES
 # ============================================================================
 
 @app.task
 def refresh_dimensions_incremental(targets: Optional[List[str]] = None) -> Dict[str, Any]:
     """Incrementally refresh dimensions based on write_date (only changed records)."""
-    valid_targets = {"products", "categories", "brands", "cashiers"}
+    valid_targets = {"products", "categories", "brands", "cashiers", "vendors"}
     target_set = None
     
     if targets:
@@ -892,6 +890,10 @@ def refresh_dimensions_incremental(targets: Optional[List[str]] = None) -> Dict[
             if not target_set or 'cashiers' in target_set:
                 count = _refresh_cashiers_incremental(odoo)
                 results['cashiers'] = count
+            
+            if not target_set or 'vendors' in target_set:
+                count = _refresh_vendors_incremental(odoo)
+                results['vendors'] = count
         
         return {
             "updated": True,
@@ -903,201 +905,16 @@ def refresh_dimensions_incremental(targets: Optional[List[str]] = None) -> Dict[
         logger.error(f"Error refreshing dimensions: {e}", exc_info=True)
         return {"updated": False, "error": str(e)}
 
-def _refresh_products_incremental(odoo) -> int:
-    """Incrementally refresh products dimension."""
-    last_sync = ETLMetadata.get_dimension_last_sync('products')
-    
-    Product = odoo.env['product.product']
-    
-    # Build domain for changed records
-    domain = [('sale_ok', '=', True)]
-    if last_sync:
-        domain.append(('write_date', '>', last_sync.strftime('%Y-%m-%d %H:%M:%S')))
-    
-    fields = ['id', 'name', 'categ_id', 'x_studio_brand_id']
-    products = Product.search_read(domain, fields)
-    
-    if not products:
-        logger.info("No product changes to sync")
-        return 0
-    
-    # Process products
-    processed = []
-    for prod in products:
-        categ_value = prod.get('categ_id')
-        categ_name = safe_extract_m2o(categ_value, get_id=False)
-        
-        parent_category = None
-        leaf_category = None
-        if isinstance(categ_name, str):
-            segments = [s.strip() for s in categ_name.split('/') if s.strip()]
-            if segments:
-                parent_category = segments[0]
-                leaf_category = segments[-1]
-        
-        brand_value = prod.get('x_studio_brand_id')
-        brand_name = safe_extract_m2o(brand_value, get_id=False) or 'Unknown'
-        brand_id = safe_extract_m2o(brand_value, get_id=True)
-        
-        processed.append({
-            'product_id': prod['id'],
-            'product_name': prod.get('name'),
-            'product_category': leaf_category,
-            'product_parent_category': parent_category,
-            'product_brand': brand_name,
-            'product_brand_id': brand_id,
-        })
-        
-        # Invalidate cache
-        cache_delete(f'product:{prod["id"]}')
-    
-    # Merge with existing
-    new_df = pl.DataFrame(processed)
-    _merge_dimension_table(
-        new_df,
-        f'{STAR_SCHEMA_PATH}/dim_products.parquet',
-        merge_key='product_id'
-    )
-    
-    ETLMetadata.set_dimension_last_sync('products', datetime.now())
-    logger.info(f"Synced {len(products)} products")
-    
-    return len(products)
-
-def _refresh_categories_incremental(odoo) -> int:
-    """Incrementally refresh categories dimension."""
-    last_sync = ETLMetadata.get_dimension_last_sync('categories')
-    
-    Category = odoo.env['product.category']
-    
-    domain = []
-    if last_sync:
-        domain.append(('write_date', '>', last_sync.strftime('%Y-%m-%d %H:%M:%S')))
-    
-    categories = Category.search_read(domain, ['id', 'name', 'parent_id'])
-    
-    if not categories:
-        logger.info("No category changes to sync")
-        return 0
-    
-    processed = []
-    for cat in categories:
-        parent_id = safe_extract_m2o(cat.get('parent_id'))
-        
-        processed.append({
-            'category_id': cat['id'],
-            'category_name': cat.get('name'),
-            'parent_category_id': parent_id,
-        })
-    
-    new_df = pl.DataFrame(processed)
-    _merge_dimension_table(
-        new_df,
-        f'{STAR_SCHEMA_PATH}/dim_categories.parquet',
-        merge_key='category_id'
-    )
-    
-    ETLMetadata.set_dimension_last_sync('categories', datetime.now())
-    logger.info(f"Synced {len(categories)} categories")
-    
-    return len(categories)
-
-def _refresh_brands_incremental(odoo) -> int:
-    """Incrementally refresh brands dimension."""
-    brand_file_path = f'{STAR_SCHEMA_PATH}/dim_brands.parquet'
-    last_sync = ETLMetadata.get_dimension_last_sync('brands')
-
-    required_columns = {
-        'brand_id',
-        'brand_name',
-        'parent_brand_id',
-        'parent_brand_name',
-        'principal_id',
-        'principal_name',
-        'entity_ids',
-        'entity_names',
-        'write_date',
-    }
-
-    if not os.path.exists(brand_file_path):
-        logger.warning("Brand dimension parquet missing; forcing full sync")
-        last_sync = None
-    else:
-        try:
-            existing_cols = set(pl.read_parquet(brand_file_path, n_rows=1).columns)
-            if not required_columns.issubset(existing_cols):
-                logger.info("Brand dimension missing new fields; forcing full resync")
-                last_sync = None
-        except Exception as read_err:
-            logger.warning(f"Failed to inspect existing brand dimension: {read_err}; forcing full sync")
-            last_sync = None
-
-    if 'x_product_brand' not in odoo.env:
-        logger.warning("Brand model not found")
-        return 0
-    
-    Brand = odoo.env['x_product_brand']
-    
-    domain = []
-    if last_sync:
-        domain.append(('write_date', '>', last_sync.strftime('%Y-%m-%d %H:%M:%S')))
-    
-    fields = [
-        'id',
-        'x_name',
-        'x_studio_parent_brand_id',
-        'x_studio_partner_id',
-        'x_studio_entities_ids',
-        'write_date',
-    ]
-    brands = Brand.search_read(domain, fields)
-    
-    if not brands:
-        logger.info("No brand changes to sync")
-        return 0
-    
-    processed = []
-    for brand in brands:
-        parent = format_m2o(brand.get('x_studio_parent_brand_id'))
-        principal = format_m2o(brand.get('x_studio_partner_id'))
-        entities = format_m2m(brand.get('x_studio_entities_ids', []))
-
-        processed.append({
-            'brand_id': brand['id'],
-            'brand_name': brand.get('x_name'),
-            'parent_brand_id': parent['id'],
-            'parent_brand_name': parent['name'],
-            'principal_id': principal['id'],
-            'principal_name': principal['name'],
-            'entity_ids': [entity['id'] for entity in entities],
-            'entity_names': [entity['name'] for entity in entities],
-            'write_date': brand.get('write_date'),
-        })
-        
-    new_df = pl.DataFrame(processed)
-    _merge_dimension_table(
-        new_df,
-        f'{STAR_SCHEMA_PATH}/dim_brands.parquet',
-        merge_key='brand_id'
-    )
-    
-    ETLMetadata.set_dimension_last_sync('brands', datetime.now())
-    logger.info(f"Synced {len(brands)} brands")
-    
-    return len(brands)
-
 def _refresh_cashiers_incremental(odoo) -> int:
     """Incrementally refresh cashiers dimension from hr.employee model."""
     last_sync = ETLMetadata.get_dimension_last_sync('cashiers')
     
-    # Check if hr.employee model exists
     if 'hr.employee' not in odoo.env:
         logger.warning("hr.employee model not found")
         return 0
     
     Employee = odoo.env['hr.employee']
     
-    # Build domain for changed records with specific job positions
     domain = [
         ('job_id', 'in', ['Cashier', 'Team Leader']),
         ('active', '=', True)
@@ -1112,7 +929,6 @@ def _refresh_cashiers_incremental(odoo) -> int:
         logger.info("No cashier/employee changes to sync")
         return 0
     
-    # Process employees
     processed = []
     for emp in employees:
         job_id = safe_extract_m2o(emp.get('job_id'), get_id=False)
@@ -1123,7 +939,6 @@ def _refresh_cashiers_incremental(odoo) -> int:
             'job_id': job_id,
         })
     
-    # Merge with existing
     new_df = pl.DataFrame(processed)
     _merge_dimension_table(
         new_df,
@@ -1136,9 +951,76 @@ def _refresh_cashiers_incremental(odoo) -> int:
     
     return len(employees)
 
-# ============================================================================
-# BACKWARD COMPATIBILITY WRAPPER
-# ============================================================================
+def _refresh_vendors_incremental(odoo) -> int:
+    """Incrementally refresh vendors dimension from res.partner model."""
+    last_sync = ETLMetadata.get_dimension_last_sync('vendors')
+
+    if 'res.partner' not in odoo.env:
+        logger.warning("res.partner model not found")
+        return 0
+
+    Partner = odoo.env['res.partner']
+
+    domain = ['|', ('is_company', '=', True), ('supplier_rank', '>', 0)]
+    if last_sync:
+        domain.append(('write_date', '>', last_sync.strftime('%Y-%m-%d %H:%M:%S')))
+
+    fields = ['id', 'complete_name', 'child_ids', 'user_id', 'write_date']
+    vendors = Partner.search_read(domain, fields)
+
+    if not vendors:
+        logger.info("No vendor changes to sync")
+        return 0
+
+    all_child_ids: Set[int] = set()
+    for vendor in vendors:
+        all_child_ids.update(extract_o2m_ids(vendor.get('child_ids')))
+
+    child_contacts: Dict[int, str] = {}
+    if all_child_ids:
+        child_records = Partner.search_read(
+            [('id', 'in', list(all_child_ids))],
+            ['id', 'name']
+        )
+        child_contacts = {child['id']: child.get('name') for child in child_records}
+
+    processed = []
+    for vendor in vendors:
+        child_ids = extract_o2m_ids(vendor.get('child_ids'))
+        contact_names = [str(child_contacts.get(child_id, '')) for child_id in child_ids]  # Ensure all values are strings
+        
+        processed.append({
+            'vendor_id': int(vendor['id']),
+            'name': str(vendor.get('complete_name', '')),
+            'contact_ids': child_ids,
+            'contact_names': contact_names,
+            'salesperson_id': int(safe_extract_m2o(vendor.get('user_id'), get_id=True) or 0),
+            'salesperson_name': str(safe_extract_m2o(vendor.get('user_id'), get_id=False) or ''),
+            'write_date': str(vendor.get('write_date', '')),
+        })
+
+    # Create schema explicitly to ensure consistent types
+    schema = {
+        'vendor_id': pl.Int64,
+        'name': pl.Utf8,
+        'contact_ids': pl.List(pl.Int64),
+        'contact_names': pl.List(pl.Utf8),
+        'salesperson_id': pl.Int64,
+        'salesperson_name': pl.Utf8,
+        'write_date': pl.Utf8
+    }
+    
+    new_df = pl.DataFrame(processed, schema=schema)
+    _merge_dimension_table(
+        new_df,
+        f'{STAR_SCHEMA_PATH}/dim_vendors.parquet',
+        merge_key='vendor_id'
+    )
+
+    ETLMetadata.set_dimension_last_sync('vendors', datetime.now())
+    logger.info(f"Synced {len(vendors)} vendors")
+
+    return len(vendors)
 
 @app.task
 def refresh_dimension_tables(start_date: Optional[str] = None, 
