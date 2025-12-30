@@ -135,6 +135,44 @@ docker exec nkdash-celery-worker-1 python -c "import polars as pl; df = pl.read_
 
 ## Troubleshooting
 
+### Purging the Data Lake and Resetting Metadata
+Use these commands from the project root when you need a full rebuild. They remove existing parquet layers (fact, clean, raw) and reset ETL metadata—the Docker bind mount ensures `/data-lake` maps to `D:\data-lake` on Windows.
+
+```powershell
+# Delete star-schema fact partitions
+docker-compose run --rm celery-worker bash -c "
+  rm -rf /data-lake/star-schema/fact_sales &&
+  mkdir -p /data-lake/star-schema/fact_sales
+"
+
+# Delete cleaned POS partitions
+docker-compose run --rm celery-worker bash -c "
+  rm -rf /data-lake/clean/pos_order_lines &&
+  mkdir -p /data-lake/clean/pos_order_lines
+"
+
+# Delete raw POS extracts
+docker-compose run --rm celery-worker bash -c "
+  rm -rf /data-lake/raw/pos_order_lines &&
+  mkdir -p /data-lake/raw/pos_order_lines
+"
+
+# Reset ETL metadata baseline (adjust date if needed)
+docker-compose run --rm celery-worker bash -c "
+  python - <<'PY'
+import json, os
+metadata_file = '/data-lake/metadata/etl_status.json'
+os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
+data = {'last_processed_date': '2023-01-01', 'last_updated': '2023-01-01T00:00:00'}
+with open(metadata_file, 'w', encoding='utf-8') as fh:
+    json.dump(data, fh, indent=2)
+print('Metadata reset to 2023-01-01')
+PY
+"
+```
+
+After purging, rerun the desired ETL range (e.g., via `date_range_etl_pipeline`) to repopulate all layers.
+
 ### Common Issues
 1. **Connection Errors**
    ```bash

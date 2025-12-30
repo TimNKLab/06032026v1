@@ -235,7 +235,8 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
         COALESCE(SUM(f.revenue), 0) as total_unit_price
     FROM fact_sales f
     LEFT JOIN dim_products p ON f.product_id = p.product_id
-    WHERE f.date BETWEEN '{start_str}' AND '{end_str}'
+    WHERE f.date >= TIMESTAMP '{start_str} 00:00:00'
+      AND f.date < TIMESTAMP '{end_str} 23:59:59.999'
     GROUP BY p.product_id, p.product_brand, p.product_category
     ORDER BY total_unit_price DESC
     LIMIT {limit}
@@ -418,7 +419,11 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
     try:
         # Get summary
         summary_result = conn.execute(summary_query).fetchone()
-        current_revenue, current_quantity = summary_result or (0, 0)
+        summary_revenue, summary_quantity = summary_result or (0, 0)
+
+        # DuckDB returns None when SUM() has no input rows; guard before casting.
+        current_revenue = float(summary_revenue or 0)
+        current_quantity = float(summary_quantity or 0)
         
         # Get categories
         category_results = conn.execute(category_query).fetchdf()
@@ -426,7 +431,7 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
         for _, row in category_results.iterrows():
             parent = row['product_parent_category'] or 'Unknown'
             child = row['product_category'] or 'Unknown'
-            amount = row['revenue']
+            amount = float(row['revenue'] or 0)
             
             child_map = categories_nested.setdefault(parent, {})
             child_map[child] = child_map.get(child, 0) + amount
@@ -438,7 +443,7 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
             parent = row['product_parent_category'] or 'Unknown'
             child = row['product_category'] or 'Unknown'
             brand = row['product_brand'] or 'Unknown'
-            amount = row['revenue']
+            amount = float(row['revenue'] or 0)
             
             brand_map = brands_nested.setdefault(parent, {})
             child_map = brand_map.setdefault(child, {})
