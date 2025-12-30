@@ -1,471 +1,280 @@
 import duckdb
 import os
+import logging
+import threading
 from datetime import date, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Optional
+from functools import lru_cache
 import pandas as pd
 
+logger = logging.getLogger(__name__)
+
+
 class DuckDBManager:
-    _instance = None
-    _connection = None
-    
+    _instance: Optional['DuckDBManager'] = None
+    _connection: Optional[duckdb.DuckDBPyConnection] = None
+    _lock = threading.Lock()
+    _initialized = False
+
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
         return cls._instance
-    
-    def get_connection(self):
+
+    def get_connection(self) -> duckdb.DuckDBPyConnection:
         if self._connection is None:
-            # Use an in-memory DuckDB instance with write access so views can be created
-            self._connection = duckdb.connect(database=':memory:')
-            self._setup_views()
+            with self._lock:
+                if self._connection is None:
+                    conn = duckdb.connect(database=':memory:')
+                    self._setup_views(conn)  # Setup before assignment
+                    self._connection = conn
+                    self._initialized = True
         return self._connection
-    
-    def _setup_views(self):
-        """Setup DuckDB views for star schema tables."""
-        conn = self._connection
-        
-        # Paths to star schema data
-        data_lake_path = os.environ.get('DATA_LAKE_ROOT', os.environ.get('DATA_LAKE_PATH', '/app/data-lake'))
-        fact_path = f"{data_lake_path}/star-schema/fact_sales"
-        dim_products_path = f"{data_lake_path}/star-schema/dim_products.parquet"
-        dim_categories_path = f"{data_lake_path}/star-schema/dim_categories.parquet"
-        dim_brands_path = f"{data_lake_path}/star-schema/dim_brands.parquet"
-        
-        # Create views for fact and dimension tables
-        try:
-            # Fact sales view (partitioned by date)
-            fact_source = f"read_parquet('{fact_path}/*.parquet', union_by_name=True)"
 
-            described_cols = []
-            try:
-                described = conn.execute(f"DESCRIBE SELECT * FROM {fact_source}").fetchall()
-                described_cols = [row[0] for row in described]
-            except Exception:
-                described_cols = []
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _get_data_paths() -> tuple:
+        """Cache data paths to avoid repeated env lookups."""
+        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/app/data-lake')
+        return (
+            f"{data_lake}/star-schema/fact_sales",
+            f"{data_lake}/star-schema/dim_products.parquet",
+            f"{data_lake}/star-schema/dim_categories.parquet",
+            f"{data_lake}/star-schema/dim_brands.parquet",
+        )
 
-            def _col_or_null(col_name: str, cast_sql: str) -> str:
-                return col_name if col_name in described_cols else f"CAST(NULL AS {cast_sql}) AS {col_name}"
+    def _setup_views(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """Setup DuckDB views - fails fast on errors."""
+        fact_path, dim_products, dim_categories, dim_brands = self._get_data_paths()
 
-            order_id_expr = _col_or_null('order_id', 'BIGINT')
-            order_ref_expr = _col_or_null('order_ref', 'VARCHAR')
-            pos_config_id_expr = _col_or_null('pos_config_id', 'BIGINT')
-            cashier_id_expr = _col_or_null('cashier_id', 'BIGINT')
-            customer_id_expr = _col_or_null('customer_id', 'BIGINT')
-            payment_method_ids_expr = _col_or_null('payment_method_ids', 'VARCHAR')
-            line_id_expr = _col_or_null('line_id', 'BIGINT')
+        # Use TRY_CAST and COALESCE in view definition instead of DESCRIBE
+        # This handles missing columns gracefully at query time
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW fact_sales AS
+            SELECT 
+                date,
+                COALESCE(TRY_CAST(order_id AS BIGINT), 0) AS order_id,
+                COALESCE(order_ref, '') AS order_ref,
+                COALESCE(TRY_CAST(pos_config_id AS BIGINT), 0) AS pos_config_id,
+                COALESCE(TRY_CAST(cashier_id AS BIGINT), 0) AS cashier_id,
+                COALESCE(TRY_CAST(customer_id AS BIGINT), 0) AS customer_id,
+                COALESCE(payment_method_ids, '') AS payment_method_ids,
+                COALESCE(TRY_CAST(line_id AS BIGINT), 0) AS line_id,
+                product_id,
+                quantity,
+                revenue
+            FROM read_parquet('{fact_path}/*.parquet', union_by_name=True, filename=true)
+        """)
 
-            conn.execute(f"""
-                CREATE OR REPLACE VIEW fact_sales AS
-                SELECT 
-                    date,
-                    {order_id_expr},
-                    {order_ref_expr},
-                    {pos_config_id_expr},
-                    {cashier_id_expr},
-                    {customer_id_expr},
-                    {payment_method_ids_expr},
-                    {line_id_expr},
-                    product_id,
-                    quantity,
-                    revenue
-                FROM {fact_source}
-            """)
-            
-            # Dim products view (single file)
-            conn.execute(f"""
-                CREATE OR REPLACE VIEW dim_products AS
-                SELECT 
-                    product_id,
-                    product_category,
-                    product_parent_category,
-                    product_brand
-                FROM read_parquet('{dim_products_path}')
-            """)
-            
-            # Dim categories view (single file)
-            conn.execute(f"""
-                CREATE OR REPLACE VIEW dim_categories AS
-                SELECT 
-                    product_category,
-                    product_parent_category
-                FROM read_parquet('{dim_categories_path}')
-            """)
-            
-            # Dim brands view (single file)
-            conn.execute(f"""
-                CREATE OR REPLACE VIEW dim_brands AS
-                SELECT 
-                    product_brand
-                FROM read_parquet('{dim_brands_path}')
-            """)
-            
-            print("DuckDB views created successfully")
-            
-        except Exception as e:
-            print(f"Error setting up DuckDB views: {e}")
-            # Fallback to empty views
-            conn.execute("""
-                CREATE OR REPLACE VIEW fact_sales AS
-                SELECT
-                    CAST(NULL AS TIMESTAMP) AS date,
-                    CAST(NULL AS BIGINT) AS order_id,
-                    CAST(NULL AS VARCHAR) AS order_ref,
-                    CAST(NULL AS BIGINT) AS pos_config_id,
-                    CAST(NULL AS BIGINT) AS cashier_id,
-                    CAST(NULL AS BIGINT) AS customer_id,
-                    CAST(NULL AS VARCHAR) AS payment_method_ids,
-                    CAST(NULL AS BIGINT) AS line_id,
-                    CAST(NULL AS BIGINT) AS product_id,
-                    CAST(NULL AS DOUBLE) AS quantity,
-                    CAST(NULL AS DOUBLE) AS revenue
-                WHERE 1=0
-            """)
-            conn.execute("""
-                CREATE OR REPLACE VIEW dim_products AS
-                SELECT
-                    CAST(NULL AS BIGINT) AS product_id,
-                    CAST(NULL AS VARCHAR) AS product_category,
-                    CAST(NULL AS VARCHAR) AS product_parent_category,
-                    CAST(NULL AS VARCHAR) AS product_brand
-                WHERE 1=0
-            """)
-            conn.execute("""
-                CREATE OR REPLACE VIEW dim_categories AS
-                SELECT
-                    CAST(NULL AS VARCHAR) AS product_category,
-                    CAST(NULL AS VARCHAR) AS product_parent_category
-                WHERE 1=0
-            """)
-            conn.execute("""
-                CREATE OR REPLACE VIEW dim_brands AS
-                SELECT
-                    CAST(NULL AS VARCHAR) AS product_brand
-                WHERE 1=0
-            """)
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW dim_products AS
+            SELECT product_id, product_category, product_parent_category, product_brand
+            FROM read_parquet('{dim_products}')
+        """)
 
-def get_duckdb_connection():
-    """Get a reusable DuckDB connection."""
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW dim_categories AS
+            SELECT product_category, product_parent_category
+            FROM read_parquet('{dim_categories}')
+        """)
+
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW dim_brands AS
+            SELECT product_brand FROM read_parquet('{dim_brands}')
+        """)
+
+        logger.info("DuckDB views created successfully")
+
+
+# Module-level connection getter
+def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     return DuckDBManager().get_connection()
 
+
 def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
-    """Query sales trends using DuckDB."""
+    """Query sales trends - optimized with single scan."""
     conn = get_duckdb_connection()
-    
-    # Date formatting for DuckDB
-    start_str = start_date.strftime('%Y-%m-%d')
-    end_str = end_date.strftime('%Y-%m-%d')
-    
-    # Period grouping (date is stored as a timestamp)
-    if period == 'daily':
-        date_expr = "date_trunc('day', date)"
-    elif period == 'weekly':
-        date_expr = "date_trunc('week', date)"
-    elif period == 'monthly':
-        date_expr = "date_trunc('month', date)"
-    else:
+
+    trunc_map = {'daily': 'day', 'weekly': 'week', 'monthly': 'month'}
+    if period not in trunc_map:
         raise ValueError("Period must be 'daily', 'weekly', or 'monthly'")
 
-    transactions_expr = "CASE WHEN COUNT(DISTINCT order_id) = 0 THEN COUNT(*) ELSE COUNT(DISTINCT order_id) END"
-    
     query = f"""
     SELECT 
-        {date_expr} as date,
+        date_trunc('{trunc_map[period]}', date) as date,
         SUM(revenue) as revenue,
-        {transactions_expr} as transactions,
-        SUM(revenue) / NULLIF({transactions_expr}, 0) as avg_transaction_value
+        COALESCE(NULLIF(COUNT(DISTINCT order_id), 0), COUNT(*)) as transactions,
+        SUM(revenue) / NULLIF(COALESCE(NULLIF(COUNT(DISTINCT order_id), 0), COUNT(*)), 0) as avg_transaction_value
     FROM fact_sales
-    WHERE date >= TIMESTAMP '{start_str} 00:00:00'
-      AND date < TIMESTAMP '{end_str} 23:59:59.999'
-    GROUP BY {date_expr}
-    ORDER BY date
+    WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+    GROUP BY 1
+    ORDER BY 1
     """
-    
-    try:
-        result = conn.execute(query).fetchdf()
-        return result
-    except Exception as e:
-        print(f"Error querying sales trends: {e}")
-        return pd.DataFrame(columns=['date', 'revenue', 'transactions', 'avg_transaction_value'])
+    return conn.execute(query, [start_date, end_date]).fetchdf()
+
 
 def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
-    """Query hourly sales pattern using DuckDB."""
+    """Query hourly sales - pre-generates all hours in SQL."""
     conn = get_duckdb_connection()
-    
-    date_str = target_date.strftime('%Y-%m-%d')
-    
-    transactions_expr = "CASE WHEN COUNT(DISTINCT order_id) = 0 THEN COUNT(*) ELSE COUNT(DISTINCT order_id) END"
-    query = f"""
-    SELECT 
-        EXTRACT(HOUR FROM date) as hour,
-        SUM(revenue) as revenue,
-        {transactions_expr} as transactions
-    FROM fact_sales
-    WHERE date >= TIMESTAMP '{date_str} 00:00:00'
-      AND date < TIMESTAMP '{date_str} 23:59:59.999'
-      AND EXTRACT(HOUR FROM date) BETWEEN 7 AND 23
-    GROUP BY EXTRACT(HOUR FROM date)
-    ORDER BY hour
+
+    query = """
+    WITH hours AS (SELECT unnest(range(7, 24)) as hour),
+    sales AS (
+        SELECT 
+            EXTRACT(HOUR FROM date)::INT as hour,
+            SUM(revenue) as revenue,
+            COALESCE(NULLIF(COUNT(DISTINCT order_id), 0), COUNT(*)) as transactions
+        FROM fact_sales
+        WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+          AND EXTRACT(HOUR FROM date) BETWEEN 7 AND 23
+        GROUP BY 1
+    )
+    SELECT h.hour, COALESCE(s.revenue, 0) as revenue, COALESCE(s.transactions, 0) as transactions
+    FROM hours h LEFT JOIN sales s ON h.hour = s.hour
+    ORDER BY h.hour
     """
-    
-    try:
-        result = conn.execute(query).fetchdf()
-        
-        # Fill missing hours (7-23) with zeros
-        all_hours = pd.DataFrame({'hour': range(7, 24)})
-        result = all_hours.merge(result, on='hour', how='left').fillna(0)
-        
-        return result
-    except Exception as e:
-        print(f"Error querying hourly sales pattern: {e}")
-        return pd.DataFrame(columns=['hour', 'revenue', 'transactions'])
+    return conn.execute(query, [target_date, target_date]).fetchdf()
+
 
 def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
-    """Query top products by revenue using DuckDB."""
+    """Query top products - single optimized query."""
     conn = get_duckdb_connection()
-    
-    start_str = start_date.strftime('%Y-%m-%d')
-    end_str = end_date.strftime('%Y-%m-%d')
-    
-    query = f"""
+
+    query = """
     SELECT 
-        p.product_id,
-        p.product_brand as brand,
-        p.product_category as category,
+        'Product ' || p.product_id::VARCHAR as product_name,
+        COALESCE(p.product_category, 'Unknown Category') as category,
         COALESCE(SUM(f.quantity), 0) as quantity_sold,
         COALESCE(SUM(f.revenue), 0) as total_unit_price
     FROM fact_sales f
     LEFT JOIN dim_products p ON f.product_id = p.product_id
-    WHERE f.date >= TIMESTAMP '{start_str} 00:00:00'
-      AND f.date < TIMESTAMP '{end_str} 23:59:59.999'
-    GROUP BY p.product_id, p.product_brand, p.product_category
+    WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
+    GROUP BY p.product_id, p.product_category
     ORDER BY total_unit_price DESC
-    LIMIT {limit}
+    LIMIT ?
     """
-    
-    try:
-        result = conn.execute(query).fetchdf()
+    return conn.execute(query, [start_date, end_date, limit]).fetchdf()
 
-        # Generate product names
-        result['product_name'] = 'Product ' + result['product_id'].astype(str)
-
-        # Handle missing categories
-        result['category'] = result['category'].fillna('Unknown Category')
-
-        result['total_unit_price'] = result['total_unit_price'].fillna(0)
-
-        return result[['product_name', 'category', 'quantity_sold', 'total_unit_price']]
-    except Exception as e:
-        print(f"Error querying top products: {e}")
-        return pd.DataFrame(columns=['product_name', 'category', 'quantity_sold', 'total_revenue'])
 
 def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
-    """Compare revenue between current and previous periods."""
+    """Compare revenue - SINGLE query for both periods using FILTER."""
     conn = get_duckdb_connection()
-    
-    start_str = start_date.strftime('%Y-%m-%d')
-    end_str = end_date.strftime('%Y-%m-%d')
-    
-    transactions_expr = "CASE WHEN COUNT(DISTINCT order_id) = 0 THEN COUNT(*) ELSE COUNT(DISTINCT order_id) END"
 
-    # Current period
-    current_query = f"""
-    SELECT 
-        COALESCE(SUM(revenue), 0) as revenue,
-        {transactions_expr} as transactions
-    FROM fact_sales
-    WHERE date >= TIMESTAMP '{start_str} 00:00:00'
-      AND date < TIMESTAMP '{end_str} 23:59:59.999'
-    """
-    
-    # Previous period (same length)
-    period_length = (end_date - start_date).days + 1
-    prev_start = start_date - timedelta(days=period_length)
+    period_days = (end_date - start_date).days + 1
+    prev_start = start_date - timedelta(days=period_days)
     prev_end = start_date - timedelta(days=1)
-    
-    prev_start_str = prev_start.strftime('%Y-%m-%d')
-    prev_end_str = prev_end.strftime('%Y-%m-%d')
-    
-    previous_query = f"""
+
+    # Combined query using FILTER - scans data only once
+    query = """
     SELECT 
-        COALESCE(SUM(revenue), 0) as revenue,
-        {transactions_expr} as transactions
+        SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as cur_rev,
+        COALESCE(NULLIF(COUNT(DISTINCT order_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
+                 COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as cur_txn,
+        SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_rev,
+        COALESCE(NULLIF(COUNT(DISTINCT order_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
+                 COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as prev_txn
     FROM fact_sales
-    WHERE date >= TIMESTAMP '{prev_start_str} 00:00:00'
-      AND date < TIMESTAMP '{prev_end_str} 23:59:59.999'
+    WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY
     """
+    
+    params = [
+        start_date, end_date, start_date, end_date, start_date, end_date,  # current
+        prev_start, prev_end, prev_start, prev_end, prev_start, prev_end,  # previous  
+        prev_start, end_date  # overall filter
+    ]
 
-    try:
-        current_result = conn.execute(current_query).fetchone() or (0, 0)
-        previous_result = conn.execute(previous_query).fetchone() or (0, 0)
+    row = conn.execute(query, params).fetchone()
+    cur_rev, cur_txn, prev_rev, prev_txn = [v or 0 for v in row]
 
-        current_revenue = current_result[0] or 0
-        current_transactions = current_result[1] or 0
-        prev_revenue = previous_result[0] or 0
-        prev_transactions = previous_result[1] or 0
-        
-        current_avg_atv = current_revenue / current_transactions if current_transactions > 0 else 0
-        prev_avg_atv = prev_revenue / prev_transactions if prev_transactions > 0 else 0
-        
-        # Calculate deltas
-        revenue_delta = current_revenue - prev_revenue
-        revenue_delta_pct = (revenue_delta / prev_revenue * 100) if prev_revenue > 0 else 0
-        
-        transactions_delta = current_transactions - prev_transactions
-        transactions_delta_pct = (transactions_delta / prev_transactions * 100) if prev_transactions > 0 else 0
-        
-        atv_delta = current_avg_atv - prev_avg_atv
-        atv_delta_pct = (atv_delta / prev_avg_atv * 100) if prev_avg_atv > 0 else 0
-        
-        return {
-            'current': {
-                'revenue': current_revenue,
-                'transactions': current_transactions,
-                'avg_transaction_value': current_avg_atv,
-            },
-            'previous': {
-                'revenue': prev_revenue,
-                'transactions': prev_transactions,
-                'avg_transaction_value': prev_avg_atv,
-            },
-            'deltas': {
-                'revenue': revenue_delta,
-                'revenue_pct': revenue_delta_pct,
-                'transactions': transactions_delta,
-                'transactions_pct': transactions_delta_pct,
-                'avg_transaction_value': atv_delta,
-                'avg_transaction_value_pct': atv_delta_pct,
-            }
+    cur_atv = cur_rev / cur_txn if cur_txn else 0
+    prev_atv = prev_rev / prev_txn if prev_txn else 0
+
+    def calc_delta(cur: float, prev: float) -> tuple:
+        delta = cur - prev
+        pct = (delta / prev * 100) if prev else 0
+        return delta, pct
+
+    rev_d, rev_p = calc_delta(cur_rev, prev_rev)
+    txn_d, txn_p = calc_delta(cur_txn, prev_txn)
+    atv_d, atv_p = calc_delta(cur_atv, prev_atv)
+
+    return {
+        'current': {'revenue': cur_rev, 'transactions': cur_txn, 'avg_transaction_value': cur_atv},
+        'previous': {'revenue': prev_rev, 'transactions': prev_txn, 'avg_transaction_value': prev_atv},
+        'deltas': {
+            'revenue': rev_d, 'revenue_pct': rev_p,
+            'transactions': txn_d, 'transactions_pct': txn_p,
+            'avg_transaction_value': atv_d, 'avg_transaction_value_pct': atv_p
         }
-    except Exception as e:
-        print(f"Error querying revenue comparison: {e}")
-        return {
-            'current': {'revenue': 0, 'transactions': 0, 'avg_transaction_value': 0},
-            'previous': {'revenue': 0, 'transactions': 0, 'avg_transaction_value': 0},
-            'deltas': {'revenue': 0, 'revenue_pct': 0, 'transactions': 0, 'transactions_pct': 0, 'avg_transaction_value': 0, 'avg_transaction_value_pct': 0}
-        }
+    }
+
 
 def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame:
-    """Query hourly sales heatmap data (hour x day) using a single DuckDB query."""
+    """Query hourly heatmap data."""
     conn = get_duckdb_connection()
 
-    start_str = start_date.strftime('%Y-%m-%d')
-    end_str = end_date.strftime('%Y-%m-%d')
-
-    query = f"""
+    query = """
     SELECT
-        CAST(date_trunc('day', date) AS DATE) as date,
-        EXTRACT(HOUR FROM date) as hour,
+        date_trunc('day', date)::DATE as date,
+        EXTRACT(HOUR FROM date)::INT as hour,
         SUM(revenue) as revenue
     FROM fact_sales
-    WHERE date >= TIMESTAMP '{start_str} 00:00:00'
-      AND date < TIMESTAMP '{end_str} 23:59:59.999'
+    WHERE date >= ? AND date < ? + INTERVAL 1 DAY
       AND EXTRACT(HOUR FROM date) BETWEEN 7 AND 23
-    GROUP BY CAST(date_trunc('day', date) AS DATE), EXTRACT(HOUR FROM date)
-    ORDER BY date, hour
+    GROUP BY 1, 2
+    ORDER BY 1, 2
     """
+    return conn.execute(query, [start_date, end_date]).fetchdf()
 
-    try:
-        return conn.execute(query).fetchdf()
-    except Exception as e:
-        print(f"Error querying hourly sales heatmap: {e}")
-        return pd.DataFrame(columns=['date', 'hour', 'revenue'])
 
 def query_overview_summary(start_date: date, end_date: date) -> Dict:
-    """Get overview summary using DuckDB."""
+    """Get overview summary - combined into fewer queries."""
     conn = get_duckdb_connection()
-    
-    start_str = start_date.strftime('%Y-%m-%d')
-    end_str = end_date.strftime('%Y-%m-%d')
 
-    transactions_expr = "CASE WHEN COUNT(DISTINCT order_id) = 0 THEN COUNT(*) ELSE COUNT(DISTINCT order_id) END"
-    
-    # Current period summary
-    summary_query = f"""
-    SELECT 
-        SUM(f.revenue) as revenue,
-        SUM(f.quantity) as quantity
-    FROM fact_sales f
-    WHERE f.date >= TIMESTAMP '{start_str} 00:00:00'
-      AND f.date < TIMESTAMP '{end_str} 23:59:59.999'
+    # Single combined query for all aggregations
+    query = """
+    WITH base AS (
+        SELECT f.revenue, f.quantity, 
+               COALESCE(p.product_parent_category, 'Unknown') as parent_cat,
+               COALESCE(p.product_category, 'Unknown') as cat,
+               COALESCE(p.product_brand, 'Unknown') as brand
+        FROM fact_sales f
+        LEFT JOIN dim_products p ON f.product_id = p.product_id
+        WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
+    ),
+    summary AS (SELECT SUM(revenue) as rev, SUM(quantity) as qty FROM base),
+    by_cat AS (SELECT parent_cat, cat, SUM(revenue) as rev FROM base GROUP BY 1, 2),
+    by_brand AS (SELECT parent_cat, cat, brand, SUM(revenue) as rev FROM base GROUP BY 1, 2, 3)
+    SELECT 'summary' as type, NULL as c1, NULL as c2, NULL as c3, rev, qty FROM summary
+    UNION ALL SELECT 'cat', parent_cat, cat, NULL, rev, NULL FROM by_cat
+    UNION ALL SELECT 'brand', parent_cat, cat, brand, rev, NULL FROM by_brand
     """
-    
-    # Category hierarchy
-    category_query = f"""
-    SELECT 
-        p.product_parent_category,
-        p.product_category,
-        SUM(f.revenue) as revenue
-    FROM fact_sales f
-    LEFT JOIN dim_products p ON f.product_id = p.product_id
-    WHERE f.date >= TIMESTAMP '{start_str} 00:00:00'
-      AND f.date < TIMESTAMP '{end_str} 23:59:59.999'
-    GROUP BY p.product_parent_category, p.product_category
-    """
-    
-    # Brand hierarchy
-    brand_query = f"""
-    SELECT 
-        p.product_parent_category,
-        p.product_category,
-        p.product_brand,
-        SUM(f.revenue) as revenue
-    FROM fact_sales f
-    LEFT JOIN dim_products p ON f.product_id = p.product_id
-    WHERE f.date >= TIMESTAMP '{start_str} 00:00:00'
-      AND f.date < TIMESTAMP '{end_str} 23:59:59.999'
-    GROUP BY p.product_parent_category, p.product_category, p.product_brand
-    """
-    
-    try:
-        # Get summary
-        summary_result = conn.execute(summary_query).fetchone()
-        summary_revenue, summary_quantity = summary_result or (0, 0)
 
-        # DuckDB returns None when SUM() has no input rows; guard before casting.
-        current_revenue = float(summary_revenue or 0)
-        current_quantity = float(summary_quantity or 0)
+    results = conn.execute(query, [start_date, end_date]).fetchall()
+
+    categories_nested = {}
+    brands_nested = {}
+    total_rev = total_qty = 0
+
+    for row in results:
+        rtype, c1, c2, c3, rev, qty = row
+        rev = float(rev or 0)
         
-        # Get categories
-        category_results = conn.execute(category_query).fetchdf()
-        categories_nested = {}
-        for _, row in category_results.iterrows():
-            parent = row['product_parent_category'] or 'Unknown'
-            child = row['product_category'] or 'Unknown'
-            amount = float(row['revenue'] or 0)
-            
-            child_map = categories_nested.setdefault(parent, {})
-            child_map[child] = child_map.get(child, 0) + amount
-        
-        # Get brands
-        brand_results = conn.execute(brand_query).fetchdf()
-        brands_nested = {}
-        for _, row in brand_results.iterrows():
-            parent = row['product_parent_category'] or 'Unknown'
-            child = row['product_category'] or 'Unknown'
-            brand = row['product_brand'] or 'Unknown'
-            amount = float(row['revenue'] or 0)
-            
-            brand_map = brands_nested.setdefault(parent, {})
-            child_map = brand_map.setdefault(child, {})
-            child_map[brand] = child_map.get(brand, 0) + amount
-        
-        return {
-            'target_date_start': start_date,
-            'target_date_end': end_date,
-            'today_amount': float(current_revenue),
-            'today_qty': float(current_quantity),
-            'prev_amount': 0,  # Would need additional query for previous period
-            'categories_nested': categories_nested,
-            'brands_nested': brands_nested,
-        }
-    except Exception as e:
-        print(f"Error querying overview summary: {e}")
-        return {
-            'target_date_start': start_date,
-            'target_date_end': end_date,
-            'today_amount': 0,
-            'today_qty': 0,
-            'prev_amount': 0,
-            'categories_nested': {},
-            'brands_nested': {},
-        }
+        if rtype == 'summary':
+            total_rev, total_qty = rev, float(qty or 0)
+        elif rtype == 'cat':
+            categories_nested.setdefault(c1, {})[c2] = rev
+        elif rtype == 'brand':
+            brands_nested.setdefault(c1, {}).setdefault(c2, {})[c3] = rev
+
+    return {
+        'target_date_start': start_date,
+        'target_date_end': end_date,
+        'today_amount': total_rev,
+        'today_qty': total_qty,
+        'prev_amount': 0,
+        'categories_nested': categories_nested,
+        'brands_nested': brands_nested,
+    }
