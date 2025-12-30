@@ -70,7 +70,7 @@ class DuckDBManager:
 
         conn.execute(f"""
             CREATE OR REPLACE VIEW dim_products AS
-            SELECT product_id, product_category, product_parent_category, product_brand
+            SELECT product_id, product_name, product_category, product_parent_category, product_brand
             FROM read_parquet('{dim_products}')
         """)
 
@@ -101,16 +101,34 @@ def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') 
     if period not in trunc_map:
         raise ValueError("Period must be 'daily', 'weekly', or 'monthly'")
 
+    trunc_expr = trunc_map[period]
+
     query = f"""
+    WITH date_series AS (
+        SELECT date_trunc('{trunc_expr}', date) as period_start,
+               date_trunc('{trunc_expr}', date) + interval '1 {trunc_expr}' as period_end
+        FROM generate_series(
+            date_trunc('{trunc_expr}', ?::date)::timestamp,
+            date_trunc('{trunc_expr}', ?::date)::timestamp,
+            interval '1 {trunc_expr}'
+        ) as t(date)
+    )
     SELECT 
-        date_trunc('{trunc_map[period]}', date) as date,
-        SUM(revenue) as revenue,
-        COALESCE(NULLIF(COUNT(DISTINCT order_id), 0), COUNT(*)) as transactions,
-        SUM(revenue) / NULLIF(COALESCE(NULLIF(COUNT(DISTINCT order_id), 0), COUNT(*)), 0) as avg_transaction_value
-    FROM fact_sales
-    WHERE date >= ? AND date < ? + INTERVAL 1 DAY
-    GROUP BY 1
-    ORDER BY 1
+        ds.period_start as date,
+        COALESCE(SUM(fs.revenue), 0) as revenue,
+        COALESCE(COUNT(DISTINCT fs.order_id), 0) as transactions,
+        COALESCE(SUM(fs.quantity), 0) as items_sold,
+        CASE 
+            WHEN COUNT(DISTINCT fs.order_id) > 0 
+            THEN SUM(fs.revenue) / COUNT(DISTINCT fs.order_id) 
+            ELSE 0 
+        END as avg_transaction_value
+    FROM date_series ds
+    LEFT JOIN fact_sales fs ON 
+        fs.date >= ds.period_start AND 
+        fs.date < ds.period_end
+    GROUP BY ds.period_start
+    ORDER BY ds.period_start
     """
     return conn.execute(query, [start_date, end_date]).fetchdf()
 
@@ -144,14 +162,14 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
 
     query = """
     SELECT 
-        'Product ' || p.product_id::VARCHAR as product_name,
+        COALESCE(p.product_name, 'Product ' || f.product_id::VARCHAR) as product_name,
         COALESCE(p.product_category, 'Unknown Category') as category,
         COALESCE(SUM(f.quantity), 0) as quantity_sold,
         COALESCE(SUM(f.revenue), 0) as total_unit_price
     FROM fact_sales f
     LEFT JOIN dim_products p ON f.product_id = p.product_id
     WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
-    GROUP BY p.product_id, p.product_category
+    GROUP BY 1, 2
     ORDER BY total_unit_price DESC
     LIMIT ?
     """
@@ -169,25 +187,41 @@ def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     # Combined query using FILTER - scans data only once
     query = """
     SELECT 
+        -- Current period
         SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as cur_rev,
         COALESCE(NULLIF(COUNT(DISTINCT order_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
                  COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as cur_txn,
+        SUM(quantity) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as cur_items,
+        
+        -- Previous period
         SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_rev,
         COALESCE(NULLIF(COUNT(DISTINCT order_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
-                 COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as prev_txn
+                 COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as prev_txn,
+        SUM(quantity) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_items
+        
     FROM fact_sales
     WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY
     """
     
     params = [
-        start_date, end_date, start_date, end_date, start_date, end_date,  # current
-        prev_start, prev_end, prev_start, prev_end, prev_start, prev_end,  # previous  
-        prev_start, end_date  # overall filter
+        # Current period filters
+        start_date, end_date,  # cur_rev
+        start_date, end_date, start_date, end_date,  # cur_txn
+        start_date, end_date,  # cur_items
+        
+        # Previous period filters
+        prev_start, prev_end,  # prev_rev
+        prev_start, prev_end, prev_start, prev_end,  # prev_txn
+        prev_start, prev_end,  # prev_items
+        
+        # Overall filter
+        prev_start, end_date
     ]
 
     row = conn.execute(query, params).fetchone()
-    cur_rev, cur_txn, prev_rev, prev_txn = [v or 0 for v in row]
+    cur_rev, cur_txn, cur_items, prev_rev, prev_txn, prev_items = [v or 0 for v in row]
 
+    # Calculate averages
     cur_atv = cur_rev / cur_txn if cur_txn else 0
     prev_atv = prev_rev / prev_txn if prev_txn else 0
 
@@ -199,13 +233,25 @@ def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     rev_d, rev_p = calc_delta(cur_rev, prev_rev)
     txn_d, txn_p = calc_delta(cur_txn, prev_txn)
     atv_d, atv_p = calc_delta(cur_atv, prev_atv)
+    items_d, items_p = calc_delta(cur_items, prev_items)
 
     return {
-        'current': {'revenue': cur_rev, 'transactions': cur_txn, 'avg_transaction_value': cur_atv},
-        'previous': {'revenue': prev_rev, 'transactions': prev_txn, 'avg_transaction_value': prev_atv},
+        'current': {
+            'revenue': cur_rev,
+            'transactions': cur_txn,
+            'items_sold': cur_items,
+            'avg_transaction_value': cur_atv
+        },
+        'previous': {
+            'revenue': prev_rev,
+            'transactions': prev_txn,
+            'items_sold': prev_items,
+            'avg_transaction_value': prev_atv
+        },
         'deltas': {
             'revenue': rev_d, 'revenue_pct': rev_p,
             'transactions': txn_d, 'transactions_pct': txn_p,
+            'items_sold': items_d, 'items_sold_pct': items_p,
             'avg_transaction_value': atv_d, 'avg_transaction_value_pct': atv_p
         }
     }

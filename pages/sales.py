@@ -371,18 +371,18 @@ def update_kpi_cards(n_clicks, date_from, date_until):
         revenue_text = f'Rp {current["revenue"]:,.0f}'
         transactions_text = f'{current["transactions"]:,.0f}'
         atv_text = f'Rp {current["avg_transaction_value"]:,.0f}'
-        items_sold_text = f'{current["transactions"]:,.0f}'  # Using transactions as proxy for items
+        items_sold_text = f'{current["items_sold"]:,.0f}'
         
         # Format change texts with color indicators
         revenue_change_color = 'green' if deltas['revenue_pct'] >= 0 else 'red'
         transactions_change_color = 'green' if deltas['transactions_pct'] >= 0 else 'red'
         atv_change_color = 'green' if deltas['avg_transaction_value_pct'] >= 0 else 'red'
-        items_change_color = 'green' if deltas['transactions_pct'] >= 0 else 'red'
+        items_change_color = 'green' if deltas['items_sold_pct'] >= 0 else 'red'
         
         revenue_change_text = f'vs prev period: Rp {deltas["revenue"]:,.0f} ({deltas["revenue_pct"]:+.1f}%)'
         transactions_change_text = f'vs prev period: {deltas["transactions"]:,.0f} ({deltas["transactions_pct"]:+.1f}%)'
         atv_change_text = f'vs prev period: Rp {deltas["avg_transaction_value"]:,.0f} ({deltas["avg_transaction_value_pct"]:+.1f}%)'
-        items_change_text = f'vs prev period: {deltas["transactions"]:,.0f} ({deltas["transactions_pct"]:+.1f}%)'
+        items_change_text = f'vs prev period: {deltas["items_sold"]:+,.0f} ({deltas["items_sold_pct"]:+.1f}%)'
         
     except Exception as e:
         # Fallback values if data fetch fails

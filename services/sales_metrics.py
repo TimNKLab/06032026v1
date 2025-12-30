@@ -72,7 +72,8 @@ def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, perio
         .group_by('date_group')
         .agg([
             pl.col(revenue_col).sum().alias('revenue'),
-            pl.col('order_date').n_unique().alias('transactions')
+            pl.col('order_date').n_unique().alias('transactions'),
+            pl.col('qty').sum().alias('items_sold')
         ])
         .sort('date_group')
         .with_columns(
@@ -84,10 +85,23 @@ def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, perio
     # Ensure we have all dates in the range (fill missing dates with zeros)
     if period == 'daily':
         all_dates = pl.date_range(start_date, end_date, interval='1d', eager=True).alias('date')
-        trends = all_dates.join(trends, on='date', how='left').fill_null(0)
+        trends = all_dates.join(trends, on='date', how='left')
+        # Fill null values with 0 for numeric columns only
+        numeric_cols = ['revenue', 'transactions', 'items_sold', 'avg_transaction_value']
+        trends = trends.with_columns([
+            pl.col(col).fill_null(0) for col in numeric_cols if col in trends.columns
+        ])
     
     # Convert back to pandas for Plotly compatibility
-    return trends.to_pandas()
+    result = trends.to_pandas()
+    
+    # Ensure all required columns exist in the result
+    required_cols = ['date', 'revenue', 'transactions', 'items_sold', 'avg_transaction_value']
+    for col in required_cols:
+        if col not in result.columns:
+            result[col] = 0
+            
+    return result[required_cols]
 
 def _get_sales_trends_data_pandas_fallback(df, start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Pandas fallback for sales trends if Polars conversion fails."""
@@ -107,12 +121,14 @@ def _get_sales_trends_data_pandas_fallback(df, start_date: date, end_date: date,
         df.groupby('date_group')
         .agg({
             revenue_col: 'sum',
-            'order_date': 'nunique'
+            'order_date': 'nunique',
+            'qty': 'sum'
         })
         .reset_index()
         .rename(columns={
             revenue_col: 'revenue',
-            'order_date': 'transactions'
+            'order_date': 'transactions',
+            'qty': 'items_sold'
         })
     )
     
@@ -125,10 +141,19 @@ def _get_sales_trends_data_pandas_fallback(df, start_date: date, end_date: date,
     # Ensure we have all dates in the range (fill missing dates with zeros)
     if period == 'daily':
         all_dates = pd.date_range(start=start_date, end=end_date, freq='D')
-        trends = trends.set_index('date').reindex(all_dates).fillna(0).reset_index()
+        trends = trends.set_index('date').reindex(all_dates).reset_index()
         trends = trends.rename(columns={'index': 'date'})
+        # Fill null values with 0 for numeric columns only
+        numeric_cols = ['revenue', 'transactions', 'items_sold', 'avg_transaction_value']
+        trends[numeric_cols] = trends[numeric_cols].fillna(0)
     
-    return trends[['date', 'revenue', 'transactions', 'avg_transaction_value']]
+    # Ensure all required columns exist in the result
+    required_cols = ['date', 'revenue', 'transactions', 'items_sold', 'avg_transaction_value']
+    for col in required_cols:
+        if col not in trends.columns:
+            trends[col] = 0
+            
+    return trends[required_cols]
 
 
 def get_revenue_comparison(start_date: date, end_date: date) -> Dict:
@@ -156,6 +181,7 @@ def _get_revenue_comparison_odoo_fallback(start_date: date, end_date: date) -> D
     current_trends = get_sales_trends_data(start_date, end_date, 'daily')
     current_revenue = current_trends['revenue'].sum()
     current_transactions = current_trends['transactions'].sum()
+    current_items_sold = current_trends['items_sold'].sum()
     current_avg_atv = current_revenue / current_transactions if current_transactions > 0 else 0
     
     # Previous period (same length)
@@ -166,6 +192,7 @@ def _get_revenue_comparison_odoo_fallback(start_date: date, end_date: date) -> D
     prev_trends = get_sales_trends_data(prev_start, prev_end, 'daily')
     prev_revenue = prev_trends['revenue'].sum()
     prev_transactions = prev_trends['transactions'].sum()
+    prev_items_sold = prev_trends['items_sold'].sum()
     prev_avg_atv = prev_revenue / prev_transactions if prev_transactions > 0 else 0
     
     # Calculate deltas
@@ -175,6 +202,9 @@ def _get_revenue_comparison_odoo_fallback(start_date: date, end_date: date) -> D
     transactions_delta = current_transactions - prev_transactions
     transactions_delta_pct = (transactions_delta / prev_transactions * 100) if prev_transactions > 0 else 0
     
+    items_delta = current_items_sold - prev_items_sold
+    items_delta_pct = (items_delta / prev_items_sold * 100) if prev_items_sold > 0 else 0
+    
     atv_delta = current_avg_atv - prev_avg_atv
     atv_delta_pct = (atv_delta / prev_avg_atv * 100) if prev_avg_atv > 0 else 0
     
@@ -182,11 +212,13 @@ def _get_revenue_comparison_odoo_fallback(start_date: date, end_date: date) -> D
         'current': {
             'revenue': current_revenue,
             'transactions': current_transactions,
+            'items_sold': current_items_sold,
             'avg_transaction_value': current_avg_atv,
         },
         'previous': {
             'revenue': prev_revenue,
             'transactions': prev_transactions,
+            'items_sold': prev_items_sold,
             'avg_transaction_value': prev_avg_atv,
         },
         'deltas': {
@@ -194,6 +226,8 @@ def _get_revenue_comparison_odoo_fallback(start_date: date, end_date: date) -> D
             'revenue_pct': revenue_delta_pct,
             'transactions': transactions_delta,
             'transactions_pct': transactions_delta_pct,
+            'items_sold': items_delta,
+            'items_sold_pct': items_delta_pct,
             'avg_transaction_value': atv_delta,
             'avg_transaction_value_pct': atv_delta_pct,
         }
@@ -391,8 +425,8 @@ def get_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.Da
         # Use DuckDB for faster queries
         return query_top_products(start_date, end_date, limit)
     except Exception as e:
-        print(f"DuckDB query failed in get_top_products: {e}, falling back to Odoo")
-        return _get_top_products_odoo_fallback(start_date, end_date, limit)
+        print(f"DuckDB query failed in get_top_products: {e}")
+        return pd.DataFrame(columns=['product_name', 'category', 'quantity_sold', 'total_unit_price'])
 
 
 def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
