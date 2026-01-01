@@ -54,11 +54,24 @@ CACHE_TTL = 3600  # 1 hour for Redis cache
 DATA_LAKE_ROOT = os.environ.get('DATA_LAKE_ROOT', '/app/data-lake')
 RAW_PATH = f'{DATA_LAKE_ROOT}/raw/pos_order_lines'
 CLEAN_PATH = f'{DATA_LAKE_ROOT}/clean/pos_order_lines'
+RAW_SALES_INVOICE_PATH = f'{DATA_LAKE_ROOT}/raw/account_move_out_invoice_lines'
+RAW_PURCHASES_PATH = f'{DATA_LAKE_ROOT}/raw/account_move_in_invoice_lines'
+CLEAN_SALES_INVOICE_PATH = f'{DATA_LAKE_ROOT}/clean/account_move_out_invoice_lines'
+CLEAN_PURCHASES_PATH = f'{DATA_LAKE_ROOT}/clean/account_move_in_invoice_lines'
 STAR_SCHEMA_PATH = f'{DATA_LAKE_ROOT}/star-schema'
 METADATA_PATH = f'{DATA_LAKE_ROOT}/metadata'
 
 # Create directories
-for path in [RAW_PATH, CLEAN_PATH, STAR_SCHEMA_PATH, METADATA_PATH]:
+for path in [
+    RAW_PATH,
+    CLEAN_PATH,
+    RAW_SALES_INVOICE_PATH,
+    RAW_PURCHASES_PATH,
+    CLEAN_SALES_INVOICE_PATH,
+    CLEAN_PURCHASES_PATH,
+    STAR_SCHEMA_PATH,
+    METADATA_PATH,
+]:
     os.makedirs(path, exist_ok=True)
 
 # Connection pool
@@ -334,6 +347,7 @@ def atomic_write_parquet(df: pl.DataFrame, file_path: str):
 @retry_odoo(max_retries=3, delay=2)
 def extract_pos_order_lines(self, target_date: str) -> Dict[str, Any]:
     """Extract POS order lines derived from pos.order with optimized batched API calls."""
+    
     target_dt = date.fromisoformat(target_date)
     
     with get_pooled_odoo_connection() as odoo:
@@ -525,6 +539,125 @@ def extract_pos_order_lines(self, target_date: str) -> Dict[str, Any]:
             'count': len(processed_lines)
         }
 
+
+def _extract_account_move_lines(target_date: str, move_type: str, partner_role: str) -> Dict[str, Any]:
+    """
+    Shared extractor for account.move invoice lines.
+    partner_role: "customer" for out_invoice, "vendor" for in_invoice
+    """
+    target_dt = date.fromisoformat(target_date)
+    with get_pooled_odoo_connection() as odoo:
+        start_dt = datetime.combine(target_dt, datetime.min.time())
+        end_dt = start_dt.replace(hour=23, minute=59, second=59)
+
+        Move = odoo.env['account.move']
+        MoveLine = odoo.env['account.move.line']
+        if Move is None or MoveLine is None:
+            logger.warning("Missing required Odoo models: account.move and/or account.move.line")
+            return {'lines': [], 'target_date': target_date}
+
+        domain = [
+            ('date', '>=', start_dt.strftime('%Y-%m-%d')),
+            ('date', '<=', end_dt.strftime('%Y-%m-%d')),
+            ('move_type', '=', move_type),
+            ('state', '=', 'posted'),
+        ]
+
+        move_fields = ['id', 'date', 'name', 'partner_id', 'invoice_line_ids']
+        moves = Move.search_read(domain, move_fields)
+        if not moves:
+            logger.info(f"No account.move ({move_type}) found for {target_date}")
+            return {'lines': [], 'target_date': target_date}
+
+        move_ids: Set[int] = set()
+        line_ids: Set[int] = set()
+        move_partner: Dict[int, Tuple[Optional[int], Optional[str]]] = {}
+        move_dates: Dict[int, str] = {}
+        move_names: Dict[int, str] = {}
+
+        for mv in moves:
+            mid = mv.get('id')
+            if isinstance(mid, int):
+                move_ids.add(mid)
+                move_dates[mid] = mv.get('date')
+                move_names[mid] = mv.get('name')
+                partner_id = safe_extract_m2o(mv.get('partner_id'), get_id=True)
+                partner_name = safe_extract_m2o(mv.get('partner_id'), get_id=False)
+                move_partner[mid] = (partner_id, partner_name)
+            for lid in extract_o2m_ids(mv.get('invoice_line_ids')):
+                line_ids.add(lid)
+
+        if not line_ids:
+            logger.info(f"No invoice lines found for {target_date} ({move_type})")
+            return {'lines': [], 'target_date': target_date}
+
+        line_fields = ['id', 'move_id', 'product_id', 'price_unit', 'quantity', 'tax_ids']
+        processed_lines: List[Dict[str, Any]] = []
+
+        for batch in batch_ids(line_ids):
+            try:
+                lines = MoveLine.read(batch, line_fields)
+            except Exception as e:
+                logger.error(f"Error reading account.move.line batch: {e}")
+                continue
+
+            for ln in lines:
+                move_id_val = safe_extract_m2o(ln.get('move_id'))
+                if not isinstance(move_id_val, int):
+                    continue
+
+                product_id = safe_extract_m2o(ln.get('product_id'))
+                try:
+                    price_unit = float(ln.get('price_unit') or 0)
+                except Exception:
+                    price_unit = 0.0
+                try:
+                    quantity = float(ln.get('quantity') or 0)
+                except Exception:
+                    quantity = 0.0
+
+                tax_ids = extract_o2m_ids(ln.get('tax_ids'))
+                tax_ids_list = sorted(set([tid for tid in tax_ids if isinstance(tid, int)]))
+                tax_id = tax_ids_list[0] if tax_ids_list else None
+                tax_ids_json = json.dumps(tax_ids_list)
+
+                partner_id, partner_name = move_partner.get(move_id_val, (None, None))
+                processed_lines.append({
+                    'move_id': move_id_val,
+                    'move_name': move_names.get(move_id_val),
+                    'move_date': move_dates.get(move_id_val),
+                    f'{partner_role}_id': partner_id,
+                    f'{partner_role}_name': partner_name,
+                    'move_line_id': ln.get('id'),
+                    'product_id': product_id,
+                    'price_unit': price_unit,
+                    'quantity': quantity,
+                    'tax_id': tax_id,
+                    'tax_ids_json': tax_ids_json,
+                })
+
+        return {
+            'lines': processed_lines,
+            'target_date': target_date,
+            'count': len(processed_lines),
+            'move_type': move_type,
+        }
+
+
+@app.task(bind=True, max_retries=3)
+@retry_odoo(max_retries=3, delay=2)
+def extract_sales_invoice_lines(self, target_date: str) -> Dict[str, Any]:
+    """Extract posted customer invoices (out_invoice) lines."""
+    return _extract_account_move_lines(target_date, move_type='out_invoice', partner_role='customer')
+
+
+@app.task(bind=True, max_retries=3)
+@retry_odoo(max_retries=3, delay=2)
+def extract_purchase_invoice_lines(self, target_date: str) -> Dict[str, Any]:
+    """Extract posted vendor bills (in_invoice) lines."""
+    return _extract_account_move_lines(target_date, move_type='in_invoice', partner_role='vendor')
+
+
 def _batch_read_products(odoo, product_ids: Set[int]) -> Dict[int, Dict]:
     """Batch read products with caching."""
     if not product_ids:
@@ -595,11 +728,15 @@ def _batch_read_products(odoo, product_ids: Set[int]) -> Dict[int, Dict]:
 
 @app.task
 def save_raw_data(extraction_result: Dict[str, Any]) -> Optional[str]:
-    """Save raw data to partitioned parquet."""
+    """Save raw POS order line extraction result to partitioned parquet."""
     try:
         lines = extraction_result.get('lines', [])
-        target_date = extraction_result['target_date']
-        
+        target_date = extraction_result.get('target_date')
+
+        if not target_date:
+            logger.warning("Missing target_date in extraction result")
+            return None
+
         year, month, day = target_date.split('-')
         partition_path = f'{RAW_PATH}/year={year}/month={month}/day={day}'
         os.makedirs(partition_path, exist_ok=True)
@@ -624,10 +761,9 @@ def save_raw_data(extraction_result: Dict[str, Any]) -> Optional[str]:
             'product_category': pl.Utf8,
             'product_parent_category': pl.Utf8,
         }
-        
+
         if not lines:
-            logger.info(f"No data for {target_date}")
-            # Create empty file with schema
+            logger.info(f"No data for {target_date} (pos_order_lines)")
             df = pl.DataFrame(schema=raw_schema)
         else:
             normalized = [
@@ -635,7 +771,6 @@ def save_raw_data(extraction_result: Dict[str, Any]) -> Optional[str]:
                 for row in lines
                 if isinstance(row, dict)
             ]
-
             df = pl.DataFrame(normalized, schema=raw_schema)
             df = df.with_columns([
                 pl.col('order_date').cast(pl.Utf8, strict=False),
@@ -651,21 +786,185 @@ def save_raw_data(extraction_result: Dict[str, Any]) -> Optional[str]:
                 pl.col('qty').cast(pl.Float64, strict=False),
                 pl.col('price_subtotal_incl').cast(pl.Float64, strict=False),
                 pl.col('discount_amount').cast(pl.Float64, strict=False).fill_null(0),
-                pl.col('product_brand').cast(pl.Utf8, strict=False).fill_null('Unknown'),
+                pl.col('product_brand').cast(pl.Utf8, strict=False),
+                pl.col('product_brand_id').cast(pl.Int64, strict=False),
+                pl.col('product_name').cast(pl.Utf8, strict=False),
                 pl.col('product_category').cast(pl.Utf8, strict=False),
                 pl.col('product_parent_category').cast(pl.Utf8, strict=False),
-                pl.col('product_brand_id').cast(pl.Int64, strict=False),
             ])
 
         output_file = f'{partition_path}/pos_order_lines_{target_date}.parquet'
         atomic_write_parquet(df, output_file)
-
         logger.info(f"Saved {len(lines)} records to {output_file}")
         return output_file
 
     except Exception as e:
-        logger.error(f"Error saving raw data for {extraction_result.get('target_date')}: {e}", exc_info=True)
+        logger.error(f"Error saving raw POS for {extraction_result.get('target_date')}: {e}", exc_info=True)
         return None
+
+
+def _save_raw_account_move_lines(extraction_result: Dict[str, Any], raw_base_path: str, dataset_prefix: str) -> Optional[str]:
+    """Save raw account.move lines (sales/purchases) to partitioned parquet."""
+    try:
+        lines = extraction_result.get('lines', [])
+        target_date = extraction_result['target_date']
+
+        year, month, day = target_date.split('-')
+        partition_path = f'{raw_base_path}/year={year}/month={month}/day={day}'
+        os.makedirs(partition_path, exist_ok=True)
+
+        raw_schema = {
+            'move_id': pl.Int64,
+            'move_name': pl.Utf8,
+            'move_date': pl.Utf8,
+            'customer_id': pl.Int64,
+            'customer_name': pl.Utf8,
+            'vendor_id': pl.Int64,
+            'vendor_name': pl.Utf8,
+            'move_line_id': pl.Int64,
+            'product_id': pl.Int64,
+            'price_unit': pl.Float64,
+            'quantity': pl.Float64,
+            'tax_id': pl.Int64,
+            'tax_ids_json': pl.Utf8,
+        }
+
+        if not lines:
+            logger.info(f"No data for {target_date} ({dataset_prefix})")
+            df = pl.DataFrame(schema=raw_schema)
+        else:
+            normalized = [
+                {k: row.get(k) for k in raw_schema.keys()}
+                for row in lines
+                if isinstance(row, dict)
+            ]
+            df = pl.DataFrame(normalized, schema=raw_schema)
+            df = df.with_columns([
+                pl.col('move_id').cast(pl.Int64, strict=False),
+                pl.col('move_name').cast(pl.Utf8, strict=False),
+                pl.col('move_date').cast(pl.Utf8, strict=False),
+                pl.col('customer_id').cast(pl.Int64, strict=False),
+                pl.col('customer_name').cast(pl.Utf8, strict=False),
+                pl.col('vendor_id').cast(pl.Int64, strict=False),
+                pl.col('vendor_name').cast(pl.Utf8, strict=False),
+                pl.col('move_line_id').cast(pl.Int64, strict=False),
+                pl.col('product_id').cast(pl.Int64, strict=False),
+                pl.col('price_unit').cast(pl.Float64, strict=False),
+                pl.col('quantity').cast(pl.Float64, strict=False),
+                pl.col('tax_id').cast(pl.Int64, strict=False),
+                pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]'),
+            ])
+
+        output_file = f'{partition_path}/{dataset_prefix}_{target_date}.parquet'
+        atomic_write_parquet(df, output_file)
+        logger.info(f"Saved {len(lines)} records to {output_file}")
+        return output_file
+
+    except Exception as e:
+        logger.error(f"Error saving raw {dataset_prefix} for {extraction_result.get('target_date')}: {e}", exc_info=True)
+        return None
+
+
+@app.task
+def save_raw_sales_invoice_lines(extraction_result: Dict[str, Any]) -> Optional[str]:
+    return _save_raw_account_move_lines(extraction_result, RAW_SALES_INVOICE_PATH, 'account_move_out_invoice_lines')
+
+
+@app.task
+def save_raw_purchase_invoice_lines(extraction_result: Dict[str, Any]) -> Optional[str]:
+    return _save_raw_account_move_lines(extraction_result, RAW_PURCHASES_PATH, 'account_move_in_invoice_lines')
+
+
+def _clean_account_move_lines(
+    raw_file_path: Optional[str],
+    target_date: str,
+    clean_base_path: str,
+    dataset_prefix: str,
+) -> Optional[str]:
+    try:
+        if not raw_file_path or not os.path.isfile(raw_file_path):
+            logger.warning(f"Invalid file path: {raw_file_path}")
+            return None
+
+        df = pl.scan_parquet(raw_file_path)
+
+        if 'tax_id' not in df.schema:
+            df = df.with_columns(pl.lit(None).cast(pl.Int64).alias('tax_id'))
+
+        is_purchase = dataset_prefix == 'account_move_in_invoice_lines'
+
+        df_clean = (
+            df.with_columns([
+                pl.col('move_id').cast(pl.Int64, strict=False),
+                pl.col('move_name').cast(pl.Utf8, strict=False),
+                pl.col('move_date').cast(pl.Utf8, strict=False),
+                pl.col('customer_id').cast(pl.Int64, strict=False),
+                pl.col('customer_name').cast(pl.Utf8, strict=False),
+                pl.col('vendor_id').cast(pl.Int64, strict=False),
+                pl.col('vendor_name').cast(pl.Utf8, strict=False),
+                pl.col('move_line_id').cast(pl.Int64, strict=False),
+                pl.col('product_id').cast(pl.Int64, strict=False),
+                pl.col('price_unit').cast(pl.Float64, strict=False).fill_null(0),
+                pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+                pl.col('tax_id').cast(pl.Int64, strict=False),
+                pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]'),
+            ])
+            .with_columns([
+                pl.when(pl.lit(is_purchase))
+                .then((pl.col('price_unit') == 0) | (pl.col('quantity') == 0))
+                .otherwise(pl.lit(False))
+                .alias('is_free_item')
+            ])
+        )
+
+        if is_purchase:
+            df_clean = df_clean.with_columns(
+                pl.col('vendor_name')
+                .cast(pl.Utf8, strict=False)
+                .fill_null('')
+                .str.replace(r",.*$", "")
+                .alias('vendor_name')
+            )
+
+            tax_dim_path = f'{STAR_SCHEMA_PATH}/dim_taxes.parquet'
+            if os.path.isfile(tax_dim_path):
+                taxes = (
+                    pl.scan_parquet(tax_dim_path)
+                    .select([
+                        pl.col('tax_id').cast(pl.Int64, strict=False),
+                        pl.col('tax_name').cast(pl.Utf8, strict=False),
+                    ])
+                    .unique(subset=['tax_id'], keep='last')
+                )
+                df_clean = df_clean.join(taxes, on='tax_id', how='left')
+            else:
+                df_clean = df_clean.with_columns(pl.lit(None).cast(pl.Utf8).alias('tax_name'))
+        else:
+            df_clean = df_clean.with_columns(pl.lit(None).cast(pl.Utf8).alias('tax_name'))
+
+        year, month, day = target_date.split('-')
+        clean_path = f'{clean_base_path}/year={year}/month={month}/day={day}'
+        os.makedirs(clean_path, exist_ok=True)
+
+        output_file = f'{clean_path}/{dataset_prefix}_clean_{target_date}.parquet'
+        atomic_write_parquet(df_clean.collect(), output_file)
+
+        logger.info(f"Cleaned invoice data saved to {output_file}")
+        return output_file
+
+    except Exception as e:
+        logger.error(f"Error cleaning {dataset_prefix} for {target_date}: {e}", exc_info=True)
+        return None
+
+
+@app.task
+def clean_sales_invoice_lines(raw_file_path: Optional[str], target_date: str) -> Optional[str]:
+    return _clean_account_move_lines(raw_file_path, target_date, CLEAN_SALES_INVOICE_PATH, 'account_move_out_invoice_lines')
+
+
+@app.task
+def clean_purchase_invoice_lines(raw_file_path: Optional[str], target_date: str) -> Optional[str]:
+    return _clean_account_move_lines(raw_file_path, target_date, CLEAN_PURCHASES_PATH, 'account_move_in_invoice_lines')
 
 
 @app.task
@@ -679,7 +978,6 @@ def clean_pos_data(raw_file_path: Optional[str], target_date: str) -> Optional[s
         # Lazy read for memory efficiency
         df = pl.scan_parquet(raw_file_path)
         
-        # Apply transformations lazily
         df_clean = (
             df.filter(
                 (pl.col('product_id').is_not_null()) &
@@ -712,7 +1010,6 @@ def clean_pos_data(raw_file_path: Optional[str], target_date: str) -> Optional[s
             ])
         )
         
-        # Materialize and write
         year, month, day = target_date.split('-')
         clean_path = f'{CLEAN_PATH}/year={year}/month={month}/day={day}'
         os.makedirs(clean_path, exist_ok=True)
@@ -727,10 +1024,58 @@ def clean_pos_data(raw_file_path: Optional[str], target_date: str) -> Optional[s
         logger.error(f"Error cleaning data for {target_date}: {e}", exc_info=True)
         return None
 
-# ... (rest of the code remains the same)
 
-def _update_fact_sales(df: pl.DataFrame, target_date: str) -> str:
-    """Update fact_sales table."""
+def _update_fact_invoice_sales(df: pl.DataFrame, target_date: str) -> str:
+    fact_df = df.select([
+        pl.col('move_date').alias('date'),
+        pl.col('move_id'),
+        pl.col('move_name'),
+        pl.col('customer_id'),
+        pl.col('customer_name'),
+        pl.col('move_line_id'),
+        pl.col('product_id'),
+        pl.col('price_unit'),
+        pl.col('quantity'),
+        pl.col('tax_ids_json'),
+        pl.lit(False).alias('is_free_item'),
+    ])
+
+    fact_path = f'{STAR_SCHEMA_PATH}/fact_invoice_sales'
+    os.makedirs(fact_path, exist_ok=True)
+
+    fact_output = f'{fact_path}/fact_invoice_sales_{target_date}.parquet'
+    atomic_write_parquet(fact_df, fact_output)
+
+    return fact_output
+
+
+def _update_fact_purchases(df: pl.DataFrame, target_date: str) -> str:
+    fact_df = df.select([
+        pl.col('move_date').alias('date'),
+        pl.col('move_id'),
+        pl.col('move_name'),
+        pl.col('vendor_id'),
+        pl.col('vendor_name'),
+        pl.col('move_line_id'),
+        pl.col('product_id'),
+        pl.col('price_unit'),
+        pl.col('quantity'),
+        pl.col('tax_id'),
+        pl.col('tax_name'),
+        pl.col('tax_ids_json'),
+        pl.col('is_free_item').cast(pl.Boolean, strict=False).fill_null(False),
+    ])
+
+    fact_path = f'{STAR_SCHEMA_PATH}/fact_purchases'
+    os.makedirs(fact_path, exist_ok=True)
+
+    fact_output = f'{fact_path}/fact_purchases_{target_date}.parquet'
+    atomic_write_parquet(fact_df, fact_output)
+
+    return fact_output
+
+
+def _update_fact_sales_pos(df: pl.DataFrame, target_date: str) -> str:
     fact_df = df.select([
         pl.col('order_date').alias('date'),
         pl.col('order_id'),
@@ -744,55 +1089,57 @@ def _update_fact_sales(df: pl.DataFrame, target_date: str) -> str:
         pl.col('qty').alias('quantity'),
         pl.col('price_subtotal_incl').alias('revenue'),
     ])
-    
+
     fact_path = f'{STAR_SCHEMA_PATH}/fact_sales'
     os.makedirs(fact_path, exist_ok=True)
-    
+
     fact_output = f'{fact_path}/fact_sales_{target_date}.parquet'
     atomic_write_parquet(fact_df, fact_output)
-    
+
     return fact_output
 
-# ... (rest of the code remains the same)
-    products_cols = ['product_id', 'product_brand', 'product_name', 
-                     'product_category', 'product_parent_category']
-    available_cols = [c for c in products_cols if c in df.columns]
-    
-    if 'product_id' in available_cols and 'product_brand' in available_cols:
-        products_df = df.select(available_cols).unique()
-        _merge_dimension_table(
-            products_df,
-            f'{STAR_SCHEMA_PATH}/dim_products.parquet',
-            merge_key='product_id'
-        )
-    
-    # Categories dimension
-    if 'product_category' in df.columns:
-        categories_df = df.select([
-            'product_category', 'product_parent_category'
-        ]).unique().filter(pl.col('product_category').is_not_null())
-        
-        _merge_dimension_table(
-            categories_df,
-            f'{STAR_SCHEMA_PATH}/dim_categories.parquet',
-            merge_key='product_category'
-        )
-    
-    # Brands dimension
-    brand_cols = ['product_brand']
-    if 'product_brand_id' in df.columns:
-        brand_cols.append('product_brand_id')
-    
-    brands_df = df.select(brand_cols).unique().filter(
-        pl.col('product_brand').is_not_null()
-    )
-    
-    merge_key = 'product_brand_id' if 'product_brand_id' in brand_cols else 'product_brand'
-    _merge_dimension_table(
-        brands_df,
-        f'{STAR_SCHEMA_PATH}/dim_brands.parquet',
-        merge_key=merge_key
-    )
+
+@app.task
+def update_star_schema(clean_file_path: Optional[str], target_date: str) -> Optional[str]:
+    try:
+        if not clean_file_path or not os.path.isfile(clean_file_path):
+            logger.warning(f"Invalid file path: {clean_file_path}")
+            return None
+
+        df = pl.read_parquet(clean_file_path)
+        output = _update_fact_sales_pos(df, target_date)
+        ETLMetadata.set_last_processed_date(date.fromisoformat(target_date))
+        return output
+
+    except Exception as e:
+        logger.error(f"Error updating star schema for {target_date}: {e}", exc_info=True)
+        return None
+
+
+@app.task
+def update_invoice_sales_star_schema(clean_file_path: Optional[str], target_date: str) -> Optional[str]:
+    try:
+        if not clean_file_path or not os.path.isfile(clean_file_path):
+            logger.warning(f"Invalid file path: {clean_file_path}")
+            return None
+        df = pl.read_parquet(clean_file_path)
+        return _update_fact_invoice_sales(df, target_date)
+    except Exception as e:
+        logger.error(f"Error updating invoice sales star schema for {target_date}: {e}", exc_info=True)
+        return None
+
+
+@app.task
+def update_purchase_star_schema(clean_file_path: Optional[str], target_date: str) -> Optional[str]:
+    try:
+        if not clean_file_path or not os.path.isfile(clean_file_path):
+            logger.warning(f"Invalid file path: {clean_file_path}")
+            return None
+        df = pl.read_parquet(clean_file_path)
+        return _update_fact_purchases(df, target_date)
+    except Exception as e:
+        logger.error(f"Error updating purchases star schema for {target_date}: {e}", exc_info=True)
+        return None
 
 def _merge_dimension_table(new_df: pl.DataFrame, file_path: str, merge_key: str):
     """Efficiently merge dimension table with schema alignment."""
@@ -862,7 +1209,7 @@ def _merge_dimension_table(new_df: pl.DataFrame, file_path: str, merge_key: str)
 @app.task
 def refresh_dimensions_incremental(targets: Optional[List[str]] = None) -> Dict[str, Any]:
     """Incrementally refresh dimensions based on write_date (only changed records)."""
-    valid_targets = {"products", "categories", "brands", "cashiers", "vendors"}
+    valid_targets = {"products", "categories", "brands", "cashiers", "vendors", "taxes"}
     target_set = None
     
     if targets:
@@ -894,6 +1241,10 @@ def refresh_dimensions_incremental(targets: Optional[List[str]] = None) -> Dict[
             if not target_set or 'vendors' in target_set:
                 count = _refresh_vendors_incremental(odoo)
                 results['vendors'] = count
+
+            if not target_set or 'taxes' in target_set:
+                count = _refresh_taxes_incremental(odoo)
+                results['taxes'] = count
         
         return {
             "updated": True,
@@ -1022,6 +1373,55 @@ def _refresh_vendors_incremental(odoo) -> int:
 
     return len(vendors)
 
+def _refresh_taxes_incremental(odoo) -> int:
+    """Incrementally refresh taxes dimension from account.tax model."""
+    last_sync = ETLMetadata.get_dimension_last_sync('taxes')
+
+    if 'account.tax' not in odoo.env:
+        logger.warning("account.tax model not found")
+        return 0
+
+    Tax = odoo.env['account.tax']
+
+    domain = []
+    if last_sync:
+        domain.append(('write_date', '>', last_sync.strftime('%Y-%m-%d %H:%M:%S')))
+
+    fields = ['id', 'name', 'write_date']
+    taxes = Tax.search_read(domain, fields)
+
+    if not taxes:
+        logger.info("No tax changes to sync")
+        return 0
+
+    processed = [
+        {
+            'tax_id': int(tax['id']),
+            'tax_name': str(tax.get('name', '') or ''),
+            'write_date': str(tax.get('write_date', '') or ''),
+        }
+        for tax in taxes
+        if tax and isinstance(tax.get('id'), int)
+    ]
+
+    schema = {
+        'tax_id': pl.Int64,
+        'tax_name': pl.Utf8,
+        'write_date': pl.Utf8,
+    }
+
+    new_df = pl.DataFrame(processed, schema=schema)
+    _merge_dimension_table(
+        new_df,
+        f'{STAR_SCHEMA_PATH}/dim_taxes.parquet',
+        merge_key='tax_id'
+    )
+
+    ETLMetadata.set_dimension_last_sync('taxes', datetime.now())
+    logger.info(f"Synced {len(processed)} taxes")
+
+    return len(processed)
+
 @app.task
 def refresh_dimension_tables(start_date: Optional[str] = None, 
                             end_date: Optional[str] = None, 
@@ -1059,6 +1459,40 @@ def daily_etl_pipeline(target_date: Optional[str] = None) -> str:
     
     result = pipeline.apply_async()
     logger.info(f"ETL pipeline submitted for {target_date}, task_id: {result.id}")
+    return result.id
+
+@app.task
+def daily_invoice_sales_pipeline(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for invoice-based sales (out_invoice)."""
+    if target_date is None:
+        target_date = date.today().isoformat()
+
+    logger.info(f"Starting invoice sales pipeline for {target_date}")
+    pipeline = chain(
+        extract_sales_invoice_lines.s(target_date),
+        save_raw_sales_invoice_lines.s(),
+        clean_sales_invoice_lines.s(target_date),
+        update_invoice_sales_star_schema.s(target_date),
+    )
+    result = pipeline.apply_async()
+    logger.info(f"Invoice sales pipeline submitted for {target_date}, task_id: {result.id}")
+    return result.id
+
+@app.task
+def daily_invoice_purchases_pipeline(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for purchases (vendor bills, in_invoice)."""
+    if target_date is None:
+        target_date = date.today().isoformat()
+
+    logger.info(f"Starting purchases pipeline for {target_date}")
+    pipeline = chain(
+        extract_purchase_invoice_lines.s(target_date),
+        save_raw_purchase_invoice_lines.s(),
+        clean_purchase_invoice_lines.s(target_date),
+        update_purchase_star_schema.s(target_date),
+    )
+    result = pipeline.apply_async()
+    logger.info(f"Purchases pipeline submitted for {target_date}, task_id: {result.id}")
     return result.id
 
 @app.task
@@ -1159,6 +1593,14 @@ app.conf.beat_schedule = {
         'task': 'etl_tasks.daily_etl_pipeline',
         'schedule': crontab(hour=2, minute=0),
     },
+    'daily-invoice-sales-etl': {
+        'task': 'etl_tasks.daily_invoice_sales_pipeline',
+        'schedule': crontab(hour=2, minute=5),
+    },
+    'daily-invoice-purchases-etl': {
+        'task': 'etl_tasks.daily_invoice_purchases_pipeline',
+        'schedule': crontab(hour=2, minute=10),
+    },
     'incremental-dimension-refresh': {
         'task': 'etl_tasks.refresh_dimensions_incremental',
         'schedule': crontab(hour='*/4', minute=0),  # Every 4 hours
@@ -1172,7 +1614,15 @@ app.conf.beat_schedule = {
 # Task routing for better resource allocation
 app.conf.task_routes = {
     'etl_tasks.extract_pos_order_lines': {'queue': 'extraction'},
+    'etl_tasks.extract_sales_invoice_lines': {'queue': 'extraction'},
+    'etl_tasks.extract_purchase_invoice_lines': {'queue': 'extraction'},
     'etl_tasks.clean_pos_data': {'queue': 'transformation'},
+    'etl_tasks.clean_sales_invoice_lines': {'queue': 'transformation'},
+    'etl_tasks.clean_purchase_invoice_lines': {'queue': 'transformation'},
     'etl_tasks.update_star_schema': {'queue': 'loading'},
+    'etl_tasks.update_invoice_sales_star_schema': {'queue': 'loading'},
+    'etl_tasks.update_purchase_star_schema': {'queue': 'loading'},
+    'etl_tasks.save_raw_sales_invoice_lines': {'queue': 'loading'},
+    'etl_tasks.save_raw_purchase_invoice_lines': {'queue': 'loading'},
     'etl_tasks.refresh_dimensions_incremental': {'queue': 'dimensions'},
 }

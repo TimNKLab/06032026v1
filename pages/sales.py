@@ -3,7 +3,12 @@ from dash import dcc, html, Output, Input, State
 import dash_mantine_components as dmc
 from datetime import date
 
-from services.sales_charts import build_revenue_trend_chart, build_category_sankey_chart, build_hourly_heatmap_chart
+from services.sales_charts import (
+    build_daily_revenue_chart,
+    build_revenue_trend_chart,
+    build_category_sankey_chart,
+    build_hourly_heatmap_chart,
+)
 from services.sales_metrics import get_revenue_comparison, get_top_products, get_hourly_sales_pattern
 
 dash.register_page(
@@ -51,7 +56,7 @@ def layout():
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Avg Transaction Value', size='sm', c='dimmed'),
+                                dmc.Text('Avg Basket Size', size='sm', c='dimmed'),
                                 dmc.Text('Rp 0', size='xl', fw=600, id='sales-kpi-avg-transaction-value'),
                                 dmc.Text('vs prev period: Rp 0 (0%)', size='xs', c='red', id='sales-kpi-avg-transaction-value-change')
                             ]),
@@ -249,13 +254,12 @@ def layout():
 # Callbacks for sales dashboard
 @dash.callback(
     Output('sales-revenue-trend', 'figure'),
-    Output('sales-category-placeholder', 'figure'),
     Input('sales-btn-apply', 'n_clicks'),
     State('sales-date-from', 'value'),
     State('sales-date-until', 'value'),
     prevent_initial_call=False,
 )
-def update_sales_charts(n_clicks, date_from, date_until):
+def update_revenue_chart(n_clicks, date_from, date_until):
     # Parse dates
     start_date = date.today()
     end_date = start_date
@@ -272,28 +276,8 @@ def update_sales_charts(n_clicks, date_from, date_until):
         except (ValueError, TypeError):
             pass
     
-    # Build charts
-    revenue_fig = build_revenue_trend_chart(start_date, end_date, 'daily')
-    placeholder_fig = {
-        'layout': {
-            'xaxis': {'visible': False},
-            'yaxis': {'visible': False},
-            'annotations': [
-                {
-                    'text': 'Sales by Category Chart Placeholder',
-                    'xref': 'paper',
-                    'yref': 'paper',
-                    'x': 0.5,
-                    'y': 0.5,
-                    'xanchor': 'center',
-                    'yanchor': 'middle',
-                    'font': {'size': 16, 'color': 'gray'}
-                }
-            ]
-        }
-    }
-    
-    return revenue_fig, placeholder_fig
+    # Build and return the daily revenue chart
+    return build_daily_revenue_chart(start_date, end_date)
 
 
 @dash.callback(

@@ -40,14 +40,17 @@ class DuckDBManager:
         data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/app/data-lake')
         return (
             f"{data_lake}/star-schema/fact_sales",
+            f"{data_lake}/star-schema/fact_invoice_sales",
+            f"{data_lake}/star-schema/fact_purchases",
             f"{data_lake}/star-schema/dim_products.parquet",
             f"{data_lake}/star-schema/dim_categories.parquet",
             f"{data_lake}/star-schema/dim_brands.parquet",
+            f"{data_lake}/star-schema/dim_taxes.parquet",
         )
 
     def _setup_views(self, conn: duckdb.DuckDBPyConnection) -> None:
         """Setup DuckDB views - fails fast on errors."""
-        fact_path, dim_products, dim_categories, dim_brands = self._get_data_paths()
+        fact_path, fact_invoice_path, fact_purchases_path, dim_products, dim_categories, dim_brands, dim_taxes = self._get_data_paths()
 
         def _parquet_columns(parquet_path: str) -> set:
             try:
@@ -114,10 +117,67 @@ class DuckDBManager:
                 COALESCE(TRY_CAST(customer_id AS BIGINT), 0) AS customer_id,
                 COALESCE(payment_method_ids, '') AS payment_method_ids,
                 COALESCE(TRY_CAST(line_id AS BIGINT), 0) AS line_id,
-                product_id,
-                quantity,
-                revenue
+                COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue
             FROM read_parquet('{fact_path}/*.parquet', union_by_name=True, filename=true)
+        """)
+
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW fact_invoice_sales AS
+            SELECT 
+                TRY_CAST(date AS TIMESTAMP) AS date,
+                COALESCE(TRY_CAST(move_id AS BIGINT), 0) AS move_id,
+                COALESCE(move_name, '') AS move_name,
+                COALESCE(TRY_CAST(customer_id AS BIGINT), 0) AS customer_id,
+                COALESCE(customer_name, '') AS customer_name,
+                COALESCE(TRY_CAST(move_line_id AS BIGINT), 0) AS move_line_id,
+                COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                COALESCE(TRY_CAST(price_unit AS DOUBLE), 0) AS price_unit,
+                COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                COALESCE(tax_ids_json, '[]') AS tax_ids_json,
+                FALSE AS is_free_item
+            FROM read_parquet('{fact_invoice_path}/*.parquet', union_by_name=True, filename=true)
+        """)
+
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW fact_purchases AS
+            SELECT 
+                TRY_CAST(date AS TIMESTAMP) AS date,
+                COALESCE(TRY_CAST(move_id AS BIGINT), 0) AS move_id,
+                COALESCE(move_name, '') AS move_name,
+                COALESCE(TRY_CAST(vendor_id AS BIGINT), 0) AS vendor_id,
+                COALESCE(vendor_name, '') AS vendor_name,
+                COALESCE(TRY_CAST(move_line_id AS BIGINT), 0) AS move_line_id,
+                COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                COALESCE(TRY_CAST(price_unit AS DOUBLE), 0) AS price_unit,
+                COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                TRY_CAST(tax_id AS BIGINT) AS tax_id,
+                COALESCE(tax_name, '') AS tax_name,
+                COALESCE(tax_ids_json, '[]') AS tax_ids_json,
+                COALESCE(TRY_CAST(is_free_item AS BOOLEAN), FALSE) AS is_free_item
+            FROM read_parquet('{fact_purchases_path}/*.parquet', union_by_name=True, filename=true)
+        """)
+
+        conn.execute("""
+            CREATE OR REPLACE VIEW fact_sales_all AS
+            SELECT 
+                date,
+                order_id AS txn_id,
+                line_id AS line_id,
+                product_id,
+                revenue,
+                quantity
+            FROM fact_sales
+            UNION ALL
+            SELECT 
+                date,
+                move_id AS txn_id,
+                move_line_id AS line_id,
+                product_id,
+                price_unit * quantity AS revenue,
+                quantity
+            FROM fact_invoice_sales
         """)
 
         conn.execute(f"""
@@ -145,6 +205,23 @@ class DuckDBManager:
                 {f"COALESCE({brand_name_col}, '')" if brand_name_col else "''"} AS product_brand
             FROM read_parquet('{dim_brands}', union_by_name=True)
         """)
+
+        if os.path.exists(dim_taxes):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW dim_taxes AS
+                SELECT
+                    COALESCE(TRY_CAST(tax_id AS BIGINT), 0) AS tax_id,
+                    COALESCE(tax_name, '') AS tax_name
+                FROM read_parquet('{dim_taxes}', union_by_name=True)
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW dim_taxes AS
+                SELECT
+                    CAST(NULL AS BIGINT) AS tax_id,
+                    CAST('' AS VARCHAR) AS tax_name
+                WHERE FALSE
+            """)
 
         logger.info("DuckDB views created successfully")
 
@@ -177,15 +254,15 @@ def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') 
     SELECT 
         ds.period_start as date,
         COALESCE(SUM(fs.revenue), 0) as revenue,
-        COALESCE(COUNT(DISTINCT fs.order_id), 0) as transactions,
+        COALESCE(COUNT(DISTINCT fs.txn_id), 0) as transactions,
         COALESCE(SUM(fs.quantity), 0) as items_sold,
         CASE 
-            WHEN COUNT(DISTINCT fs.order_id) > 0 
-            THEN SUM(fs.revenue) / COUNT(DISTINCT fs.order_id) 
+            WHEN COUNT(DISTINCT fs.txn_id) > 0 
+            THEN SUM(fs.revenue) / COUNT(DISTINCT fs.txn_id) 
             ELSE 0 
         END as avg_transaction_value
     FROM date_series ds
-    LEFT JOIN fact_sales fs ON 
+    LEFT JOIN fact_sales_all fs ON 
         fs.date >= ds.period_start AND 
         fs.date < ds.period_end
     GROUP BY ds.period_start
@@ -204,8 +281,8 @@ def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
         SELECT 
             EXTRACT(HOUR FROM date)::INT as hour,
             SUM(revenue) as revenue,
-            COALESCE(NULLIF(COUNT(DISTINCT order_id), 0), COUNT(*)) as transactions
-        FROM fact_sales
+            COALESCE(NULLIF(COUNT(DISTINCT txn_id), 0), COUNT(*)) as transactions
+        FROM fact_sales_all
         WHERE date >= ? AND date < ? + INTERVAL 1 DAY
           AND EXTRACT(HOUR FROM date) BETWEEN 7 AND 23
         GROUP BY 1
@@ -227,7 +304,7 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
         COALESCE(p.product_category, 'Unknown Category') as category,
         COALESCE(SUM(f.quantity), 0) as quantity_sold,
         COALESCE(SUM(f.revenue), 0) as total_unit_price
-    FROM fact_sales f
+    FROM fact_sales_all f
     LEFT JOIN dim_products p ON f.product_id = p.product_id
     WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
     GROUP BY 1, 2
@@ -250,17 +327,17 @@ def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     SELECT 
         -- Current period
         SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as cur_rev,
-        COALESCE(NULLIF(COUNT(DISTINCT order_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
+        COALESCE(NULLIF(COUNT(DISTINCT txn_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
                  COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as cur_txn,
         SUM(quantity) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as cur_items,
         
         -- Previous period
         SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_rev,
-        COALESCE(NULLIF(COUNT(DISTINCT order_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
+        COALESCE(NULLIF(COUNT(DISTINCT txn_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
                  COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as prev_txn,
         SUM(quantity) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_items
         
-    FROM fact_sales
+    FROM fact_sales_all
     WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY
     """
     
@@ -327,7 +404,7 @@ def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame
         date_trunc('day', date)::DATE as date,
         EXTRACT(HOUR FROM date)::INT as hour,
         SUM(revenue) as revenue
-    FROM fact_sales
+    FROM fact_sales_all
     WHERE date >= ? AND date < ? + INTERVAL 1 DAY
       AND EXTRACT(HOUR FROM date) BETWEEN 7 AND 23
     GROUP BY 1, 2
@@ -347,7 +424,7 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
                COALESCE(p.product_parent_category, 'Unknown') as parent_cat,
                COALESCE(p.product_category, 'Unknown') as cat,
                COALESCE(p.product_brand, 'Unknown') as brand
-        FROM fact_sales f
+        FROM fact_sales_all f
         LEFT JOIN dim_products p ON f.product_id = p.product_id
         WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
     ),

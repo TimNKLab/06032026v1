@@ -228,11 +228,43 @@ def _load_cashiers(odoo, star_schema_path: str) -> int:
     return len(rows)
 
 
+def _load_taxes(odoo, star_schema_path: str) -> int:
+    logger.info("Fetching taxes...")
+    if "account.tax" not in odoo.env:
+        logger.warning("Model account.tax not found; skipping taxes")
+        return 0
+
+    Tax = odoo.env["account.tax"]
+    fields = ["id", "name", "write_date"]
+    taxes = _read_all(Tax, fields)
+
+    if not taxes:
+        logger.warning("No tax records returned from Odoo")
+        return 0
+
+    rows = [
+        {
+            "tax_id": tax["id"],
+            "tax_name": tax.get("name"),
+            "write_date": tax.get("write_date"),
+        }
+        for tax in taxes
+        if tax and isinstance(tax.get("id"), int)
+    ]
+
+    df = pl.DataFrame(rows)
+    output_path = os.path.join(star_schema_path, "dim_taxes.parquet")
+    atomic_write_parquet(df, output_path)
+    logger.info("Wrote %s taxes -> %s", len(rows), output_path)
+    return len(rows)
+
+
 DIMENSION_LOADERS = {
     "products": _load_products,
     "categories": _load_categories,
     "brands": _load_brands,
     "cashiers": _load_cashiers,
+    "taxes": _load_taxes,
 }
 
 

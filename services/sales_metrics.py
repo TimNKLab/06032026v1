@@ -30,6 +30,15 @@ def get_sales_trends_data(start_date: date, end_date: date, period: str = 'daily
         print(f"DuckDB query failed in get_sales_trends_data: {e}, falling back to Odoo")
         return _get_sales_trends_data_odoo_fallback(start_date, end_date, period)
 
+def get_daily_transaction_counts(start_date: date, end_date: date) -> pd.DataFrame:
+    """
+    Return transactions aggregated per day between start_date and end_date.
+    """
+    trends_df = get_sales_trends_data(start_date, end_date, period='daily')
+    if trends_df.empty:
+        return pd.DataFrame(columns=['date', 'transactions'])
+    return trends_df[['date', 'transactions']].copy()
+
 def _get_sales_trends_data_odoo_fallback(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Odoo fallback for sales trends if DuckDB fails."""
     # Get POS data for the date range

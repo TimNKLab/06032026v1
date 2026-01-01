@@ -36,15 +36,16 @@ class DockerETLRunner:
             "categories": tk.BooleanVar(value=True),
             "brands": tk.BooleanVar(value=True),
             "cashiers": tk.BooleanVar(value=False),
+            "taxes": tk.BooleanVar(value=False),
         }
         for idx, (name, var) in enumerate(self.dimension_vars.items(), start=1):
             ttk.Checkbutton(self.root, text=name.title(), variable=var).grid(row=1, column=idx, padx=5, pady=5, sticky="w")
 
-        ttk.Button(self.root, text="Refresh Dimensions", command=self.refresh_dimensions).grid(row=1, column=5, padx=5, pady=5)
+        ttk.Button(self.root, text="Refresh Dimensions", command=self.refresh_dimensions).grid(row=1, column=6, padx=5, pady=5)
         
         # Log display
         self.log_text = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, width=80, height=20)
-        self.log_text.grid(row=2, column=0, columnspan=6, padx=5, pady=5, sticky="nsew")
+        self.log_text.grid(row=2, column=0, columnspan=7, padx=5, pady=5, sticky="nsew")
         
         # Configure grid weights
         self.root.grid_rowconfigure(2, weight=1)

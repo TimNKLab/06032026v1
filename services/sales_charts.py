@@ -3,7 +3,13 @@ import plotly.graph_objects as go
 import pandas as pd
 from datetime import date
 
-from services.sales_metrics import get_sales_trends_data, get_revenue_comparison, get_hourly_sales_pattern, get_hourly_sales_heatmap_data
+from services.sales_metrics import (
+    get_sales_trends_data,
+    get_daily_transaction_counts,
+    get_revenue_comparison,
+    get_hourly_sales_pattern,
+    get_hourly_sales_heatmap_data,
+)
 
 
 def build_revenue_trend_chart(start_date: date, end_date: date, period: str = 'daily') -> go.Figure:
@@ -104,6 +110,78 @@ def build_revenue_trend_chart(start_date: date, end_date: date, period: str = 'd
         )
     )
     
+    return fig
+
+
+def build_daily_revenue_chart(start_date: date, end_date: date) -> go.Figure:
+    """
+    Build a daily revenue line chart for the specified date range.
+    """
+    # Get the full sales data including revenue
+    trends_df = get_sales_trends_data(start_date, end_date, 'daily')
+
+    if trends_df.empty or 'revenue' not in trends_df.columns:
+        fig = go.Figure()
+        fig.add_annotation(
+            text='No revenue data available for the selected period.',
+            x=0.5,
+            y=0.5,
+            xref='paper',
+            yref='paper',
+            showarrow=False,
+            font=dict(size=14, color='gray'),
+        )
+        fig.update_layout(
+            title='Daily Revenue',
+            template='plotly_white',
+            height=400,
+        )
+        return fig
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=trends_df['date'],
+            y=trends_df['revenue'],
+            mode='lines+markers',
+            name='Revenue',
+            line=dict(color='#1864ab', width=3),
+            hovertemplate='Date: %{x}<br>Revenue: Rp %{y:,.0f}<extra></extra>',
+        )
+    )
+
+    if start_date == end_date:
+        title = f'Daily Revenue – {start_date.strftime("%d %b %Y")}'
+    else:
+        title = (
+            f'Daily Revenue – {start_date.strftime("%d %b %Y")} to '
+            f'{end_date.strftime("%d %b %Y")}'
+        )
+
+    fig.update_layout(
+        title=title,
+        template='plotly_white',
+        height=400,
+        font=dict(
+            family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+        ),
+        margin=dict(t=80, b=60, l=60, r=60),
+        xaxis=dict(
+            title='Date',
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='lightgray',
+        ),
+        yaxis=dict(
+            title='Revenue (Rp)',
+            showgrid=True,
+            gridwidth=1,
+            gridcolor='lightgray',
+            tickformat=',.0f',
+            tickprefix='Rp ',
+        ),
+    )
+
     return fig
 
 
