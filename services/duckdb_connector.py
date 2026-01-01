@@ -42,6 +42,7 @@ class DuckDBManager:
             f"{data_lake}/star-schema/fact_sales",
             f"{data_lake}/star-schema/fact_invoice_sales",
             f"{data_lake}/star-schema/fact_purchases",
+            f"{data_lake}/star-schema/fact_inventory_moves",
             f"{data_lake}/star-schema/dim_products.parquet",
             f"{data_lake}/star-schema/dim_categories.parquet",
             f"{data_lake}/star-schema/dim_brands.parquet",
@@ -50,7 +51,7 @@ class DuckDBManager:
 
     def _setup_views(self, conn: duckdb.DuckDBPyConnection) -> None:
         """Setup DuckDB views - fails fast on errors."""
-        fact_path, fact_invoice_path, fact_purchases_path, dim_products, dim_categories, dim_brands, dim_taxes = self._get_data_paths()
+        fact_path, fact_invoice_path, fact_purchases_path, fact_inventory_moves_path, dim_products, dim_categories, dim_brands, dim_taxes = self._get_data_paths()
 
         def _parquet_columns(parquet_path: str) -> set:
             try:
@@ -157,6 +158,36 @@ class DuckDBManager:
                 COALESCE(tax_ids_json, '[]') AS tax_ids_json,
                 COALESCE(TRY_CAST(is_free_item AS BOOLEAN), FALSE) AS is_free_item
             FROM read_parquet('{fact_purchases_path}/*.parquet', union_by_name=True, filename=true)
+        """)
+
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW fact_inventory_moves AS
+            SELECT
+                TRY_CAST(date AS TIMESTAMP) AS movement_date,
+                COALESCE(TRY_CAST(move_id AS BIGINT), 0) AS move_id,
+                TRY_CAST(move_line_id AS BIGINT) AS move_line_id,
+                TRY_CAST(product_id AS BIGINT) AS product_id,
+                COALESCE(product_name, '') AS product_name,
+                COALESCE(product_brand, '') AS product_brand,
+                TRY_CAST(location_src_id AS BIGINT) AS location_src_id,
+                COALESCE(location_src_name, '') AS location_src_name,
+                TRY_CAST(location_dest_id AS BIGINT) AS location_dest_id,
+                COALESCE(location_dest_name, '') AS location_dest_name,
+                COALESCE(TRY_CAST(qty_moved AS DOUBLE), 0) AS qty_moved,
+                TRY_CAST(uom_id AS BIGINT) AS uom_id,
+                COALESCE(uom_name, '') AS uom_name,
+                COALESCE(uom_category, '') AS uom_category,
+                TRY_CAST(picking_id AS BIGINT) AS picking_id,
+                COALESCE(picking_type_code, '') AS picking_type_code,
+                COALESCE(reference, '') AS reference,
+                COALESCE(origin_reference, '') AS origin_reference,
+                TRY_CAST(source_partner_id AS BIGINT) AS source_partner_id,
+                COALESCE(source_partner_name, '') AS source_partner_name,
+                TRY_CAST(destination_partner_id AS BIGINT) AS destination_partner_id,
+                COALESCE(destination_partner_name, '') AS destination_partner_name,
+                TRY_CAST(created_by_user AS BIGINT) AS created_by_user,
+                TRY_CAST(create_date AS TIMESTAMP) AS create_date
+            FROM read_parquet('{fact_inventory_moves_path}/*.parquet', union_by_name=True, filename=true)
         """)
 
         conn.execute("""

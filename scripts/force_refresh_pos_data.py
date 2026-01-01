@@ -24,12 +24,17 @@ from typing import Dict, List, Optional, Sequence, Set
 
 from etl_tasks import (
     clean_pos_data,
+    clean_inventory_moves,
     clean_sales_invoice_lines,
     extract_pos_order_lines,
+    extract_inventory_moves,
     extract_sales_invoice_lines,
+    refresh_dimensions_incremental,
     save_raw_data,
+    save_raw_inventory_moves,
     save_raw_sales_invoice_lines,
     update_star_schema,
+    update_inventory_moves_star_schema,
     update_invoice_sales_star_schema,
 )
 
@@ -37,7 +42,7 @@ logger = logging.getLogger("force_refresh_pos_data")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 
-TARGET_CHOICES = ["pos", "invoice-sales"]
+TARGET_CHOICES = ["pos", "invoice-sales", "inventory-moves"]
 
 
 def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -104,6 +109,29 @@ def _run_invoice_pipeline(target_date: str) -> Dict[str, Optional[str]]:
     }
 
 
+def _run_inventory_moves_pipeline(target_date: str) -> Dict[str, Optional[str]]:
+    logger.info("Processing inventory moves for %s", target_date)
+
+    refresh_dimensions_incremental.apply(
+        args=(["products", "locations", "uoms", "partners", "users", "companies", "lots"],),
+        throw=True,
+    ).get()
+
+    extraction = extract_inventory_moves.apply(args=(target_date,), throw=True).get()
+    raw_path = save_raw_inventory_moves.apply(args=(extraction,), throw=True).get()
+    clean_path = clean_inventory_moves.apply(args=(raw_path, target_date), throw=True).get()
+    fact_path = update_inventory_moves_star_schema.apply(args=(clean_path, target_date), throw=True).get()
+
+    return {
+        "target": "inventory-moves",
+        "date": target_date,
+        "raw_path": raw_path,
+        "clean_path": clean_path,
+        "fact_path": fact_path,
+        "records": extraction.get("count", 0),
+    }
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     start = args.start
@@ -120,6 +148,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             results.append(_run_pos_pipeline(date_str))
         if "invoice-sales" in target_set:
             results.append(_run_invoice_pipeline(date_str))
+        if "inventory-moves" in target_set:
+            results.append(_run_inventory_moves_pipeline(date_str))
 
     for date_str in dates:
         try:
