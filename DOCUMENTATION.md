@@ -7,6 +7,7 @@
 4. [Configuration](#configuration)
 5. [Running the Application](#running-the-application)
 6. [ETL Process](#etl-process)
+6.1. [Alur Data & Referensi ETL (Bahasa Indonesia)](#alur-data--referensi-etl-bahasa-indonesia)
 7. [Monitoring](#monitoring)
 8. [Troubleshooting](#troubleshooting)
 9. [Development](#development)
@@ -55,8 +56,11 @@ ODOO_API_KEY=your_api_key
 # Redis
 REDIS_URL=redis://redis:6379/0
 
-# Data Lake (defaults shown)
-DATA_LAKE_ROOT=/app/data-lake
+# Data Lake
+# - Recommended (Docker bind mount): /data-lake
+# - Legacy default in some components: /app/data-lake
+# Keep this consistent across all containers.
+DATA_LAKE_ROOT=/data-lake
 ```
 
 ### Data Lake Structure
@@ -84,6 +88,312 @@ docker-compose -f docker-compose.prod.yml up --build -d
 ```
 
 ## ETL Process
+
+### ETL Tasks Architecture (Developer Notes)
+
+`etl_tasks.py` is the **single entry point** ("mother" script) for ETL execution.
+
+- It defines the Celery `app` and all task names.
+- It wires **Celery Beat** schedules and **task routing** (queues).
+- Other scripts (for example `etl_runner.py` and `scripts/force_refresh_*.py`) import tasks/functions directly from `etl_tasks.py`.
+
+#### Task Groups (current)
+
+- **Extraction**
+  - `extract_pos_order_lines`
+  - `extract_sales_invoice_lines`
+  - `extract_purchase_invoice_lines`
+  - `extract_inventory_moves`
+- **Raw persistence**
+  - `save_raw_data`
+  - `save_raw_sales_invoice_lines`
+  - `save_raw_purchase_invoice_lines`
+  - `save_raw_inventory_moves`
+- **Cleaning / transformation**
+  - `clean_pos_data`
+  - `clean_sales_invoice_lines`
+  - `clean_purchase_invoice_lines`
+  - `clean_inventory_moves`
+- **Star-schema loading**
+  - `update_star_schema`
+  - `update_invoice_sales_star_schema`
+  - `update_purchase_star_schema`
+  - `update_inventory_moves_star_schema`
+- **Dimensions**
+  - `refresh_dimensions_incremental`
+- **Orchestration / health**
+  - `daily_etl_pipeline`, `date_range_etl_pipeline`, `catch_up_etl`, `health_check`
+
+#### Proposed Modular Layout (planned)
+
+We will keep `etl_tasks.py` as the entry point, but move implementation into modules and keep the task functions as thin wrappers.
+
+Proposed structure:
+```python
+nkdash/
+  etl_tasks.py                      # Celery app + task definitions (wrappers) + schedules/routes
+  etl/
+    __init__.py
+    config.py                       # constants, env parsing, data-lake paths
+    io_parquet.py                   # atomic parquet write/read helpers
+    metadata.py                     # ETLMetadata
+    dimension_cache.py              # DimensionLoader
+    odoo_pool.py                    # get_pooled_odoo_connection
+    odoo_helpers.py                 # safe_extract_m2o, batch_ids, extract_o2m_ids, model field helpers
+    extract/
+      pos.py                        # POS extraction implementation
+      invoices.py                   # invoice line extraction implementation
+      inventory_moves.py            # inventory extraction implementation
+    transform/
+      pos.py                        # clean_pos_data implementation
+      invoices.py                   # invoice cleaning implementation
+      inventory_moves.py            # inventory cleaning implementation
+    load/
+      facts.py                      # update_fact_* implementations
+      dimensions.py                 # refresh_dimensions_incremental implementation
+    pipelines/
+      daily.py                      # daily_*_pipeline implementations
+      ranges.py                     # date_range_etl_pipeline implementation
+      health.py                     # catch_up_etl / health_check implementations
+```
+
+#### Backward-Compatibility Rules
+
+- Celery task names **must remain** `etl_tasks.<task_name>` (Beat schedule and routing depend on this).
+- `etl_tasks.py` will continue to export the same symbols so existing scripts keep working.
+- Internal implementation can move, but wrappers in `etl_tasks.py` stay stable.
+
+#### Adding a New ETL Dataset (new developers)
+
+- Add an **extractor** under `etl/extract/<dataset>.py`.
+- Add a **raw writer** (if needed) under `etl/io_parquet.py` or a dataset-specific helper.
+- Add a **cleaner** under `etl/transform/<dataset>.py`.
+- Add a **loader** under `etl/load/<dataset>.py` (or extend `etl/load/facts.py`).
+- Register/Expose task wrappers in `etl_tasks.py` and add:
+  - Beat schedule entry (optional)
+  - Task routing queue (recommended)
+
+### Alur Data & Referensi ETL (Bahasa Indonesia)
+
+Bagian ini menjelaskan alur data **end-to-end** dari Odoo sampai tampil di dashboard, termasuk peran tiap **Celery task**, script yang memanggilnya, serta perintah operasional & troubleshooting.
+
+#### 1) Alur Data Tingkat Tinggi (Odoo → Dashboard)
+
+1. **Odoo (Sumber Data)**
+   - Data diambil via Odoo RPC (lihat `odoorpc_connector.py`).
+   - Contoh dataset:
+     - POS: `pos.order` (order + `lines` + `payments_id`)
+     - Invoice sales: `account.move` / `account.move.line` (posted `out_invoice`)
+     - Purchases: `account.move` / `account.move.line` (posted `in_invoice`)
+     - Inventory moves: `stock.move.line` (+ join ke `stock.move`, `stock.picking`, `stock.location`, dll.)
+
+2. **Celery Tasks (ETL Orchestration)**
+   - Semua task resmi tetap bernama `etl_tasks.<nama_task>`.
+   - `etl_tasks.py` adalah entrypoint; sebagian implementasi dipindah ke paket `etl/`.
+
+3. **Data Lake (Parquet Layers)**
+   - Layer yang digunakan:
+     - `raw/`: hasil ekstraksi mentah dari Odoo
+     - `clean/`: hasil pembersihan/normalisasi
+     - `star-schema/`: tabel fakta/dimensi siap query
+   - Catatan path:
+     - Lokasi root mengikuti env `DATA_LAKE_ROOT`.
+     - Pada setup Docker Windows yang umum, folder host `D:\data-lake` di-mount menjadi `/data-lake` di dalam container.
+     - Beberapa bagian kode/skrip masih menggunakan default lama `/app/data-lake`.
+     - Rekomendasi: set `DATA_LAKE_ROOT=/data-lake` di `.env` dan gunakan value yang sama untuk semua service (web/celery-worker).
+
+4. **DuckDB Views (Query Layer untuk Dashboard)**
+   - `services/duckdb_connector.py` membuat view dari Parquet:
+     - `fact_sales`, `fact_invoice_sales`, `fact_purchases`, `fact_inventory_moves`
+     - `dim_products`, `dim_categories`, `dim_brands`, `dim_taxes`
+     - `fact_sales_all` = gabungan POS + invoice sales
+
+5. **Dashboard (Dash Pages)**
+   - Contoh: `pages/sales.py`
+     - KPI & chart memanggil `services/sales_metrics.py` dan `services/sales_charts.py`
+     - Modul tersebut melakukan query ke DuckDB (fast path), lalu fallback ke Odoo bila query gagal.
+
+#### 2) Katalog ETL Tasks (Apa fungsinya?)
+
+Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasanya memanggilnya.
+
+##### A. Extraction
+
+- **`etl_tasks.extract_pos_order_lines(target_date)`**
+  - **Fungsi**: ambil POS order lines untuk `target_date`.
+  - **Implementasi**: `etl/extract/pos.py`.
+  - **Dipakai oleh**:
+    - `etl_tasks.daily_etl_pipeline`
+    - `scripts/force_refresh_pos_data.py --targets pos`
+
+- **`etl_tasks.extract_sales_invoice_lines(target_date)`**
+  - **Fungsi**: ambil invoice lines untuk sales (posted `out_invoice`).
+  - **Dipakai oleh**:
+    - `etl_tasks.daily_invoice_sales_pipeline`
+    - `scripts/force_refresh_pos_data.py --targets invoice-sales`
+
+- **`etl_tasks.extract_purchase_invoice_lines(target_date)`**
+  - **Fungsi**: ambil vendor bill lines (posted `in_invoice`).
+  - **Dipakai oleh**:
+    - `etl_tasks.daily_invoice_purchases_pipeline`
+    - `scripts/force_refresh_purchase_data.py`
+
+- **`etl_tasks.extract_inventory_moves(target_date)`**
+  - **Fungsi**: ambil inventory moves (executed move lines) untuk `target_date`.
+  - **Dipakai oleh**:
+    - `etl_tasks.daily_inventory_moves_pipeline`
+    - `scripts/force_refresh_pos_data.py --targets inventory-moves`
+
+##### B. Raw Persistence
+
+- **`etl_tasks.save_raw_data(extraction_result)`**
+  - **Fungsi**: tulis raw POS ke layer `raw/` (dataset POS).
+
+- **`etl_tasks.save_raw_sales_invoice_lines(extraction_result)`**
+  - **Fungsi**: tulis raw invoice sales ke layer `raw/` (dataset invoice sales).
+
+- **`etl_tasks.save_raw_purchase_invoice_lines(extraction_result)`**
+  - **Fungsi**: tulis raw purchases ke layer `raw/` (dataset purchases).
+
+- **`etl_tasks.save_raw_inventory_moves(extraction_result)`**
+  - **Fungsi**: tulis raw inventory moves ke layer `raw/` (dataset inventory moves).
+
+##### C. Cleaning / Transformation
+
+- **`etl_tasks.clean_pos_data(raw_file_path, target_date)`**
+  - **Fungsi**: validasi + normalisasi POS, output ke layer `clean/` (dataset POS).
+
+- **`etl_tasks.clean_sales_invoice_lines(raw_file_path, target_date)`**
+  - **Fungsi**: bersihkan invoice sales, output ke layer `clean/` (dataset invoice sales).
+
+- **`etl_tasks.clean_purchase_invoice_lines(raw_file_path, target_date)`**
+  - **Fungsi**: bersihkan purchases, output ke layer `clean/` (dataset purchases).
+
+- **`etl_tasks.clean_inventory_moves(raw_file_path, target_date)`**
+  - **Fungsi**: bersihkan inventory moves, output ke layer `clean/` (dataset inventory moves).
+
+##### D. Star Schema / Loading
+
+- **`etl_tasks.update_star_schema(clean_file_path, target_date)`**
+  - **Fungsi**: update `star-schema/fact_sales/` (POS).
+
+- **`etl_tasks.update_invoice_sales_star_schema(clean_file_path, target_date)`**
+  - **Fungsi**: update `star-schema/fact_invoice_sales/`.
+
+- **`etl_tasks.update_purchase_star_schema(clean_file_path, target_date)`**
+  - **Fungsi**: update `star-schema/fact_purchases/`.
+
+- **`etl_tasks.update_inventory_moves_star_schema(clean_file_path, target_date)`**
+  - **Fungsi**: update `star-schema/fact_inventory_moves/`.
+
+##### E. Dimensions
+
+- **`etl_tasks.refresh_dimensions_incremental(targets=None)`**
+  - **Fungsi**: build/update dimensi yang dipakai untuk enrichment (contoh: products, locations, uoms, partners, users, companies, lots).
+  - **Output**: file dimensi di `star-schema/` (misalnya `dim_products.parquet`).
+  - **Dipakai oleh**:
+    - schedule beat `incremental-dimension-refresh`
+    - pipeline inventory moves (sebelum ekstraksi)
+
+##### F. Orchestration / Pipeline
+
+- **`etl_tasks.daily_etl_pipeline(target_date=None)`**
+  - POS end-to-end (extract → raw → clean → fact).
+
+- **`etl_tasks.daily_invoice_sales_pipeline(target_date=None)`**
+  - Invoice sales end-to-end.
+
+- **`etl_tasks.daily_invoice_purchases_pipeline(target_date=None)`**
+  - Purchases end-to-end.
+
+- **`etl_tasks.daily_inventory_moves_pipeline(target_date=None)`**
+  - Inventory moves end-to-end (+ refresh dimensi terkait).
+
+- **`etl_tasks.date_range_etl_pipeline(start_date, end_date=None)`**
+  - Menjalankan pipeline harian dalam rentang tanggal.
+  - Catatan: saat ini paralel via Celery `group`.
+
+- **`etl_tasks.catch_up_etl()`**
+  - Auto backfill jika `ETLMetadata.last_processed_date` tertinggal.
+
+- **`etl_tasks.health_check()`**
+  - Health check sederhana; jika tertinggal akan trigger catch-up.
+
+#### 3) Script yang Memanggil ETL (Operator Tools)
+
+- **`etl_runner.py` (GUI lokal / operator)**
+  - Memanggil:
+    - `date_range_etl_pipeline(start, end)`
+    - `refresh_dimensions_incremental(...)` (catatan: target yang tersedia mengikuti implementasi task tersebut)
+
+- **`scripts/force_refresh_pos_data.py`**
+  - Memanggil langsung task-task (tanpa antre Celery):
+    - POS: `extract_pos_order_lines` → `save_raw_data` → `clean_pos_data` → `update_star_schema`
+    - Invoice sales: `extract_sales_invoice_lines` → `save_raw_sales_invoice_lines` → `clean_sales_invoice_lines` → `update_invoice_sales_star_schema`
+    - Inventory moves: refresh dimensi → `extract_inventory_moves` → `save_raw_inventory_moves` → `clean_inventory_moves` → `update_inventory_moves_star_schema`
+
+- **`scripts/force_refresh_purchase_data.py`**
+  - Purchases: `extract_purchase_invoice_lines` → `save_raw_purchase_invoice_lines` → `clean_purchase_invoice_lines` → `update_purchase_star_schema`
+
+- **`scripts/force_refresh_dimensions.py`**
+  - Refresh dimensi secara manual/full (misalnya products/categories/brands/cashiers/taxes) lalu tulis ke `star-schema/`.
+
+#### 4) Perintah Operasional (Command Reference)
+
+##### Jalankan ETL via Celery (dari dalam container)
+
+```bash
+# Single date
+docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.daily_etl_pipeline --args='["2025-12-23"]'
+
+# Date range
+docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.date_range_etl_pipeline --args='["2025-12-01", "2025-12-31"]'
+```
+
+##### Monitoring
+
+```bash
+# Logs
+docker-compose logs -f celery-worker
+
+# Celery worker status
+docker-compose exec celery-worker celery -A etl_tasks inspect active
+docker-compose exec celery-worker celery -A etl_tasks inspect stats
+
+# Redis keys (status/cache)
+docker-compose exec redis redis-cli KEYS "etl:*"
+docker-compose exec redis redis-cli --scan --pattern "celery-task-meta-*"
+```
+
+##### Validasi Data (cek layer output)
+
+```bash
+# Cek jumlah record fact_sales
+docker-compose exec celery-worker python -c "
+import polars as pl
+df = pl.scan_parquet('/data-lake/star-schema/fact_sales/*.parquet')
+print(f'Total records: {df.collect().height:,}')
+"
+```
+
+#### 5) Troubleshooting (Checklist Praktis)
+
+1. **Tidak ada data di dashboard**
+   - Pastikan ada parquet di `star-schema/` (mis: `/data-lake/star-schema/fact_sales/*.parquet`).
+   - Cek error log: `docker-compose logs -f celery-worker`.
+
+2. **Task gagal / exception Odoo**
+   - Cek env `.env` untuk credential Odoo.
+   - Jalankan test koneksi (lihat bagian Troubleshooting di bawah).
+
+3. **Task stuck / result meta menumpuk di Redis**
+   - Periksa task aktif:
+     - `docker-compose exec celery-worker celery -A etl_tasks inspect active`
+   - Bersihkan task meta yang nyangkut (hati-hati, ini menghapus metadata result):
+     - `docker-compose exec redis redis-cli --scan --pattern "celery-task-meta-*" | xargs docker-compose exec redis redis-cli del`
+
+4. **Ingin rebuild total**
+   - Gunakan bagian “Purging the Data Lake and Resetting Metadata” (di bawah) lalu jalankan backfill (`date_range_etl_pipeline`).
 
 ### Manual Trigger
 ```bash
@@ -183,7 +493,7 @@ After purging, rerun the desired ETL range (e.g., via `date_range_etl_pipeline`)
 2. **ETL Stuck**
    ```bash
    # List active tasks
-   docker-compose exec redis redis-cli KEYS "celery-task-meta-*" | xargs docker-compose exec redis redis-cli DEL
+   docker-compose exec celery-worker celery -A etl_tasks inspect active
    ```
 
 3. **Disk Space**
@@ -219,240 +529,3 @@ docker cp nkdash-redis-1:/data/dump.rdb ./backup_$(date +%Y%m%d).rdb
 docker cp backup.rdb nkdash-redis-1:/data/dump.rdb
 docker-compose restart redis
 ```
-
-version:
-
-markdown
-## ETL Process
-### Scheduled ETL
-- **Daily ETL**: Automatically runs at 2 AM UTC
-- **Data Retention**: 90 days (configurable in [etl_tasks.py](cci:7://file:///d:/NKLabs/Plotly/nkdash/etl_tasks.py:0:0-0:0))
-### Manual Triggers
-#### Single Date ETL
-```bash
-# Basic usage
-docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.daily_etl_pipeline --args='["2025-12-23"]'
-# With error handling
-docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.date_range_etl_pipeline --args='["2025-12-23"]'
-Date Range ETL
-bash
-# Process a range of dates (inclusive)
-docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.date_range_etl_pipeline --args='["2025-12-01", "2025-12-31"]'
-# Process current month (example for December 2025)
-docker-compose exec celery-worker bash -c 'celery -A etl_tasks call etl_tasks.date_range_etl_pipeline --args="[\"2025-12-01\", \"2025-12-31\"]"'
-Task Management
-bash
-# Force restart ETL workers
-docker-compose exec celery-worker celery -A etl_tasks purge -f
-docker-compose restart celery-worker
-# List active tasks
-docker-compose exec celery-worker celery -A etl_tasks inspect active
-# Check task status
-docker-compose exec celery-worker celery -A etl_tasks result <task_id>
-Monitoring ETL Progress
-bash
-# View logs in real-time
-docker-compose logs -f celery-worker
-# Check Redis for ETL status
-docker-compose exec redis redis-cli KEYS "etl:*"
-docker-compose exec redis redis-cli GET "etl:status:<task_id>"
-# Check processed dates
-docker-compose exec celery-worker bash -c 'ls -l /app/data-lake/clean/pos_order_lines/year=2025/month=12/'
-Error Recovery
-bash
-# Retry failed tasks
-docker-compose exec celery-worker celery -A etl_tasks retry <task_id>
-# Clean up stuck tasks
-docker-compose exec redis redis-cli --scan --pattern "celery-task-meta-*" | xargs docker-compose exec redis redis-cli del
-Data Validation
-bash
-# Check latest processed data
-docker-compose exec celery-worker python -c "
-import polars as pl
-df = pl.scan_parquet('/app/data-lake/star-schema/fact_sales/*.parquet')
-print(f'Total records: {df.collect().height:,}')
-print(f'Date range: {df.select(pl.col(\"date\").min().alias(\"min_date\"), pl.col(\"date\").max().alias(\"max_date\")).collect().to_dicts()}')
-"
-Performance Tips
-For large date ranges: Process in smaller batches (e.g., weekly chunks)
-Memory management: Monitor Redis memory usage
-Error handling: Check logs in /app/logs/etl.log
-Storage: Clean up old data with:
-bash
-# Remove data older than 90 days
-find /app/data-lake/raw -type f -mtime +90 -delete
-find /app/data-lake/clean -type f -mtime +90 -delete
-Common ETL Scenarios
-1. Backfilling Historical Data
-bash
-# Process entire year 2025 in monthly chunks
-for month in {1..12}; do
-  month_padded=$(printf "%02d" $month)
-  echo "Processing 2025-$month_padded"
-  docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.date_range_etl_pipeline --args="[\"2025-$month_padded-01\", \"2025-$month_padded-31\"]"
-done
-2. Re-processing Failed Dates
-bash
-# Find failed dates (no clean data)
-docker-compose exec celery-worker bash -c '
-for date in {01..31}; do
-  if [ ! -f "/app/data-lake/clean/pos_order_lines/year=2025/month=12/day=$date/pos_order_lines_clean_2025-12-$date.parquet" ]; then
-    echo "2025-12-$date"
-  fi
-done'
-3. Monitoring Daily Job
-bash
-# Check today's ETL status
-TODAY=$(date +%Y-%m-%d)
-docker-compose exec celery-worker bash -c '
-  if [ -f "/app/data-lake/clean/pos_order_lines/year=${TODAY:0:4}/month=${TODAY:5:2}/day=${TODAY:8:2}/pos_order_lines_clean_$TODAY.parquet" ]; then
-    echo "✅ ETL completed for $TODAY"
-  else
-    echo "❌ ETL pending for $TODAY"
-  fi
-'
-This enhanced documentation now includes:
-
-Clear examples for both single date and date range ETL
-Comprehensive monitoring commands
-Common scenarios with ready-to-use scripts
-Error recovery procedures
-Performance optimization tips
-Would you like me to add any other specific scenarios or commands to the documentation?
-
-Feedback submitted
-
-
-Your recent terminal commands:
-> docker-compose exec celery-worker celery -A etl_tasks inspect active
-> docker-compose exec celery-worker celery -A etl_tasks inspect stats
-
-yeah actually write that into the docs
-I'll update the documentation with the enhanced monitoring and management commands. Here's the improved section:
-
-markdown
-## Monitoring
-### Task Monitoring
-#### Active Tasks
-```bash
-# View currently running tasks
-docker-compose exec celery-worker celery -A etl_tasks inspect active
-# Expected output when idle:
-# -> celery@<hostname>: OK
-#     - empty -
-Worker Statistics
-bash
-# Get detailed worker metrics
-docker-compose exec celery-worker celery -A etl_tasks inspect stats
-# Sample output includes:
-# - Broker connection details
-# - Process stats (CPU/memory usage)
-# - Task execution counts
-# - Uptime and performance metrics
-Scheduled Tasks
-bash
-# View scheduled (not yet started) tasks
-docker-compose exec celery-worker celery -A etl_tasks inspect scheduled
-# View registered tasks
-docker-compose exec celery-worker celery -A etl_tasks inspect registered
-Data Quality
-Volume Inspection
-bash
-# List all Docker volumes
-docker volume ls
-# Inspect data volume
-docker volume inspect nkdash_data-lake
-Data Validation
-bash
-# Check product dimension
-docker exec nkdash-celery-worker-1 python -c "
-import polars as pl
-df = pl.read_parquet('/app/data-lake/star-schema/dim_products.parquet')
-print('📊 Product Dimension:')
-print(f'Total products: {len(df):,}')
-print('Sample categories:', df['product_category'].unique().to_list()[:5])
-"
-# Verify fact table
-docker exec nkdash-celery-worker-1 python -c "
-import polars as pl
-from datetime import datetime, timedelta
-# Find the most recent parquet file
-import glob
-latest_file = max(glob.glob('/app/data-lake/star-schema/fact_sales/*.parquet'), key=os.path.getmtime)
-df = pl.scan_parquet(latest_file)
-print(f'📅 Latest data file: {latest_file}')
-print(f'Total records: {df.select(pl.count()).collect().item():,}')
-print('Date range:', 
-      df.select(pl.col('order_date').min().alias('min_date'), 
-               pl.col('order_date').max().alias('max_date'))
-       .collect().to_dicts())
-"
-Performance Tuning
-Memory Management
-bash
-# Check Redis memory usage
-docker-compose exec redis redis-cli info memory
-# Monitor Docker container resources
-docker stats $(docker ps --format '{{.Names}}')
-Task Rate Limiting
-bash
-# Set concurrency (adjust based on system resources)
-docker-compose exec celery-worker celery -A etl_tasks worker --concurrency=4 -l INFO
-# Rate limit tasks (e.g., 10 tasks per minute)
-docker-compose exec celery-worker celery -A etl_tasks control rate_limit etl_tasks.extract_pos_order_lines 10/m
-Logging
-View Logs
-bash
-# Follow all logs
-docker-compose logs -f
-# View specific service logs
-docker-compose logs -f celery-worker
-docker-compose logs -f web
-# Check ETL logs
-docker-compose exec celery-worker tail -f /app/logs/etl.log
-Log Levels
-bash
-# Increase log verbosity
-docker-compose exec celery-worker celery -A etl_tasks worker -l DEBUG
-# Filter logs by log level
-docker-compose logs celery-worker | grep -E 'ERROR|WARNING'
-Health Checks
-Service Health
-bash
-# Check Redis health
-docker-compose exec redis redis-cli ping
-# Check Celery worker status
-docker-compose exec celery-worker celery -A etl_tasks inspect ping
-# Check web server
-curl -I http://localhost:8050/health
-Data Health
-bash
-# Check for data completeness
-docker exec nkdash-celery-worker-1 python -c "
-import polars as pl
-from datetime import datetime, timedelta
-# Check last 7 days of data
-dates = [(datetime.now() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
-missing = []
-for date in dates:
-    path = f'/app/data-lake/clean/pos_order_lines/year={date[:4]}/month={date[5:7]}/day={date[8:10]}/'
-    if not pl.scan_parquet(f'{path}/*.parquet').collect().is_empty():
-        print(f'✅ {date}: Data exists')
-    else:
-        print(f'❌ {date}: Missing data')
-        missing.append(date)
-if missing:
-    print(f'\nMissing data for {len(missing)} days. To backfill:')
-    print(f'docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.date_range_etl_pipeline --args=\'["{min(missing)}", "{max(missing)}"]\'')
-"
-Alerting
-Setup Email Alerts
-python
-# In your Celery configuration
-app.conf.worker_send_task_events = True
-app.conf.task_send_sent_event = True
-app.conf.worker_send_task_events = True
-@app.task(bind=True, max_retries=3)
-def alert_on_failure(self, exc, task_id, *args, **kwargs):
-    # Implement your alerting logic here
-    print(f"Alert! Task {task_id} failed: {exc}")

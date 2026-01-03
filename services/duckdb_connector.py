@@ -149,6 +149,8 @@ class DuckDBManager:
                 COALESCE(move_name, '') AS move_name,
                 COALESCE(TRY_CAST(vendor_id AS BIGINT), 0) AS vendor_id,
                 COALESCE(vendor_name, '') AS vendor_name,
+                TRY_CAST(purchase_order_id AS BIGINT) AS purchase_order_id,
+                COALESCE(purchase_order_name, '') AS purchase_order_name,
                 COALESCE(TRY_CAST(move_line_id AS BIGINT), 0) AS move_line_id,
                 COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
                 COALESCE(TRY_CAST(price_unit AS DOUBLE), 0) AS price_unit,
@@ -255,6 +257,66 @@ class DuckDBManager:
             """)
 
         logger.info("DuckDB views created successfully")
+
+
+def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
+    conn = DuckDBManager().get_connection()
+    _, _, _, _, dim_products, _, dim_brands, _ = DuckDBManager._get_data_paths()
+
+    def _parquet_columns(parquet_path: str) -> set:
+        try:
+            rows = conn.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{parquet_path}')"
+            ).fetchall()
+            return {r[0] for r in rows if r and r[0]}
+        except Exception:
+            return set()
+
+    brands_cols = _parquet_columns(dim_brands)
+
+    brand_name_col = (
+        "brand_name" if "brand_name" in brands_cols
+        else "product_brand" if "product_brand" in brands_cols
+        else None
+    )
+    principal_name_col = (
+        "principal_name" if "principal_name" in brands_cols
+        else None
+    )
+
+    if brand_name_col and principal_name_col:
+        principal_expr = f"COALESCE(NULLIF(TRIM(b.{principal_name_col}), ''), 'Unknown Principal')"
+        brand_join = f"LOWER(TRIM(b.{brand_name_col})) = LOWER(TRIM(p.product_brand))"
+    else:
+        principal_expr = "'Unknown Principal'"
+        brand_join = "FALSE"
+
+    query = f"""
+        WITH base AS (
+            SELECT
+                {principal_expr} AS principal,
+                f.revenue AS revenue
+            FROM fact_sales_all f
+            LEFT JOIN dim_products p
+                ON f.product_id = p.product_id
+            LEFT JOIN read_parquet('{dim_brands}', union_by_name=True) b
+                ON {brand_join}
+            WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
+        )
+        SELECT
+            principal,
+            SUM(revenue) AS revenue
+        FROM base
+        GROUP BY 1
+        ORDER BY revenue DESC
+        LIMIT ?
+    """
+
+    try:
+        return conn.execute(query, [start_date, end_date, int(limit)]).df()
+    except Exception as exc:
+        logger.exception("DuckDB query failed in query_sales_by_principal: %s", exc)
+        return pd.DataFrame(columns=["principal", "revenue"])
 
 
 # Module-level connection getter

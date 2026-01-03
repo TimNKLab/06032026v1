@@ -8,6 +8,7 @@ from services.sales_charts import (
     build_revenue_trend_chart,
     build_category_sankey_chart,
     build_hourly_heatmap_chart,
+    build_sales_by_principal_chart,
 )
 from services.sales_metrics import get_revenue_comparison, get_top_products, get_hourly_sales_pattern
 
@@ -312,6 +313,32 @@ def update_additional_charts(n_clicks, date_from, date_until):
     hourly_fig = build_hourly_heatmap_chart(start_date, end_date)
     
     return sankey_fig, hourly_fig
+
+
+@dash.callback(
+    Output('sales-by-principal', 'figure'),
+    Input('sales-btn-apply', 'n_clicks'),
+    State('sales-date-from', 'value'),
+    State('sales-date-until', 'value'),
+    prevent_initial_call=True,
+)
+def update_sales_by_principal_chart(n_clicks, date_from, date_until):
+    start_date = date.today()
+    end_date = start_date
+
+    if date_from:
+        try:
+            start_date = date.fromisoformat(date_from)
+        except (ValueError, TypeError):
+            pass
+
+    if date_until:
+        try:
+            end_date = date.fromisoformat(date_until)
+        except (ValueError, TypeError):
+            pass
+
+    return build_sales_by_principal_chart(start_date, end_date)
 
 
 @dash.callback(

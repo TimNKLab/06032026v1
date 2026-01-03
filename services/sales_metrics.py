@@ -5,7 +5,7 @@ import polars as pl
 import pytz
 
 from services.pos_data import get_pos_order_lines_batched, create_fact_dataframe
-from services.duckdb_connector import query_sales_trends, query_hourly_sales_pattern, query_hourly_sales_heatmap, query_top_products, query_revenue_comparison
+from services.duckdb_connector import query_sales_trends, query_hourly_sales_pattern, query_hourly_sales_heatmap, query_top_products, query_revenue_comparison, query_sales_by_principal
 
 
 def get_sales_trends_data(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
@@ -436,6 +436,21 @@ def get_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.Da
     except Exception as e:
         print(f"DuckDB query failed in get_top_products: {e}")
         return pd.DataFrame(columns=['product_name', 'category', 'quantity_sold', 'total_unit_price'])
+
+
+def get_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
+    """Aggregate sales revenue by principal.
+
+    Principal is derived from brand via dim_brands.parquet (brand -> principal_name).
+    """
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+
+    try:
+        return query_sales_by_principal(start_date, end_date, limit)
+    except Exception as e:
+        print(f"DuckDB query failed in get_sales_by_principal: {e}")
+        return pd.DataFrame(columns=['principal', 'revenue'])
 
 
 def _get_top_products_odoo_fallback(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:

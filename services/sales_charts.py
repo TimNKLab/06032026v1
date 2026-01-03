@@ -9,6 +9,7 @@ from services.sales_metrics import (
     get_revenue_comparison,
     get_hourly_sales_pattern,
     get_hourly_sales_heatmap_data,
+    get_sales_by_principal,
 )
 
 
@@ -43,7 +44,7 @@ def build_revenue_trend_chart(start_date: date, end_date: date, period: str = 'd
             height=400
         )
         return fig
-    
+
     # Create the trend chart
     fig = go.Figure()
     
@@ -110,6 +111,57 @@ def build_revenue_trend_chart(start_date: date, end_date: date, period: str = 'd
         )
     )
     
+    return fig
+
+
+def build_sales_by_principal_chart(start_date: date, end_date: date, limit: int = 20) -> go.Figure:
+    sales_df = get_sales_by_principal(start_date, end_date, limit=limit)
+
+    if sales_df.empty:
+        return go.Figure().update_layout(
+            title='Sales by Principal',
+            template='plotly_white',
+            height=350,
+            showlegend=False,
+        )
+
+    df = sales_df.copy()
+    if 'principal' not in df.columns:
+        df['principal'] = 'Unknown Principal'
+    if 'revenue' not in df.columns:
+        df['revenue'] = 0
+
+    df['principal'] = df['principal'].fillna('').astype(str).replace({'': 'Unknown Principal'})
+    df['revenue'] = pd.to_numeric(df['revenue'], errors='coerce').fillna(0)
+    df = df.sort_values('revenue', ascending=False).head(limit)
+
+    fig = px.icicle(
+        df,
+        path=['principal'],
+        values='revenue',
+        color='revenue',
+        color_continuous_scale='Blues',
+        branchvalues='total',
+    )
+
+    if start_date == end_date:
+        title = f'Sales by Principal – {start_date.strftime("%d %b %Y")}'
+    else:
+        title = f'Sales by Principal – {start_date.strftime("%d %b %Y")} to {end_date.strftime("%d %b %Y")}'
+
+    fig.update_traces(
+        hovertemplate='Principal: %{label}<br>Revenue: Rp %{value:,.0f}<extra></extra>'
+    )
+    fig.update_layout(
+        title=title,
+        template='plotly_white',
+        height=350,
+        font=dict(family="'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"),
+        margin=dict(t=80, b=60, l=80, r=60),
+        coloraxis=dict(showscale=False),
+        showlegend=False,
+    )
+
     return fig
 
 
