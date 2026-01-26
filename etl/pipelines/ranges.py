@@ -23,9 +23,9 @@ def date_range_etl_pipeline_impl(start_date: str, end_date: str) -> Dict[str, An
     ]
 
     # Import here to avoid circular imports
-    from etl.pipelines.daily import daily_etl_pipeline_impl
-    
-    job = group(daily_etl_pipeline_impl.si(date_str) for date_str in date_range)
+    from etl_tasks import daily_etl_pipeline
+
+    job = group(daily_etl_pipeline.si(date_str) for date_str in date_range)
     result = job.apply_async()
 
     return {

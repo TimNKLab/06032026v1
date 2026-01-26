@@ -1,51 +1,52 @@
-# New Khatulistiwa KPI Dashboard - Complete Guide
+# Dashboard KPI New Khatulistiwa - Panduan Lengkap
 
-## Table of Contents
-1. [Overview](#overview)
-2. [Prerequisites](#prerequisites)
-3. [Installation](#installation)
-4. [Configuration](#configuration)
-5. [Running the Application](#running-the-application)
-6. [ETL Process](#etl-process)
+## Daftar Isi
+1. [Ikhtisar](#ikhtisar)
+2. [Prasyarat](#prasyarat)
+3. [Instalasi](#instalasi)
+4. [Konfigurasi](#konfigurasi)
+5. [Menjalankan Aplikasi](#menjalankan-aplikasi)
+6. [Proses ETL](#proses-etl)
 6.1. [Alur Data & Referensi ETL (Bahasa Indonesia)](#alur-data--referensi-etl-bahasa-indonesia)
-7. [Monitoring](#monitoring)
-8. [Troubleshooting](#troubleshooting)
-9. [Development](#development)
+7. [Pemantauan](#pemantauan)
+8. [Pemecahan Masalah](#pemecahan-masalah)
+9. [Pengembangan](#pengembangan)
 
-## Overview
+## Ikhtisar
 
-This dashboard provides real-time sales analytics for New Khatulistiwa, built with:
-- **Frontend**: Plotly Dash with Dash Mantine Components
+Dashboard ini menyediakan analitik penjualan real-time untuk New Khatulistiwa, dibangun dengan:
+- **Frontend**: Plotly Dash dengan Dash Mantine Components
 - **Backend**: Python (Polars, Celery, Redis)
-- **Data Pipeline**: Odoo → Raw Parquet → Clean Parquet → Star Schema
-- **Containerization**: Docker with multi-stage builds
+- **Pipeline Data**: Odoo → Parquet Raw → Parquet Clean → Star Schema
+- **Kontainerisasi**: Docker dengan multi-stage build
 
-## Prerequisites
+## Prasyarat
 
 - Docker & Docker Compose
 - Python 3.9+
-- Odoo API access credentials
-- Redis (included in Docker setup)
+- Kredensial akses API Odoo
+- Redis (sudah termasuk dalam setup Docker)
 
-## Installation
+## Instalasi
 
-1. Clone the repository:
+1. Clone repository:
    ```bash
-   git clone https://github.com/yourusername/nkdash.git
+   git clone <your-repo-url>
    cd nkdash
    ```
 
-2. Create and configure `.env` file:
+2. Buat dan konfigurasi file `.env`:
    ```bash
-   cp .env.example .env
-   # Edit with your credentials
+   # Buat .env (tidak ada .env.example di repo ini)
+   # Edit dengan kredensial Anda
    ```
 
-## Configuration
+## Cara Menggunakan
 
-### Environment Variables (`.env`)
+### Variabel Environment (`.env`)
 ```ini
-# Odoo Connection
+# Koneksi Odoo
+di .env, ganti credentials berikut.
 ODOO_HOST=your-odoo-instance.odoo.com
 ODOO_PORT=443
 ODOO_PROTOCOL=jsonrpc+ssl
@@ -57,121 +58,122 @@ ODOO_API_KEY=your_api_key
 REDIS_URL=redis://redis:6379/0
 
 # Data Lake
-# - Recommended (Docker bind mount): /data-lake
-# - Legacy default in some components: /app/data-lake
-# Keep this consistent across all containers.
+# - Rekomendasi (Docker bind mount): /data-lake
+# - Default lama pada beberapa komponen: /app/data-lake
+# Pastikan ini konsisten di semua container.
 DATA_LAKE_ROOT=/data-lake
 ```
 
-### Data Lake Structure
+### Struktur Data Lake
 ```
 data-lake/
-├── raw/            # Raw data from Odoo
-├── clean/          # Processed data
-└── star-schema/    # Analytics-ready data
+├── raw/            # Data mentah dari Odoo
+├── clean/          # Data yang sudah diproses
+└── star-schema/    # Data siap analitik
 ```
 
-## Running the Application
+## Menjalankan Aplikasi
 
-### Development Mode
+### Mode Development
 ```bash
-# Start all services
+# Jalankan semua service
 docker-compose up --build
 
-# Or start specific services
-docker-compose up web celery-worker redis
+# Atau jalankan service tertentu
+docker-compose up dash-app celery-worker celery-beat redis
 ```
 
-### Production Mode
-```bash
-docker-compose -f docker-compose.prod.yml up --build -d
-```
+### Catatan (Windows)
 
-## ETL Process
+- **Bind mount data lake**: host `D:\\data-lake` di-mount ke `/data-lake` di dalam container.
+- **Bind mount logs**: host `D:\\logs` di-mount ke `/app/logs`.
+- **Port Dash app**: `http://localhost:8050`.
 
-### ETL Tasks Architecture (Developer Notes)
+## Proses ETL
 
-`etl_tasks.py` is the **single entry point** ("mother" script) for ETL execution.
+### Arsitektur Task ETL (Catatan Developer)
 
-- It defines the Celery `app` and all task names.
-- It wires **Celery Beat** schedules and **task routing** (queues).
-- Other scripts (for example `etl_runner.py` and `scripts/force_refresh_*.py`) import tasks/functions directly from `etl_tasks.py`.
+`etl_tasks.py` adalah **satu-satunya entry point** ("mother" script) untuk eksekusi ETL.
 
-#### Task Groups (current)
+- Mendefinisikan Celery `app` dan semua nama task.
+- Mengatur jadwal **Celery Beat** dan **routing task** (queue).
+- Script lain (misalnya `etl_runner.py` dan `scripts/force_refresh_*.py`) mengimpor task/fungsi langsung dari `etl_tasks.py`.
 
-- **Extraction**
+#### Grup Task (saat ini)
+
+- **Ekstraksi**
   - `extract_pos_order_lines`
   - `extract_sales_invoice_lines`
   - `extract_purchase_invoice_lines`
   - `extract_inventory_moves`
-- **Raw persistence**
+- **Penyimpanan raw**
   - `save_raw_data`
   - `save_raw_sales_invoice_lines`
   - `save_raw_purchase_invoice_lines`
   - `save_raw_inventory_moves`
-- **Cleaning / transformation**
+- **Cleaning / transformasi**
   - `clean_pos_data`
   - `clean_sales_invoice_lines`
   - `clean_purchase_invoice_lines`
   - `clean_inventory_moves`
-- **Star-schema loading**
+- **Loading star-schema**
   - `update_star_schema`
   - `update_invoice_sales_star_schema`
   - `update_purchase_star_schema`
   - `update_inventory_moves_star_schema`
-- **Dimensions**
+- **Dimensi**
   - `refresh_dimensions_incremental`
-- **Orchestration / health**
+- **Orkestrasi / kesehatan**
   - `daily_etl_pipeline`, `date_range_etl_pipeline`, `catch_up_etl`, `health_check`
 
-#### Proposed Modular Layout (planned)
+#### Layout Modular yang Diusulkan (rencana)
 
-We will keep `etl_tasks.py` as the entry point, but move implementation into modules and keep the task functions as thin wrappers.
+Kita akan mempertahankan `etl_tasks.py` sebagai entry point, tetapi memindahkan implementasi ke modul-modul dan menjaga fungsi task sebagai wrapper tipis.
 
-Proposed structure:
+Struktur yang diusulkan:
 ```python
 nkdash/
-  etl_tasks.py                      # Celery app + task definitions (wrappers) + schedules/routes
+  etl_tasks.py                      # Celery app + definisi task (wrapper) + schedule/route
   etl/
     __init__.py
-    config.py                       # constants, env parsing, data-lake paths
-    io_parquet.py                   # atomic parquet write/read helpers
+    config.py                       # konstanta, parsing env, path data-lake
+    io_parquet.py                   # helper write/read parquet secara atomik
     metadata.py                     # ETLMetadata
-    dimension_cache.py              # DimensionLoader
-    odoo_pool.py                    # get_pooled_odoo_connection
-    odoo_helpers.py                 # safe_extract_m2o, batch_ids, extract_o2m_ids, model field helpers
+    dimension_cache.py              # Loader dim tables
+    odoo_pool.py                    # Pool connection ke odoo
+    odoo_helpers.py                 # safe_extract_m2o, batch_ids, extract_o2m_ids, helper field model
     extract/
-      pos.py                        # POS extraction implementation
-      invoices.py                   # invoice line extraction implementation
-      inventory_moves.py            # inventory extraction implementation
+      pos.py                        # implementasi ekstraksi POS
+      invoices.py                   # implementasi ekstraksi invoice line
+      inventory_moves.py            # implementasi ekstraksi inventory
     transform/
-      pos.py                        # clean_pos_data implementation
-      invoices.py                   # invoice cleaning implementation
-      inventory_moves.py            # inventory cleaning implementation
+      pos.py                        # implementasi clean_pos_data
+      invoices.py                   # implementasi cleaning invoice
+      inventory_moves.py            # implementasi cleaning inventory
     load/
-      facts.py                      # update_fact_* implementations
-      dimensions.py                 # refresh_dimensions_incremental implementation
+      facts.py                      # implementasi update_fact_*
+      dimensions.py                 # implementasi refresh_dimensions_incremental
     pipelines/
-      daily.py                      # daily_*_pipeline implementations
-      ranges.py                     # date_range_etl_pipeline implementation
-      health.py                     # catch_up_etl / health_check implementations
+      daily.py                      # implementasi daily_*_pipeline
+      ranges.py                     # implementasi date_range_etl_pipeline
+      health.py                     # implementasi catch_up_etl / health_check
 ```
 
-#### Backward-Compatibility Rules
+#### Aturan Backward Compatibility
 
-- Celery task names **must remain** `etl_tasks.<task_name>` (Beat schedule and routing depend on this).
-- `etl_tasks.py` will continue to export the same symbols so existing scripts keep working.
-- Internal implementation can move, but wrappers in `etl_tasks.py` stay stable.
+- Nama task Celery **harus tetap** `etl_tasks.<task_name>` (Beat schedule dan routing bergantung pada ini).
+- `etl_tasks.py` akan tetap mengekspor simbol yang sama agar script lama tetap berjalan.
+- Implementasi internal boleh dipindah, tetapi wrapper di `etl_tasks.py` harus stabil.
 
-#### Adding a New ETL Dataset (new developers)
+#### Menambahkan Dataset ETL Baru (developer baru)
 
-- Add an **extractor** under `etl/extract/<dataset>.py`.
-- Add a **raw writer** (if needed) under `etl/io_parquet.py` or a dataset-specific helper.
-- Add a **cleaner** under `etl/transform/<dataset>.py`.
-- Add a **loader** under `etl/load/<dataset>.py` (or extend `etl/load/facts.py`).
-- Register/Expose task wrappers in `etl_tasks.py` and add:
-  - Beat schedule entry (optional)
-  - Task routing queue (recommended)
+- Tambahkan **extractor** di `etl/extract/<dataset>.py`.
+- Tambahkan **raw writer** (jika perlu) di `etl/io_parquet.py` atau helper spesifik dataset.
+- Tambahkan **cleaner** di `etl/transform/<dataset>.py`.
+- Tambahkan **loader** di `etl/load/<dataset>.py` (atau extend `etl/load/facts.py`).
+- Register/Expose wrapper task di `etl_tasks.py` dan tambahkan:
+  - Entri schedule Beat (opsional)
+  - Queue routing task (disarankan)
 
 ### Alur Data & Referensi ETL (Bahasa Indonesia)
 
@@ -187,11 +189,11 @@ Bagian ini menjelaskan alur data **end-to-end** dari Odoo sampai tampil di dashb
      - Purchases: `account.move` / `account.move.line` (posted `in_invoice`)
      - Inventory moves: `stock.move.line` (+ join ke `stock.move`, `stock.picking`, `stock.location`, dll.)
 
-2. **Celery Tasks (ETL Orchestration)**
-   - Semua task resmi tetap bernama `etl_tasks.<nama_task>`.
+2. **Celery Tasks (Orkestrasi ETL)**
+   - Semua task bernama `etl_tasks.<nama_task>`.
    - `etl_tasks.py` adalah entrypoint; sebagian implementasi dipindah ke paket `etl/`.
 
-3. **Data Lake (Parquet Layers)**
+3. **Data Lake (Layer Parquet)**
    - Layer yang digunakan:
      - `raw/`: hasil ekstraksi mentah dari Odoo
      - `clean/`: hasil pembersihan/normalisasi
@@ -200,9 +202,9 @@ Bagian ini menjelaskan alur data **end-to-end** dari Odoo sampai tampil di dashb
      - Lokasi root mengikuti env `DATA_LAKE_ROOT`.
      - Pada setup Docker Windows yang umum, folder host `D:\data-lake` di-mount menjadi `/data-lake` di dalam container.
      - Beberapa bagian kode/skrip masih menggunakan default lama `/app/data-lake`.
-     - Rekomendasi: set `DATA_LAKE_ROOT=/data-lake` di `.env` dan gunakan value yang sama untuk semua service (web/celery-worker).
+     - Rekomendasi: set `DATA_LAKE_ROOT=/data-lake` di `.env` dan gunakan value yang sama untuk semua service (dash-app/celery-worker/celery-beat).
 
-4. **DuckDB Views (Query Layer untuk Dashboard)**
+4. **DuckDB Views (Layer Query untuk Dashboard)**
    - `services/duckdb_connector.py` membuat view dari Parquet:
      - `fact_sales`, `fact_invoice_sales`, `fact_purchases`, `fact_inventory_moves`
      - `dim_products`, `dim_categories`, `dim_brands`, `dim_taxes`
@@ -213,14 +215,15 @@ Bagian ini menjelaskan alur data **end-to-end** dari Odoo sampai tampil di dashb
      - KPI & chart memanggil `services/sales_metrics.py` dan `services/sales_charts.py`
      - Modul tersebut melakukan query ke DuckDB (fast path), lalu fallback ke Odoo bila query gagal.
 
-#### 2) Katalog ETL Tasks (Apa fungsinya?)
+#### 2) Katalog Task ETL (Apa fungsinya?)
 
 Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasanya memanggilnya.
 
-##### A. Extraction
+##### A. Ekstraksi
+Setiap ekstraktor bisa diakses melalui penjadwalan maupun by command.
 
 - **`etl_tasks.extract_pos_order_lines(target_date)`**
-  - **Fungsi**: ambil POS order lines untuk `target_date`.
+  - **Fungsi**: ambil POS order `target_date`.
   - **Implementasi**: `etl/extract/pos.py`.
   - **Dipakai oleh**:
     - `etl_tasks.daily_etl_pipeline`
@@ -244,7 +247,23 @@ Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasan
     - `etl_tasks.daily_inventory_moves_pipeline`
     - `scripts/force_refresh_pos_data.py --targets inventory-moves`
 
-##### B. Raw Persistence
+###### Inventory moves — schema penting (untuk rekonsiliasi)
+
+`fact_inventory_moves` sekarang menyimpan kolom tambahan untuk klasifikasi pergerakan stok:
+
+- **`movement_type`**: tipe pergerakan (string)
+  - `incoming`: penerimaan barang ke lokasi internal (vendor receipts)
+  - `production_in`: hasil produksi masuk ke stok internal
+  - `production_out`: konsumsi bahan baku untuk produksi
+  - `adjustment`: penyesuaian stok (stock count / write-off / koreksi manual; biasanya melibatkan location usage `inventory`)
+  - `transfer`: perpindahan internal (antar lokasi internal)
+- **`inventory_adjustment_flag`**: boolean, `True` jika diklasifikasikan sebagai adjustment
+- **`manufacturing_order_id`**: ID manufacturing order bila terkait produksi (output/consumption)
+
+Catatan:
+- Dashboard Sell-through menggunakan **`incoming + production_in`** sebagai “Units Received” default (adjustment & production_out tidak dihitung sebagai receipt).
+
+##### B. Penyimpanan Raw
 
 - **`etl_tasks.save_raw_data(extraction_result)`**
   - **Fungsi**: tulis raw POS ke layer `raw/` (dataset POS).
@@ -258,7 +277,7 @@ Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasan
 - **`etl_tasks.save_raw_inventory_moves(extraction_result)`**
   - **Fungsi**: tulis raw inventory moves ke layer `raw/` (dataset inventory moves).
 
-##### C. Cleaning / Transformation
+##### C. Cleaning / Transformasi
 
 - **`etl_tasks.clean_pos_data(raw_file_path, target_date)`**
   - **Fungsi**: validasi + normalisasi POS, output ke layer `clean/` (dataset POS).
@@ -286,7 +305,7 @@ Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasan
 - **`etl_tasks.update_inventory_moves_star_schema(clean_file_path, target_date)`**
   - **Fungsi**: update `star-schema/fact_inventory_moves/`.
 
-##### E. Dimensions
+##### E. Dimensi
 
 - **`etl_tasks.refresh_dimensions_incremental(targets=None)`**
   - **Fungsi**: build/update dimensi yang dipakai untuk enrichment (contoh: products, locations, uoms, partners, users, companies, lots).
@@ -295,7 +314,7 @@ Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasan
     - schedule beat `incremental-dimension-refresh`
     - pipeline inventory moves (sebelum ekstraksi)
 
-##### F. Orchestration / Pipeline
+##### F. Orkestrasi / Pipeline
 
 - **`etl_tasks.daily_etl_pipeline(target_date=None)`**
   - POS end-to-end (extract → raw → clean → fact).
@@ -309,6 +328,9 @@ Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasan
 - **`etl_tasks.daily_inventory_moves_pipeline(target_date=None)`**
   - Inventory moves end-to-end (+ refresh dimensi terkait).
 
+- **`etl_tasks.daily_stock_quants_pipeline(target_date=None)`**
+  - Stock quants snapshot end-to-end (+ refresh dimensi terkait).
+
 - **`etl_tasks.date_range_etl_pipeline(start_date, end_date=None)`**
   - Menjalankan pipeline harian dalam rentang tanggal.
   - Catatan: saat ini paralel via Celery `group`.
@@ -317,9 +339,9 @@ Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasan
   - Auto backfill jika `ETLMetadata.last_processed_date` tertinggal.
 
 - **`etl_tasks.health_check()`**
-  - Health check sederhana; jika tertinggal akan trigger catch-up.
+  - Health check sederhana; jika tertinggal akan memicu catch-up.
 
-#### 3) Script yang Memanggil ETL (Operator Tools)
+#### 3) Script Force Refresh (Tools Operator)
 
 - **`etl_runner.py` (GUI lokal / operator)**
   - Memanggil:
@@ -331,32 +353,57 @@ Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasan
     - POS: `extract_pos_order_lines` → `save_raw_data` → `clean_pos_data` → `update_star_schema`
     - Invoice sales: `extract_sales_invoice_lines` → `save_raw_sales_invoice_lines` → `clean_sales_invoice_lines` → `update_invoice_sales_star_schema`
     - Inventory moves: refresh dimensi → `extract_inventory_moves` → `save_raw_inventory_moves` → `clean_inventory_moves` → `update_inventory_moves_star_schema`
+    
+    refresh data PoS dari docker: `docker-compose exec celery-worker python scripts/force_refresh_pos_data.py --start 2026-01-06 --end 2026-01-07 --targets pos`
+    refresh penjualan invoice dari docker: `docker-compose exec celery-worker python scripts/force_refresh_pos_data.py --start 2026-01-06 --end 2026-01-07 --targets invoice-sales`
+    refresh pergerakan inventory dari docker: `docker-compose exec celery-worker python scripts/force_refresh_pos_data.py --start 2026-01-06 --end 2026-01-07 --targets inventory-moves`
+    refresh stock quants dari docker: `docker-compose exec celery-worker python scripts/force_refresh_stock_quants.py --start 2026-01-06 --end 2026-01-07`
 
 - **`scripts/force_refresh_purchase_data.py`**
   - Purchases: `extract_purchase_invoice_lines` → `save_raw_purchase_invoice_lines` → `clean_purchase_invoice_lines` → `update_purchase_star_schema`
+    cara refresh data purchase dari docker: `docker-compose exec celery-worker python scripts/force_refresh_purchase_data.py --start 2026-01-06 --end 2026-01-07`
 
 - **`scripts/force_refresh_dimensions.py`**
   - Refresh dimensi secara manual/full (misalnya products/categories/brands/cashiers/taxes) lalu tulis ke `star-schema/`.
+  
+    cara refresh dimensi dari docker: `docker-compose exec celery-worker python scripts/force_refresh_dimensions.py`
 
-#### 4) Perintah Operasional (Command Reference)
+- **`scripts/force_refresh_stock_quants.py`**
+  - Stock quants snapshot: refresh dimensi → `extract_stock_quants` → `save_raw_stock_quants` → `clean_stock_quants` → `update_stock_quants_star_schema`
+    cara refresh stock quants dari docker: `docker-compose exec celery-worker python scripts/force_refresh_stock_quants.py --start 2026-01-06 --end 2026-01-07`
+
+#### 4) Perintah Operasional (Referensi Command)
 
 ##### Jalankan ETL via Celery (dari dalam container)
 
+via command prompt 
 ```bash
-# Single date
-docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.daily_etl_pipeline --args='["2025-12-23"]'
+# Tanggal tunggal (pipeline POS)
+docker-compose exec celery-worker python -c "from etl_tasks import daily_etl_pipeline; daily_etl_pipeline.delay('2025-12-24')"
 
-# Date range
-docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.date_range_etl_pipeline --args='["2025-12-01", "2025-12-31"]'
+# Tanggal tunggal (invoice sales)
+docker-compose exec celery-worker python -c "from etl_tasks import daily_invoice_sales_pipeline; daily_invoice_sales_pipeline.delay('2025-12-24')"
+
+# Tanggal tunggal (purchases)
+docker-compose exec celery-worker python -c "from etl_tasks import daily_invoice_purchases_pipeline; daily_invoice_purchases_pipeline.delay('2025-12-24')"
+
+# Tanggal tunggal (inventory moves)
+docker-compose exec celery-worker python -c "from etl_tasks import daily_inventory_moves_pipeline; daily_inventory_moves_pipeline.delay('2025-12-24')"
+
+# Tanggal tunggal (stock quants snapshot)
+docker-compose exec celery-worker python -c "from etl_tasks import daily_stock_quants_pipeline; daily_stock_quants_pipeline.delay('2025-12-24')"
+
+# Rentang tanggal (mengantrikan group paralel pipeline POS harian)
+docker-compose exec celery-worker python -c "from etl_tasks import date_range_etl_pipeline; date_range_etl_pipeline.delay('2025-12-23','2025-12-24')"
 ```
 
-##### Monitoring
+##### Pemantauan
 
 ```bash
-# Logs
+# Log
 docker-compose logs -f celery-worker
 
-# Celery worker status
+# Status worker Celery
 docker-compose exec celery-worker celery -A etl_tasks inspect active
 docker-compose exec celery-worker celery -A etl_tasks inspect stats
 
@@ -365,7 +412,7 @@ docker-compose exec redis redis-cli KEYS "etl:*"
 docker-compose exec redis redis-cli --scan --pattern "celery-task-meta-*"
 ```
 
-##### Validasi Data (cek layer output)
+##### Validasi Data (cek output layer)
 
 ```bash
 # Cek jumlah record fact_sales
@@ -386,88 +433,87 @@ print(f'Total records: {df.collect().height:,}')
    - Cek env `.env` untuk credential Odoo.
    - Jalankan test koneksi (lihat bagian Troubleshooting di bawah).
 
-3. **Task stuck / result meta menumpuk di Redis**
+3. **Task macet / result meta menumpuk di Redis**
    - Periksa task aktif:
      - `docker-compose exec celery-worker celery -A etl_tasks inspect active`
    - Bersihkan task meta yang nyangkut (hati-hati, ini menghapus metadata result):
      - `docker-compose exec redis redis-cli --scan --pattern "celery-task-meta-*" | xargs docker-compose exec redis redis-cli del`
 
 4. **Ingin rebuild total**
-   - Gunakan bagian “Purging the Data Lake and Resetting Metadata” (di bawah) lalu jalankan backfill (`date_range_etl_pipeline`).
+   - Gunakan bagian “Mengosongkan Data Lake dan Reset Metadata” (di bawah) lalu jalankan backfill (`date_range_etl_pipeline`).
 
-### Manual Trigger
+### Trigger Manual
 ```bash
-# Trigger ETL for specific date
-docker-compose exec celery-worker celery -A etl_tasks call etl_tasks.daily_etl_pipeline --args='["2025-12-23"]'
+# Trigger ETL untuk tanggal tertentu (disarankan di Windows: hindari masalah quoting JSON Celery CLI)
+docker-compose exec celery-worker python -c "from etl_tasks import daily_etl_pipeline; daily_etl_pipeline.delay('2025-12-23')"
 
-# Force full refresh
+# Paksa full refresh antrean (BERBAHAYA: menghapus task yang sudah terantre)
 docker-compose exec celery-worker celery -A etl_tasks purge -f
-docker-compose restart celery-worker
 ```
 
-### Scheduled Tasks
-- **Daily ETL**: Runs at 2 AM UTC
-- **Data Retention**: 90 days (configurable in `etl_tasks.py`)
+### Task Terjadwal
+- **ETL Harian**: berjalan pukul `02:00` waktu lokal (timezone Celery default `Asia/Jakarta` via `etl_tasks.py`).
+- **Pipeline harian lain**: invoice sales `02:05`, purchases `02:10`, inventory moves `02:15`.
 
-## Monitoring
+## Pemantauan
 
-### Logs
+### Log
 ```bash
-# View all logs
+# Lihat semua log
 docker-compose logs -f
 
-# View specific service
+# Lihat log service tertentu
 docker-compose logs -f celery-worker
-docker-compose logs -f web
+docker-compose logs -f dash-app
 
-# Check ETL progress
-docker exec -it nkdash-redis-1 redis-cli KEYS "etl:*"
+# Cek progres ETL
+docker-compose exec redis redis-cli KEYS "etl:*"
 ```
 
-### Performance Metrics
+### Metrik Performa
 ```bash
-# Check Celery stats
+# Cek statistik Celery
 docker-compose exec celery-worker celery -A etl_tasks inspect stats
 
-# Monitor task queue
+# Pantau antrean task
 docker-compose exec celery-worker celery -A etl_tasks inspect active
 ```
 
-### Data Quality
+### Kualitas Data
 ```bash
-# Check data volumes
+# Cek volume data
 docker volume ls
 docker volume inspect nkdash_data-lake
 
-# Sample data check
-docker exec nkdash-celery-worker-1 python -c "import polars as pl; df = pl.read_parquet('/app/data-lake/star-schema/dim_products.parquet'); print(f'Total products: {len(df)}')"
+# Cek sampel data
+docker-compose exec celery-worker python -c "import polars as pl; df = pl.read_parquet('/data-lake/star-schema/dim_products.parquet'); print(f'Total products: {len(df)}')"
 ```
 
-## Troubleshooting
+## Pemecahan Masalah
 
-### Purging the Data Lake and Resetting Metadata
-Use these commands from the project root when you need a full rebuild. They remove existing parquet layers (fact, clean, raw) and reset ETL metadata—the Docker bind mount ensures `/data-lake` maps to `D:\data-lake` on Windows.
+### Mengosongkan Data Lake dan Reset Metadata
+Gunakan perintah ini dari root project saat Anda perlu rebuild penuh. Perintah ini menghapus layer parquet yang ada (fact, clean, raw) dan mereset metadata ETL—Docker bind mount memastikan `/data-lake` memetakan ke `D:\data-lake` di Windows.
 
 ```powershell
-# Delete star-schema fact partitions
+# Hapus partisi fact pada star-schema
 docker-compose run --rm celery-worker bash -c "
   rm -rf /data-lake/star-schema/fact_sales &&
   mkdir -p /data-lake/star-schema/fact_sales
 "
 
-# Delete cleaned POS partitions
+# Hapus partisi POS yang sudah dibersihkan
 docker-compose run --rm celery-worker bash -c "
   rm -rf /data-lake/clean/pos_order_lines &&
   mkdir -p /data-lake/clean/pos_order_lines
 "
 
-# Delete raw POS extracts
+# Hapus hasil ekstraksi raw POS
 docker-compose run --rm celery-worker bash -c "
   rm -rf /data-lake/raw/pos_order_lines &&
   mkdir -p /data-lake/raw/pos_order_lines
 "
 
-# Reset ETL metadata baseline (adjust date if needed)
+# Reset baseline metadata ETL (sesuaikan tanggal jika perlu)
 docker-compose run --rm celery-worker bash -c "
   python - <<'PY'
 import json, os
@@ -476,42 +522,42 @@ os.makedirs(os.path.dirname(metadata_file), exist_ok=True)
 data = {'last_processed_date': '2023-01-01', 'last_updated': '2023-01-01T00:00:00'}
 with open(metadata_file, 'w', encoding='utf-8') as fh:
     json.dump(data, fh, indent=2)
-print('Metadata reset to 2023-01-01')
+print('Metadata direset ke 2023-01-01')
 PY
 "
 ```
 
-After purging, rerun the desired ETL range (e.g., via `date_range_etl_pipeline`) to repopulate all layers.
+Setelah purge, jalankan ulang rentang ETL yang diinginkan (misalnya via `date_range_etl_pipeline`) untuk mengisi ulang semua layer.
 
-### Common Issues
-1. **Connection Errors**
+### Masalah Umum
+1. **Error Koneksi**
    ```bash
-   # Test Odoo connection
+   # Tes koneksi Odoo
    docker-compose exec web python -c "from odoorpc_connector import get_odoo_connection; print(get_odoo_connection().db.list())"
    ```
 
-2. **ETL Stuck**
+2. **ETL Macet**
    ```bash
-   # List active tasks
+   # Daftar task yang aktif
    docker-compose exec celery-worker celery -A etl_tasks inspect active
    ```
 
-3. **Disk Space**
+3. **Ruang Disk**
    ```bash
-   # Clean old Parquet files
+   # Bersihkan file Parquet lama
    find data-lake/ -name "*.parquet" -mtime +90 -delete
    ```
 
-## Development
+## Pengembangan
 
-### Adding New Pages
-1. Create new file in `pages/` directory
-2. Follow Dash Mantine Components patterns
-3. Access at `http://localhost:8050/page-name`
+### Menambahkan Halaman Baru
+1. Buat file baru di direktori `pages/`
+2. Ikuti pola Dash Mantine Components
+3. Akses di `http://localhost:8050/page-name`
 
-### Testing
+### Pengujian
 ```bash
-# Run tests
+# Jalankan test
 docker-compose exec web pytest tests/
 
 # Lint code

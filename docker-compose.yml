@@ -21,7 +21,8 @@ services:
     command: >
       sh -c "celery -A etl_tasks worker 
       --loglevel=info 
-      --concurrency=2"
+      --concurrency=2
+      -Q celery,extraction,transformation,loading,dimensions"
     environment:
       - REDIS_URL=redis://redis:6379/0
       - ODOO_HOST=${ODOO_HOST}

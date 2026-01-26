@@ -109,3 +109,31 @@ def daily_inventory_moves_pipeline_impl(target_date: Optional[str] = None) -> st
     result = pipeline.apply_async()
     logger.info(f"Inventory moves pipeline submitted for {target_date}, task_id: {result.id}")
     return result.id
+
+
+def daily_stock_quants_pipeline_impl(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for stock quant snapshots (stock.quant) implementation."""
+    if target_date is None:
+        target_date = date.today().isoformat()
+
+    logger.info(f"Starting stock quants pipeline for {target_date}")
+
+    from etl_tasks import (
+        refresh_dimensions_incremental, extract_stock_quants,
+        save_raw_stock_quants, clean_stock_quants,
+        update_stock_quants_star_schema,
+    )
+
+    pipeline = (
+        refresh_dimensions_incremental.si([
+            'products', 'locations', 'lots'
+        ]) |
+        extract_stock_quants.si(target_date) |
+        save_raw_stock_quants.s() |
+        clean_stock_quants.s(target_date) |
+        update_stock_quants_star_schema.s(target_date)
+    )
+
+    result = pipeline.apply_async()
+    logger.info(f"Stock quants pipeline submitted for {target_date}, task_id: {result.id}")
+    return result.id

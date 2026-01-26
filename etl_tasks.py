@@ -48,6 +48,78 @@ app.conf.update(
     task_soft_time_limit=1500,
 )
 
+
+@app.task(bind=True)
+def force_refresh_day(self, dataset_key: str, target_date: str, refresh_dims: bool = False) -> Dict[str, Any]:
+    if dataset_key in {"inventory_moves", "stock_quants"} and refresh_dims:
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "refresh_dimensions", "step_name": "Refresh dimensions", "pct": 5})
+        if dataset_key == "inventory_moves":
+            refresh_dimensions_incremental.run(["products", "locations", "uoms", "partners", "users", "companies", "lots"])
+        else:
+            refresh_dimensions_incremental.run(["products", "locations", "lots"])
+
+    if dataset_key == "pos":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract POS", "pct": 10})
+        extraction = extract_pos_order_lines.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+        raw_path = save_raw_data.run(extraction)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean POS", "pct": 60})
+        clean_path = clean_pos_data.run(raw_path, target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+        fact_path = update_star_schema.run(clean_path, target_date)
+        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
+    if dataset_key == "invoice_sales":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract invoice sales", "pct": 10})
+        extraction = extract_sales_invoice_lines.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+        raw_path = save_raw_sales_invoice_lines.run(extraction)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean invoice sales", "pct": 60})
+        clean_path = clean_sales_invoice_lines.run(raw_path, target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+        fact_path = update_invoice_sales_star_schema.run(clean_path, target_date)
+        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
+    if dataset_key == "purchases":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract purchases", "pct": 10})
+        extraction = extract_purchase_invoice_lines.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+        raw_path = save_raw_purchase_invoice_lines.run(extraction)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean purchases", "pct": 60})
+        clean_path = clean_purchase_invoice_lines.run(raw_path, target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+        fact_path = update_purchase_star_schema.run(clean_path, target_date)
+        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
+    if dataset_key == "inventory_moves":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract inventory moves", "pct": 10})
+        extraction = extract_inventory_moves.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+        raw_path = save_raw_inventory_moves.run(extraction)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean inventory moves", "pct": 60})
+        clean_path = clean_inventory_moves.run(raw_path, target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+        fact_path = update_inventory_moves_star_schema.run(clean_path, target_date)
+        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
+    if dataset_key == "stock_quants":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract stock quants", "pct": 10})
+        extraction = extract_stock_quants.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+        raw_path = save_raw_stock_quants.run(extraction)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean stock quants", "pct": 60})
+        clean_path = clean_stock_quants.run(raw_path, target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+        fact_path = update_stock_quants_star_schema.run(clean_path, target_date)
+        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
+    raise ValueError(f"Unsupported dataset_key: {dataset_key}")
+
 # ============================================================================
 # CONFIG IMPORTS (re-exported for backward compatibility)
 # ============================================================================
@@ -55,8 +127,8 @@ app.conf.update(
 from etl.config import (
     MAX_RETRIES, RETRY_DELAY, ODOO_BATCH_SIZE, PARQUET_COMPRESSION,
     CONNECTION_TIMEOUT, CACHE_TTL, DATA_LAKE_ROOT, RAW_PATH, CLEAN_PATH,
-    RAW_SALES_INVOICE_PATH, RAW_PURCHASES_PATH, CLEAN_SALES_INVOICE_PATH,
-    CLEAN_PURCHASES_PATH, RAW_INVENTORY_MOVES_PATH, CLEAN_INVENTORY_MOVES_PATH,
+    RAW_SALES_INVOICE_PATH, RAW_PURCHASES_PATH, RAW_INVENTORY_MOVES_PATH, RAW_STOCK_QUANTS_PATH,
+    CLEAN_SALES_INVOICE_PATH, CLEAN_PURCHASES_PATH, CLEAN_INVENTORY_MOVES_PATH, CLEAN_STOCK_QUANTS_PATH,
     STAR_SCHEMA_PATH, METADATA_PATH, DIM_PRODUCTS_FILE, DIM_LOCATIONS_FILE,
     DIM_UOMS_FILE, DIM_PARTNERS_FILE, DIM_USERS_FILE, DIM_COMPANIES_FILE,
     DIM_LOTS_FILE,
@@ -160,6 +232,14 @@ def extract_inventory_moves(self, target_date: str) -> Dict[str, Any]:
     return extract_inventory_moves_impl(target_date)
 
 
+@app.task(bind=True, max_retries=3)
+@retry_odoo(max_retries=3, delay=2)
+def extract_stock_quants(self, target_date: str) -> Dict[str, Any]:
+    """Extract stock quant snapshot for a target date."""
+    from etl.extract.stock_quants import extract_stock_quants_impl
+    return extract_stock_quants_impl(target_date)
+
+
 # ============================================================================
 # SAVE RAW DATA TASKS
 # ============================================================================
@@ -221,6 +301,56 @@ def save_raw_data(extraction_result: Dict[str, Any]) -> Optional[str]:
 
     except Exception as e:
         logger.error(f"Error saving raw POS for {extraction_result.get('target_date')}: {e}", exc_info=True)
+        return None
+
+
+@app.task
+def clean_pos_data(raw_file_path: Optional[str], target_date: str) -> Optional[str]:
+    try:
+        if not raw_file_path or not os.path.isfile(raw_file_path):
+            logger.warning(f"Invalid file path: {raw_file_path}")
+            return None
+
+        df_clean = (
+            pl.scan_parquet(raw_file_path)
+            .with_columns(
+                to_local_datetime('order_date').alias('date'),
+                pl.col('order_id', 'pos_config_id', 'cashier_id', 'customer_id', 'line_id', 'product_id')
+                    .cast(pl.Int64, strict=False),
+                pl.col('order_ref').cast(pl.Utf8, strict=False),
+                pl.col('payment_method_ids').cast(pl.Utf8, strict=False).fill_null('[]'),
+                pl.col('qty').cast(pl.Float64, strict=False).fill_null(0).alias('quantity'),
+                (
+                    pl.col('price_subtotal_incl').cast(pl.Float64, strict=False).fill_null(0)
+                    - pl.col('discount_amount').cast(pl.Float64, strict=False).fill_null(0)
+                ).alias('revenue'),
+            )
+            .select([
+                'date',
+                'order_id',
+                'order_ref',
+                'pos_config_id',
+                'cashier_id',
+                'customer_id',
+                'payment_method_ids',
+                'line_id',
+                'product_id',
+                'quantity',
+                'revenue',
+            ])
+        )
+
+        year, month, day = target_date.split('-')
+        clean_path = f'{CLEAN_PATH}/year={year}/month={month}/day={day}'
+        os.makedirs(clean_path, exist_ok=True)
+
+        output_file = f'{clean_path}/pos_order_lines_clean_{target_date}.parquet'
+        atomic_write_parquet(df_clean.collect(streaming=True), output_file)
+        logger.info(f"Cleaned POS data saved to {output_file}")
+        return output_file
+
+    except Exception as e:
+        logger.error(f"Error cleaning POS data for {target_date}: {e}", exc_info=True)
         return None
 
 
@@ -307,6 +437,9 @@ def save_raw_inventory_moves(extraction_result: Dict[str, Any]) -> Optional[str]
             'location_dest_id': pl.Int64,
             'qty_moved': pl.Float64,
             'uom_id': pl.Int64,
+            'movement_type': pl.Utf8,
+            'inventory_adjustment_flag': pl.Boolean,
+            'manufacturing_order_id': pl.Int64,
             'picking_id': pl.Int64,
             'picking_type_code': pl.Utf8,
             'reference': pl.Utf8,
@@ -328,82 +461,207 @@ def save_raw_inventory_moves(extraction_result: Dict[str, Any]) -> Optional[str]
             df = pl.DataFrame(normalized, schema_overrides=raw_schema, strict=False)
             df = df.with_columns([
                 pl.col('qty_moved').fill_null(0),
+                pl.col('inventory_adjustment_flag').fill_null(False),
             ])
 
         output_file = f'{partition_path}/inventory_moves_{target_date}.parquet'
         atomic_write_parquet(df, output_file)
         logger.info(f"Saved {len(lines)} records to {output_file}")
         return output_file
+
     except Exception as e:
         logger.error(f"Error saving raw inventory moves for {extraction_result.get('target_date')}: {e}", exc_info=True)
         return None
 
-# CLEAN DATA TASKS
-# ============================================================================
 
-def _clean_account_move_lines(
-    raw_file_path: Optional[str],
-    target_date: str,
-    clean_base_path: str,
-    dataset_prefix: str,
-) -> Optional[str]:
+@app.task
+def save_raw_stock_quants(extraction_result: Dict[str, Any]) -> Optional[str]:
     try:
-        if not raw_file_path or not os.path.isfile(raw_file_path):
-            logger.warning(f"Invalid file path: {raw_file_path}")
+        lines = extraction_result.get('lines', [])
+        target_date = extraction_result.get('target_date')
+        if not target_date:
+            logger.warning("Missing target_date in extraction result")
             return None
 
-        df = pl.scan_parquet(raw_file_path)
-        existing_cols = set(df.collect_schema().names())
-        if 'purchase_order_id' not in existing_cols:
-            df = df.with_columns(pl.lit(None, dtype=pl.Int64).alias('purchase_order_id'))
-        if 'purchase_order_name' not in existing_cols:
-            df = df.with_columns(pl.lit(None, dtype=pl.Utf8).alias('purchase_order_name'))
-        if 'tax_ids_json' in existing_cols:
-            df = df.with_columns(pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]').alias('tax_ids_json'))
-        else:
-            df = df.with_columns(pl.lit('[]', dtype=pl.Utf8).alias('tax_ids_json'))
-
-        df_clean = (
-            df
-            .filter(
-                (pl.col('product_id').is_not_null()) &
-                (pl.col('quantity').is_not_null()) &
-                (pl.col('quantity') != 0) &
-                (pl.col('price_unit').is_not_null())
-            )
-            .with_columns([
-                pl.col('move_id', 'customer_id', 'vendor_id', 'purchase_order_id', 'move_line_id', 'product_id', 'tax_id')
-                    .cast(pl.Int64, strict=False),
-                pl.col('move_name', 'move_date', 'customer_name', 'vendor_name', 'purchase_order_name')
-                    .cast(pl.Utf8, strict=False),
-                pl.col('price_unit', 'quantity').cast(pl.Float64, strict=False),
-                pl.col('tax_ids_json').alias('tax_ids_json'),
-            ])
-        )
-
         year, month, day = target_date.split('-')
-        clean_path = f'{clean_base_path}/year={year}/month={month}/day={day}'
-        os.makedirs(clean_path, exist_ok=True)
+        partition_path = f'{RAW_STOCK_QUANTS_PATH}/year={year}/month={month}/day={day}'
+        os.makedirs(partition_path, exist_ok=True)
 
-        output_file = f'{clean_path}/{dataset_prefix}_clean_{target_date}.parquet'
-        atomic_write_parquet(df_clean.collect(streaming=True), output_file)
+        raw_schema = {
+            'quant_id': pl.Int64,
+            'snapshot_date': pl.Utf8,
+            'product_id': pl.Int64,
+            'location_id': pl.Int64,
+            'lot_id': pl.Int64,
+            'owner_id': pl.Int64,
+            'company_id': pl.Int64,
+            'quantity': pl.Float64,
+            'reserved_quantity': pl.Float64,
+        }
 
-        logger.info(f"Cleaned invoice data saved to {output_file}")
+        if not lines:
+            logger.info(f"No data for {target_date} (stock_quants)")
+            df = pl.DataFrame(schema=raw_schema)
+        else:
+            normalized = [
+                {k: row.get(k) for k in raw_schema.keys()}
+                for row in lines if isinstance(row, dict)
+            ]
+            df = pl.DataFrame(normalized, schema_overrides=raw_schema, strict=False)
+            df = df.with_columns([
+                pl.col('quantity').fill_null(0),
+                pl.col('reserved_quantity').fill_null(0),
+            ])
+
+        output_file = f'{partition_path}/stock_quants_{target_date}.parquet'
+        atomic_write_parquet(df, output_file)
+        logger.info(f"Saved {len(lines)} records to {output_file}")
         return output_file
 
     except Exception as e:
-        logger.error(f"Error cleaning {dataset_prefix} for {target_date}: {e}", exc_info=True)
+        logger.error(f"Error saving raw stock quants for {extraction_result.get('target_date')}: {e}", exc_info=True)
         return None
 
 
 @app.task
 def clean_sales_invoice_lines(raw_file_path: Optional[str], target_date: str) -> Optional[str]:
-    return _clean_account_move_lines(raw_file_path, target_date, CLEAN_SALES_INVOICE_PATH, 'account_move_out_invoice_lines')
+    try:
+        if not raw_file_path or not os.path.isfile(raw_file_path):
+            logger.warning(f"Invalid file path: {raw_file_path}")
+            return None
+
+        df_clean = (
+            pl.scan_parquet(raw_file_path)
+            .with_columns(
+                pl.col('move_date')
+                    .cast(pl.Utf8, strict=False)
+                    .str.strptime(pl.Date, '%Y-%m-%d', strict=False)
+                    .alias('date'),
+                pl.col('move_id', 'customer_id', 'move_line_id', 'product_id')
+                    .cast(pl.Int64, strict=False),
+                pl.col('move_name', 'customer_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('price_unit', 'quantity').cast(pl.Float64, strict=False).fill_null(0),
+                pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]'),
+            )
+            .select([
+                'date',
+                'move_id',
+                'move_name',
+                'customer_id',
+                'customer_name',
+                'move_line_id',
+                'product_id',
+                'price_unit',
+                'quantity',
+                'tax_ids_json',
+            ])
+        )
+
+        year, month, day = target_date.split('-')
+        clean_path = f'{CLEAN_SALES_INVOICE_PATH}/year={year}/month={month}/day={day}'
+        os.makedirs(clean_path, exist_ok=True)
+
+        output_file = f'{clean_path}/account_move_out_invoice_lines_clean_{target_date}.parquet'
+        atomic_write_parquet(df_clean.collect(streaming=True), output_file)
+        logger.info(f"Cleaned invoice sales lines saved to {output_file}")
+        return output_file
+
+    except Exception as e:
+        logger.error(f"Error cleaning invoice sales for {target_date}: {e}", exc_info=True)
+        return None
 
 
 @app.task
 def clean_purchase_invoice_lines(raw_file_path: Optional[str], target_date: str) -> Optional[str]:
-    return _clean_account_move_lines(raw_file_path, target_date, CLEAN_PURCHASES_PATH, 'account_move_in_invoice_lines')
+    try:
+        if not raw_file_path or not os.path.isfile(raw_file_path):
+            logger.warning(f"Invalid file path: {raw_file_path}")
+            return None
+
+        df_clean = (
+            pl.scan_parquet(raw_file_path)
+            .with_columns(
+                pl.col('move_date')
+                    .cast(pl.Utf8, strict=False)
+                    .str.strptime(pl.Date, '%Y-%m-%d', strict=False)
+                    .alias('date'),
+                pl.col('move_id', 'vendor_id', 'purchase_order_id', 'move_line_id', 'product_id', 'tax_id')
+                    .cast(pl.Int64, strict=False),
+                pl.col('move_name', 'vendor_name', 'purchase_order_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('price_unit', 'quantity').cast(pl.Float64, strict=False).fill_null(0),
+                pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]'),
+            )
+            .select([
+                'date',
+                'move_id',
+                'move_name',
+                'vendor_id',
+                'vendor_name',
+                'purchase_order_id',
+                'purchase_order_name',
+                'move_line_id',
+                'product_id',
+                'price_unit',
+                'quantity',
+                'tax_id',
+                'tax_ids_json',
+            ])
+        )
+
+        year, month, day = target_date.split('-')
+        clean_path = f'{CLEAN_PURCHASES_PATH}/year={year}/month={month}/day={day}'
+        os.makedirs(clean_path, exist_ok=True)
+
+        output_file = f'{clean_path}/account_move_in_invoice_lines_clean_{target_date}.parquet'
+        atomic_write_parquet(df_clean.collect(streaming=True), output_file)
+        logger.info(f"Cleaned purchase invoice lines saved to {output_file}")
+        return output_file
+
+    except Exception as e:
+        logger.error(f"Error cleaning purchases for {target_date}: {e}", exc_info=True)
+        return None
+
+
+@app.task
+def clean_stock_quants(raw_file_path: Optional[str], target_date: str) -> Optional[str]:
+    try:
+        if not raw_file_path or not os.path.isfile(raw_file_path):
+            logger.warning(f"Invalid file path: {raw_file_path}")
+            return None
+
+        df_clean = (
+            pl.scan_parquet(raw_file_path)
+            .filter(pl.col('product_id').is_not_null())
+            .with_columns(
+                pl.col('quant_id', 'product_id', 'location_id', 'lot_id', 'owner_id', 'company_id')
+                    .cast(pl.Int64, strict=False),
+                pl.col('quantity', 'reserved_quantity').cast(pl.Float64, strict=False).fill_null(0),
+                pl.col('snapshot_date')
+                    .cast(pl.Utf8, strict=False)
+                    .str.strptime(pl.Date, '%Y-%m-%d', strict=False)
+                    .alias('snapshot_date'),
+            )
+        )
+
+        output_columns = [
+            'snapshot_date', 'quant_id', 'product_id', 'location_id',
+            'lot_id', 'owner_id', 'company_id', 'quantity', 'reserved_quantity',
+        ]
+
+        df_clean = df_clean.select(output_columns)
+
+        year, month, day = target_date.split('-')
+        clean_path = f'{CLEAN_STOCK_QUANTS_PATH}/year={year}/month={month}/day={day}'
+        os.makedirs(clean_path, exist_ok=True)
+
+        output_file = f'{clean_path}/stock_quants_clean_{target_date}.parquet'
+        atomic_write_parquet(df_clean.collect(streaming=True), output_file)
+        logger.info(f"Cleaned stock quants saved to {output_file}")
+        return output_file
+
+    except Exception as e:
+        logger.error(f"Error cleaning stock quants for {target_date}: {e}", exc_info=True)
+        return None
 
 
 @app.task
@@ -413,122 +671,159 @@ def clean_inventory_moves(raw_file_path: Optional[str], target_date: str) -> Opt
             logger.warning(f"Invalid file path: {raw_file_path}")
             return None
 
-        df_clean = (
+        dim_products_exists = os.path.isfile(DIM_PRODUCTS_FILE)
+        dim_locations_exists = os.path.isfile(DIM_LOCATIONS_FILE)
+        dim_uoms_exists = os.path.isfile(DIM_UOMS_FILE)
+        dim_partners_exists = os.path.isfile(DIM_PARTNERS_FILE)
+
+        base = (
             pl.scan_parquet(raw_file_path)
-            .filter(pl.col('qty_moved').is_not_null() & (pl.col('qty_moved') != 0))
+            .filter(pl.col('product_id').is_not_null())
             .with_columns(
-                pl.col('move_id', 'move_line_id', 'product_id', 'location_src_id',
-                       'location_dest_id', 'uom_id', 'picking_id', 'source_partner_id',
-                       'destination_partner_id', 'created_by_user').cast(pl.Int64, strict=False),
-                pl.col('qty_moved').cast(pl.Float64, strict=False),
-                pl.col('picking_type_code', 'reference', 'origin_reference').cast(pl.Utf8, strict=False),
-                to_local_datetime('movement_date'),
-                to_local_datetime('create_date'),
+                pl.col(
+                    'move_id', 'move_line_id', 'product_id',
+                    'location_src_id', 'location_dest_id',
+                    'uom_id', 'picking_id',
+                    'source_partner_id', 'destination_partner_id',
+                    'created_by_user', 'manufacturing_order_id',
+                ).cast(pl.Int64, strict=False),
+                pl.col('qty_moved').cast(pl.Float64, strict=False).fill_null(0),
+                pl.col('movement_type').cast(pl.Utf8, strict=False),
+                pl.col('inventory_adjustment_flag').cast(pl.Boolean, strict=False).fill_null(False),
+                pl.col('movement_date').cast(pl.Utf8, strict=False).alias('date'),
+                pl.col('create_date').cast(pl.Utf8, strict=False),
             )
         )
 
-        # Load dimensions once
-        dim_products = DimensionLoader.get(DIM_PRODUCTS_FILE)
-        dim_locations = DimensionLoader.get(DIM_LOCATIONS_FILE)
-        dim_uoms = DimensionLoader.get(DIM_UOMS_FILE)
-        dim_partners = DimensionLoader.get(DIM_PARTNERS_FILE)
-
-        # Products join
-        if dim_products is not None:
-            df_clean = df_clean.join(
-                dim_products.select('product_id', 'product_name', 'product_brand'),
-                on='product_id', how='left'
-            )
+        if dim_products_exists:
+            dim_products = pl.scan_parquet(DIM_PRODUCTS_FILE).select([
+                'product_id', 'product_name', 'product_brand',
+            ])
         else:
-            df_clean = df_clean.with_columns(
-                pl.lit(None, dtype=pl.Utf8).alias('product_name'),
-                pl.lit(None, dtype=pl.Utf8).alias('product_brand'),
-            )
+            dim_products = pl.DataFrame(schema={
+                'product_id': pl.Int64,
+                'product_name': pl.Utf8,
+                'product_brand': pl.Utf8,
+            }).lazy()
 
-        # Locations join (single load, two projections)
-        if dim_locations is not None:
-            df_clean = (
-                df_clean
-                .join(
-                    dim_locations.select(
-                        pl.col('location_id').alias('location_src_id'),
-                        pl.col('location_name').alias('location_src_name'),
-                        pl.col('location_usage').alias('location_src_usage'),
-                    ),
-                    on='location_src_id', how='left'
-                )
-                .join(
-                    dim_locations.select(
-                        pl.col('location_id').alias('location_dest_id'),
-                        pl.col('location_name').alias('location_dest_name'),
-                        pl.col('location_usage').alias('location_dest_usage'),
-                    ),
-                    on='location_dest_id', how='left'
-                )
-            )
+        if dim_locations_exists:
+            dim_locations = pl.scan_parquet(DIM_LOCATIONS_FILE).select([
+                'location_id', 'location_name', 'location_usage', 'scrap_location',
+            ])
         else:
-            df_clean = df_clean.with_columns(
-                pl.lit(None, dtype=pl.Utf8).alias('location_src_name'),
-                pl.lit(None, dtype=pl.Utf8).alias('location_src_usage'),
-                pl.lit(None, dtype=pl.Utf8).alias('location_dest_name'),
-                pl.lit(None, dtype=pl.Utf8).alias('location_dest_usage'),
-            )
+            dim_locations = pl.DataFrame(schema={
+                'location_id': pl.Int64,
+                'location_name': pl.Utf8,
+                'location_usage': pl.Utf8,
+                'scrap_location': pl.Boolean,
+            }).lazy()
 
-        # UOMs join
-        if dim_uoms is not None:
-            df_clean = df_clean.join(
-                dim_uoms.select('uom_id', 'uom_name', 'uom_category'),
-                on='uom_id', how='left'
-            )
+        if dim_uoms_exists:
+            dim_uoms = pl.scan_parquet(DIM_UOMS_FILE).select([
+                'uom_id', 'uom_name', 'uom_category',
+            ])
         else:
-            df_clean = df_clean.with_columns(
-                pl.lit(None, dtype=pl.Utf8).alias('uom_name'),
-                pl.lit(None, dtype=pl.Utf8).alias('uom_category'),
-            )
+            dim_uoms = pl.DataFrame(schema={
+                'uom_id': pl.Int64,
+                'uom_name': pl.Utf8,
+                'uom_category': pl.Utf8,
+            }).lazy()
 
-        # Partners join (single load, two projections)
-        if dim_partners is not None:
-            df_clean = (
-                df_clean
-                .join(
-                    dim_partners.select(
-                        pl.col('partner_id').alias('source_partner_id'),
-                        pl.col('partner_name').alias('source_partner_name'),
-                    ),
-                    on='source_partner_id', how='left'
-                )
-                .join(
-                    dim_partners.select(
-                        pl.col('partner_id').alias('destination_partner_id'),
-                        pl.col('partner_name').alias('destination_partner_name'),
-                    ),
-                    on='destination_partner_id', how='left'
-                )
-            )
+        if dim_partners_exists:
+            dim_partners = pl.scan_parquet(DIM_PARTNERS_FILE).select([
+                'partner_id', 'partner_name',
+            ])
         else:
-            df_clean = df_clean.with_columns(
-                pl.lit(None, dtype=pl.Utf8).alias('source_partner_name'),
-                pl.lit(None, dtype=pl.Utf8).alias('destination_partner_name'),
-            )
+            dim_partners = pl.DataFrame(schema={
+                'partner_id': pl.Int64,
+                'partner_name': pl.Utf8,
+            }).lazy()
 
-        # Filter and select
+        df_clean = (
+            base
+            .join(dim_products, on='product_id', how='left')
+            .join(
+                dim_locations.rename({
+                    'location_id': 'location_src_id',
+                    'location_name': 'location_src_name',
+                    'location_usage': 'location_src_usage',
+                    'scrap_location': 'location_src_scrap',
+                }),
+                on='location_src_id',
+                how='left',
+            )
+            .join(
+                dim_locations.rename({
+                    'location_id': 'location_dest_id',
+                    'location_name': 'location_dest_name',
+                    'location_usage': 'location_dest_usage',
+                    'scrap_location': 'location_dest_scrap',
+                }),
+                on='location_dest_id',
+                how='left',
+            )
+            .join(dim_uoms, on='uom_id', how='left')
+            .join(
+                dim_partners.rename({
+                    'partner_id': 'source_partner_id',
+                    'partner_name': 'source_partner_name',
+                }),
+                on='source_partner_id',
+                how='left',
+            )
+            .join(
+                dim_partners.rename({
+                    'partner_id': 'destination_partner_id',
+                    'partner_name': 'destination_partner_name',
+                }),
+                on='destination_partner_id',
+                how='left',
+            )
+            .with_columns(
+                pl.col('product_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('product_brand').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('location_src_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('location_dest_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('source_partner_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('destination_partner_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('uom_name').cast(pl.Utf8, strict=False).fill_null(''),
+                pl.col('uom_category').cast(pl.Utf8, strict=False).fill_null(''),
+            )
+        )
+
         output_columns = [
-            'move_id', 'move_line_id', 'movement_date', 'product_id', 'product_name',
-            'product_brand', 'location_src_id', 'location_src_name', 'location_dest_id',
-            'location_dest_name', 'qty_moved', 'uom_id', 'uom_name', 'uom_category',
-            'picking_id', 'picking_type_code', 'reference', 'origin_reference',
-            'source_partner_id', 'source_partner_name', 'destination_partner_id',
-            'destination_partner_name', 'created_by_user', 'create_date',
+            'date',
+            'move_id',
+            'move_line_id',
+            'product_id',
+            'product_name',
+            'product_brand',
+            'location_src_id',
+            'location_src_name',
+            'location_src_usage',
+            'location_dest_id',
+            'location_dest_name',
+            'location_dest_usage',
+            'qty_moved',
+            'uom_id',
+            'uom_name',
+            'uom_category',
+            'movement_type',
+            'inventory_adjustment_flag',
+            'manufacturing_order_id',
+            'picking_id',
+            'picking_type_code',
+            'reference',
+            'origin_reference',
+            'source_partner_id',
+            'source_partner_name',
+            'destination_partner_id',
+            'destination_partner_name',
+            'created_by_user',
+            'create_date',
         ]
 
-        df_clean = (
-            df_clean
-            .filter(~(
-                (pl.col('location_src_usage') == 'internal') &
-                (pl.col('location_dest_usage') == 'internal')
-            ))
-            .select(output_columns)
-        )
+        df_clean = df_clean.select(output_columns)
 
         year, month, day = target_date.split('-')
         clean_path = f'{CLEAN_INVENTORY_MOVES_PATH}/year={year}/month={month}/day={day}'
@@ -536,7 +831,6 @@ def clean_inventory_moves(raw_file_path: Optional[str], target_date: str) -> Opt
 
         output_file = f'{clean_path}/inventory_moves_clean_{target_date}.parquet'
         atomic_write_parquet(df_clean.collect(streaming=True), output_file)
-
         logger.info(f"Cleaned inventory moves saved to {output_file}")
         return output_file
 
@@ -545,130 +839,111 @@ def clean_inventory_moves(raw_file_path: Optional[str], target_date: str) -> Opt
         return None
 
 
-@app.task
-def clean_pos_data(raw_file_path: Optional[str], target_date: str) -> Optional[str]:
-    """Clean and validate POS data with lazy evaluation."""
-    try:
-        if not raw_file_path or not os.path.isfile(raw_file_path):
-            logger.warning(f"Invalid file path: {raw_file_path}")
-            return None
+def _update_fact_inventory_moves(df: pl.DataFrame, target_date: str) -> str:
+    fact_path = f'{STAR_SCHEMA_PATH}/fact_inventory_moves'
+    year, month, day = target_date.split('-')
+    fact_partition = f'{fact_path}/year={year}/month={month}/day={day}'
+    os.makedirs(fact_partition, exist_ok=True)
 
-        df_clean = (
-            pl.scan_parquet(raw_file_path)
-            .filter(
-                (pl.col('product_id').is_not_null()) &
-                (pl.col('qty').is_not_null()) &
-                (pl.col('qty') != 0) &
-                (pl.col('price_subtotal_incl').is_not_null())
-            )
-            .with_columns(
-                pl.col('order_date')
-                    .str.strptime(pl.Datetime, '%Y-%m-%d %H:%M:%S')
-                    .dt.replace_time_zone('UTC')
-                    .dt.convert_time_zone(app.conf.timezone)
-                    .dt.replace_time_zone(None),
-                pl.col('order_id', 'pos_config_id', 'cashier_id', 'customer_id',
-                       'line_id', 'product_brand_id').cast(pl.Int64, strict=False),
-                pl.col('order_ref').cast(pl.Utf8, strict=False),
-                pl.col('payment_method_ids').cast(pl.Utf8, strict=False).fill_null('[]'),
-                pl.col('amount_total', 'qty', 'price_subtotal_incl').cast(pl.Float64, strict=False),
-                pl.col('discount_amount').cast(pl.Float64, strict=False).fill_null(0),
-                pl.col('product_brand').fill_null('Unknown'),
-                pl.col('product_category').fill_null('Unknown'),
-                pl.col('product_parent_category').fill_null('Unknown'),
-            )
-        )
-
-        year, month, day = target_date.split('-')
-        clean_path = f'{CLEAN_PATH}/year={year}/month={month}/day={day}'
-        os.makedirs(clean_path, exist_ok=True)
-
-        output_file = f'{clean_path}/pos_order_lines_clean_{target_date}.parquet'
-        atomic_write_parquet(df_clean.collect(streaming=True), output_file)
-
-        logger.info(f"Cleaned data saved to {output_file}")
-        return output_file
-
-    except Exception as e:
-        logger.error(f"Error cleaning data for {target_date}: {e}", exc_info=True)
-        return None
+    fact_output = f'{fact_partition}/fact_inventory_moves_{target_date}.parquet'
+    atomic_write_parquet(df, fact_output)
+    return fact_output
 
 
-# ============================================================================
-# STAR SCHEMA UPDATE TASKS
-# ============================================================================
+def _update_fact_sales_pos(df: pl.DataFrame, target_date: str) -> str:
+    if 'date' not in df.columns and 'order_date' in df.columns:
+        df = df.with_columns(to_local_datetime('order_date').alias('date'))
+
+    fact_df = df.select([
+        pl.col('date'),
+        pl.col('order_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('order_ref').cast(pl.Utf8, strict=False).fill_null(''),
+        pl.col('pos_config_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('cashier_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('customer_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('payment_method_ids').cast(pl.Utf8, strict=False).fill_null('[]'),
+        pl.col('line_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('revenue').cast(pl.Float64, strict=False).fill_null(0),
+    ])
+
+    fact_path = f'{STAR_SCHEMA_PATH}/fact_sales'
+    year, month, day = target_date.split('-')
+    fact_partition = f'{fact_path}/year={year}/month={month}/day={day}'
+    os.makedirs(fact_partition, exist_ok=True)
+
+    fact_output = f'{fact_partition}/fact_sales_{target_date}.parquet'
+    atomic_write_parquet(fact_df, fact_output)
+    return fact_output
+
 
 def _update_fact_invoice_sales(df: pl.DataFrame, target_date: str) -> str:
     fact_df = df.select([
-        pl.col('move_date').alias('date'),
-        'move_id', 'move_name', 'customer_id', 'customer_name',
-        'move_line_id', 'product_id', 'price_unit', 'quantity', 'tax_ids_json',
+        pl.col('date'),
+        pl.col('move_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('move_name').cast(pl.Utf8, strict=False).fill_null(''),
+        pl.col('customer_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('customer_name').cast(pl.Utf8, strict=False).fill_null(''),
+        pl.col('move_line_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('price_unit').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]'),
         pl.lit(False).alias('is_free_item'),
     ])
 
     fact_path = f'{STAR_SCHEMA_PATH}/fact_invoice_sales'
-    os.makedirs(fact_path, exist_ok=True)
+    year, month, day = target_date.split('-')
+    fact_partition = f'{fact_path}/year={year}/month={month}/day={day}'
+    os.makedirs(fact_partition, exist_ok=True)
 
-    fact_output = f'{fact_path}/fact_invoice_sales_{target_date}.parquet'
+    fact_output = f'{fact_partition}/fact_invoice_sales_{target_date}.parquet'
     atomic_write_parquet(fact_df, fact_output)
     return fact_output
 
 
 def _update_fact_purchases(df: pl.DataFrame, target_date: str) -> str:
     fact_df = df.select([
-        pl.col('move_date').alias('date'),
-        'move_id', 'move_name', 'vendor_id',
-        pl.col('vendor_name')
-            .cast(pl.Utf8, strict=False)
-            .str.replace(r'[,，].*$', '')
-            .str.replace(r'^\s+', '')
-            .str.replace(r'\s+$', '')
-            .alias('vendor_name'),
-        'purchase_order_id', 'purchase_order_name',
-        'move_line_id', 'product_id', 'price_unit', 'quantity',
-        'tax_id', 'tax_ids_json',
-        pl.lit(False).cast(pl.Boolean).alias('is_free_item'),
+        pl.col('date'),
+        pl.col('move_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('move_name').cast(pl.Utf8, strict=False).fill_null(''),
+        pl.col('vendor_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('vendor_name').cast(pl.Utf8, strict=False).fill_null(''),
+        pl.col('purchase_order_id').cast(pl.Int64, strict=False),
+        pl.col('purchase_order_name').cast(pl.Utf8, strict=False).fill_null(''),
+        pl.col('move_line_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('price_unit').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('tax_id').cast(pl.Int64, strict=False),
+        pl.lit('').alias('tax_name'),
+        pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]'),
+        pl.lit(False).alias('is_free_item'),
     ])
 
     fact_path = f'{STAR_SCHEMA_PATH}/fact_purchases'
-    os.makedirs(fact_path, exist_ok=True)
+    year, month, day = target_date.split('-')
+    fact_partition = f'{fact_path}/year={year}/month={month}/day={day}'
+    os.makedirs(fact_partition, exist_ok=True)
 
-    fact_output = f'{fact_path}/fact_purchases_{target_date}.parquet'
+    fact_output = f'{fact_partition}/fact_purchases_{target_date}.parquet'
     atomic_write_parquet(fact_df, fact_output)
     return fact_output
 
 
-def _update_fact_sales_pos(df: pl.DataFrame, target_date: str) -> str:
+def _update_fact_stock_on_hand_snapshot(df: pl.DataFrame, target_date: str) -> str:
     fact_df = df.select([
-        pl.col('order_date').alias('date'),
-        'order_id', 'order_ref', 'pos_config_id', 'cashier_id',
-        'customer_id', 'payment_method_ids', 'line_id', 'product_id',
-        pl.col('qty').alias('quantity'),
-        pl.col('price_subtotal_incl').alias('revenue'),
+        'snapshot_date', 'quant_id', 'product_id', 'location_id',
+        'lot_id', 'owner_id', 'company_id', 'quantity', 'reserved_quantity',
     ])
 
-    fact_path = f'{STAR_SCHEMA_PATH}/fact_sales'
-    os.makedirs(fact_path, exist_ok=True)
+    fact_path = f'{STAR_SCHEMA_PATH}/fact_stock_on_hand_snapshot'
+    year, month, day = target_date.split('-')
+    fact_partition = f'{fact_path}/year={year}/month={month}/day={day}'
+    os.makedirs(fact_partition, exist_ok=True)
 
-    fact_output = f'{fact_path}/fact_sales_{target_date}.parquet'
-    atomic_write_parquet(fact_df, fact_output)
-    return fact_output
-
-
-def _update_fact_inventory_moves(df: pl.DataFrame, target_date: str) -> str:
-    fact_df = df.select([
-        pl.col('movement_date').alias('date'),
-        'move_id', 'move_line_id', 'product_id', 'product_name', 'product_brand',
-        'location_src_id', 'location_src_name', 'location_dest_id', 'location_dest_name',
-        'qty_moved', 'uom_id', 'uom_name', 'uom_category', 'picking_id', 'picking_type_code',
-        'reference', 'origin_reference', 'source_partner_id', 'source_partner_name',
-        'destination_partner_id', 'destination_partner_name', 'created_by_user', 'create_date',
-    ])
-
-    fact_path = f'{STAR_SCHEMA_PATH}/fact_inventory_moves'
-    os.makedirs(fact_path, exist_ok=True)
-
-    fact_output = f'{fact_path}/fact_inventory_moves_{target_date}.parquet'
+    fact_output = f'{fact_partition}/fact_stock_on_hand_snapshot_{target_date}.parquet'
     atomic_write_parquet(fact_df, fact_output)
     return fact_output
 
@@ -726,6 +1001,19 @@ def update_inventory_moves_star_schema(clean_file_path: Optional[str], target_da
         return _update_fact_inventory_moves(df, target_date)
     except Exception as e:
         logger.error(f"Error updating inventory moves star schema for {target_date}: {e}", exc_info=True)
+        return None
+
+
+@app.task
+def update_stock_quants_star_schema(clean_file_path: Optional[str], target_date: str) -> Optional[str]:
+    try:
+        if not clean_file_path or not os.path.isfile(clean_file_path):
+            logger.warning(f"Invalid file path: {clean_file_path}")
+            return None
+        df = pl.read_parquet(clean_file_path)
+        return _update_fact_stock_on_hand_snapshot(df, target_date)
+    except Exception as e:
+        logger.error(f"Error updating stock quants star schema for {target_date}: {e}", exc_info=True)
         return None
 
 
@@ -941,6 +1229,13 @@ def daily_inventory_moves_pipeline(target_date: Optional[str] = None) -> str:
 
 
 @app.task
+def daily_stock_quants_pipeline(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for stock quant snapshots (stock.quant)."""
+    from etl.pipelines.daily import daily_stock_quants_pipeline_impl
+    return daily_stock_quants_pipeline_impl(target_date)
+
+
+@app.task
 def date_range_etl_pipeline(start_date: str, end_date: Optional[str] = None) -> Dict[str, Any]:
     """Process date range in parallel."""
     if end_date is None:
@@ -954,6 +1249,12 @@ def catch_up_etl() -> Dict[str, Any]:
     """Auto-catch up missed dates."""
     from etl.pipelines.health import catch_up_etl_impl
     return catch_up_etl_impl()
+
+
+@app.task(name="catch_up_etl")
+def catch_up_etl_legacy() -> Dict[str, Any]:
+    """Backward-compatible task name alias for catch-up ETL."""
+    return catch_up_etl()
 
 
 @app.task
@@ -984,6 +1285,10 @@ app.conf.beat_schedule = {
         'task': 'etl_tasks.daily_inventory_moves_pipeline',
         'schedule': crontab(hour=2, minute=15),
     },
+    'daily-stock-quants-etl': {
+        'task': 'etl_tasks.daily_stock_quants_pipeline',
+        'schedule': crontab(hour=2, minute=20),
+    },
     'incremental-dimension-refresh': {
         'task': 'etl_tasks.refresh_dimensions_incremental',
         'schedule': crontab(hour='*/4', minute=0),
@@ -999,17 +1304,21 @@ app.conf.task_routes = {
     'etl_tasks.extract_sales_invoice_lines': {'queue': 'extraction'},
     'etl_tasks.extract_purchase_invoice_lines': {'queue': 'extraction'},
     'etl_tasks.extract_inventory_moves': {'queue': 'extraction'},
+    'etl_tasks.extract_stock_quants': {'queue': 'extraction'},
     'etl_tasks.clean_pos_data': {'queue': 'transformation'},
     'etl_tasks.clean_sales_invoice_lines': {'queue': 'transformation'},
     'etl_tasks.clean_purchase_invoice_lines': {'queue': 'transformation'},
     'etl_tasks.clean_inventory_moves': {'queue': 'transformation'},
+    'etl_tasks.clean_stock_quants': {'queue': 'transformation'},
     'etl_tasks.update_star_schema': {'queue': 'loading'},
     'etl_tasks.update_invoice_sales_star_schema': {'queue': 'loading'},
     'etl_tasks.update_purchase_star_schema': {'queue': 'loading'},
     'etl_tasks.update_inventory_moves_star_schema': {'queue': 'loading'},
+    'etl_tasks.update_stock_quants_star_schema': {'queue': 'loading'},
     'etl_tasks.save_raw_data': {'queue': 'loading'},
     'etl_tasks.save_raw_sales_invoice_lines': {'queue': 'loading'},
     'etl_tasks.save_raw_purchase_invoice_lines': {'queue': 'loading'},
     'etl_tasks.save_raw_inventory_moves': {'queue': 'loading'},
+    'etl_tasks.save_raw_stock_quants': {'queue': 'loading'},
     'etl_tasks.refresh_dimensions_incremental': {'queue': 'dimensions'},
 }

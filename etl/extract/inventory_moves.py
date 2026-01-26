@@ -41,9 +41,8 @@ def _picking_type_code_to_movement_type(code: Optional[str]) -> Optional[str]:
     if not isinstance(code, str):
         return None
     mapping = {
-        'incoming': 'receipt',
-        'outgoing': 'delivery',
-        'internal': 'internal_transfer',
+        'incoming': 'incoming',
+        'internal': 'transfer',
     }
     return mapping.get(code)
 
@@ -259,25 +258,23 @@ def extract_inventory_moves_impl(target_date: str) -> Dict[str, Any]:
             raw_mo = safe_extract_m2o(mv.get('raw_material_production_id'))
             prod_mo = safe_extract_m2o(mv.get('production_id'))
             if isinstance(raw_mo, int):
-                movement_type = 'manufacturing_consumption'
+                movement_type = 'production_out'
                 manufacturing_order_id = raw_mo
             elif isinstance(prod_mo, int):
-                movement_type = 'manufacturing_output'
+                movement_type = 'production_in'
                 manufacturing_order_id = prod_mo
 
-            if dst_scrap:
-                movement_type = 'scrap'
-            elif (src_usage == 'inventory' or dst_usage == 'inventory') and movement_type not in {
-                'manufacturing_consumption', 'manufacturing_output',
+            if (src_usage == 'inventory' or dst_usage == 'inventory') and movement_type not in {
+                'production_out', 'production_in',
             }:
                 movement_type = 'adjustment'
                 inventory_adjustment_flag = True
 
-            if isinstance(picking_type_name, str) and 'return' in picking_type_name.lower():
-                if movement_type == 'receipt':
-                    movement_type = 'return_from_customer'
-                elif movement_type == 'delivery':
-                    movement_type = 'return_to_vendor'
+            if dst_scrap:
+                movement_type = None
+
+            if not isinstance(movement_type, str):
+                movement_type = None
 
             origin_reference = picking.get('origin') or mv.get('origin')
             reference = picking.get('name') or mv.get('reference') or mv.get('name') or origin_reference

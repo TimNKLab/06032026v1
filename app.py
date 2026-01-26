@@ -37,9 +37,14 @@ NAV_LINKS = [
 app = Dash(__name__, use_pages=True, external_stylesheets=["/assets/custom.css"], suppress_callback_exceptions=True)
 
 
-def sidebar_links():
+def header_nav_links():
     return [
-        dmc.NavLink(label=label, href=href, variant="subtle", fw=500)
+        dmc.Anchor(
+            dmc.Text(label, size="sm", c="gray.7"),
+            href=href,
+            mx="sm",
+            underline=False
+        )
         for label, href in NAV_LINKS
     ]
 
@@ -58,17 +63,11 @@ app.layout = dmc.MantineProvider(
     children=dmc.AppShell(
         id="appshell",
         padding="sm",
-        navbar={
-            "width": 240,
-            "breakpoint": "sm",
-            "collapsed": {"mobile": True, "desktop": False},
-        },
         header={
-            "height": 60,
-            "collapseOffset": 60,
+            "height": 80,
         },
         children=[
-            # Hamburger menu in header
+            # Header with title and navigation links
             dmc.AppShellHeader(
                 children=[
                     dmc.Group(
@@ -82,32 +81,46 @@ app.layout = dmc.MantineProvider(
                             ),
                             dmc.Title(
                                 "New Khatulistiwa KPI", 
-                                order=4, 
-                                ml="md",
-                                hiddenFrom="base",
-                                visibleFrom="sm"
+                                order=3, 
+                                c="blue.6"
+                            ),
+                            dmc.Group(
+                                id="nav-links",
+                                children=header_nav_links(),
+                                gap="lg",
+                                ml="xl",
+                                visibleFrom="sm",
+                                hiddenFrom="base"
                             ),
                         ],
                         h="100%",
                         px="md",
-                        align="center"
+                        align="center",
+                        justify="space-between"
+                    ),
+                    # Mobile navigation drawer
+                    dmc.Drawer(
+                        id="mobile-nav-drawer",
+                        opened=False,
+                        position="right",
+                        size="xs",
+                        padding="md",
+                        title="Navigation",
+                        children=[
+                            dmc.Stack(
+                                children=[
+                                    dmc.Anchor(
+                                        dmc.Text(label, size="md", c="gray.7"),
+                                        href=href,
+                                        py="xs"
+                                    )
+                                    for label, href in NAV_LINKS
+                                ],
+                                gap="xs"
+                            )
+                        ]
                     )
                 ]
-            ),
-            # Collapsible navbar
-            dmc.AppShellNavbar(
-                id="app-navbar",
-                p="md",
-                children=[
-                    dmc.Stack(
-                        [
-                            dmc.Title("New Khatulistiwa KPI", order=3),
-                            dmc.Divider(),
-                            *sidebar_links(),
-                        ],
-                        gap="sm",
-                    )
-                ],
             ),
             dmc.AppShellMain(
                 dmc.Container(dash.page_container, size="responsive", px="md", py="lg"),
@@ -117,18 +130,14 @@ app.layout = dmc.MantineProvider(
 )
 
 
-# Callback to toggle navbar
+# Callback to toggle mobile navigation drawer
 @app.callback(
-    Output("appshell", "navbar"),
+    Output("mobile-nav-drawer", "opened"),
     Input("nav-burger", "opened"),
-    State("appshell", "navbar"),
-    prevent_initial_call=False,
+    prevent_initial_call=True,
 )
-def toggle_navbar(opened, navbar):
-    # Control the collapsed state of the navbar
-    navbar["collapsed"] = {"mobile": not opened, "desktop": False}
-    print(f"Toggle navbar: opened={opened} -> collapsed.mobile={not opened}")  # Debug log
-    return navbar
+def toggle_mobile_drawer(opened):
+    return opened
 
 
 server = app.server

@@ -25,7 +25,9 @@ RAW_PURCHASES_PATH = f'{DATA_LAKE_ROOT}/raw/account_move_in_invoice_lines'
 CLEAN_SALES_INVOICE_PATH = f'{DATA_LAKE_ROOT}/clean/account_move_out_invoice_lines'
 CLEAN_PURCHASES_PATH = f'{DATA_LAKE_ROOT}/clean/account_move_in_invoice_lines'
 RAW_INVENTORY_MOVES_PATH = f'{DATA_LAKE_ROOT}/raw/inventory_moves'
+RAW_STOCK_QUANTS_PATH = f'{DATA_LAKE_ROOT}/raw/stock_quants'
 CLEAN_INVENTORY_MOVES_PATH = f'{DATA_LAKE_ROOT}/clean/inventory_moves'
+CLEAN_STOCK_QUANTS_PATH = f'{DATA_LAKE_ROOT}/clean/stock_quants'
 STAR_SCHEMA_PATH = f'{DATA_LAKE_ROOT}/star-schema'
 METADATA_PATH = f'{DATA_LAKE_ROOT}/metadata'
 
@@ -46,7 +48,8 @@ def ensure_directories() -> None:
     for path in [
         RAW_PATH, CLEAN_PATH, RAW_SALES_INVOICE_PATH, RAW_PURCHASES_PATH,
         CLEAN_SALES_INVOICE_PATH, CLEAN_PURCHASES_PATH, RAW_INVENTORY_MOVES_PATH,
-        CLEAN_INVENTORY_MOVES_PATH, STAR_SCHEMA_PATH, METADATA_PATH,
+        RAW_STOCK_QUANTS_PATH, CLEAN_INVENTORY_MOVES_PATH, CLEAN_STOCK_QUANTS_PATH,
+        STAR_SCHEMA_PATH, METADATA_PATH,
     ]:
         os.makedirs(path, exist_ok=True)
 

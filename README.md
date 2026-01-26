@@ -2,6 +2,10 @@
 
 This project is a Sales KPI dashboard for the retail cosmetic store New Khatulistiwa, built with Plotly Dash. It fetches data from an Odoo instance using odoorpc.
 
+## Project SSOT
+
+See `SSOT.md` for the canonical project plan, decisions, work tracking, and oversight cadence.
+
 ## MVP Implementation
 
 This initial version (MVP) of the dashboard focuses on core UI functionality and a containerized setup.

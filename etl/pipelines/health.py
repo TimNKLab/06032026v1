@@ -54,8 +54,8 @@ def health_check_impl() -> Dict[str, Any]:
         logger.warning(f"ETL is {days_behind} days behind, triggering catch-up")
         
         # Trigger catch-up asynchronously
-        from etl_tasks import app
-        catch_up_etl_impl.delay()
+        from etl_tasks import catch_up_etl
+        catch_up_etl.delay()
 
         return {
             "status": "unhealthy",
