@@ -95,7 +95,6 @@ def _build_total_overview_figure(date_start, date_end=None):
             )
         ],
     )
-
     return fig
 
 
@@ -103,101 +102,218 @@ dash.register_page(__name__, path='/', name='Overview', title='Executive Overvie
 
 layout = dmc.Container(
     [
-        dmc.Title('Summary Overview', order=2),
-        dmc.Text('High-level summary placeholder. Replace with KPI highlights, alerts, and quick stats.', c='dimmed'),
-        dmc.Paper(
-            dmc.Stack(
-                [
-                    dmc.Group(
-                        [
-                            dmc.Button('Weekly', variant='light', size='xs', id='btn-weekly'),
-                            dmc.Button('Monthly', variant='light', size='xs', id='btn-monthly'),
-                            dmc.Button('Quarterly', variant='light', size='xs', id='btn-quarterly'),
-                            dmc.Button('Semesterly', variant='light', size='xs', id='btn-semesterly'),
-                            dmc.Button('Yearly', variant='light', size='xs', id='btn-yearly'),
-                        ],
-                        gap='xs',
-                    ),
-                    dmc.Group(
-                        [
-                            dmc.Stack(
-                                [
-                                    dmc.Text('From:', fw=600),
-                                    dmc.Group(
-                                        [
-                                            dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='date-from'),
-                                            dmc.TimeInput(value='07:00', id='time-from'),
-                                        ],
-                                        gap='sm',
-                                    ),
-                                ],
-                                gap=4,
-                            ),
-                            dmc.Stack(
-                                [
-                                    dmc.Text('Until:', fw=600),
-                                    dmc.Group(
-                                        [
-                                            dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='date-until'),
-                                            dmc.TimeInput(value='23:30', id='time-until'),
-                                        ],
-                                        gap='sm',
-                                    ),
-                                ],
-                                gap=4,
-                            ),
-                            dmc.Button('Apply', id='btn-apply-dates', variant='filled', size='sm'),
-                        ],
-                        gap='xl',
-                        wrap='wrap',
-                        align='flex-end',
-                    ),
-                ],
-                gap='md',
-            ),
-            p='md',
-            radius='md',
-            withBorder=True,
-            mt='md',
-        ),
+        dmc.Title('Executive Dashboard', order=2, mb='xs'),
+        dmc.Text('High-level overview of business performance and key metrics.', c='dimmed', mb='lg'),
+        
+        # Bento Grid Layout
         dmc.Grid(
             [
+                # Controls Card - Top Full Width
                 dmc.GridCol(
                     dmc.Paper(
-                        dcc.Graph(
-                            id='total-overview-fig',
-                            # figure=_build_total_overview_figure(date.today(), date.today()),
-                            config={'displayModeBar': False},
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Date Controls', fw=600, size='lg'),
+                                        dmc.Badge('Time Period', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Divider(),
+                                dmc.Group(
+                                    [
+                                        dmc.Button('Weekly', variant='light', size='xs', id='btn-weekly'),
+                                        dmc.Button('Monthly', variant='light', size='xs', id='btn-monthly'),
+                                        dmc.Button('Quarterly', variant='light', size='xs', id='btn-quarterly'),
+                                        dmc.Button('Semesterly', variant='light', size='xs', id='btn-semesterly'),
+                                        dmc.Button('Yearly', variant='light', size='xs', id='btn-yearly'),
+                                    ],
+                                    gap='xs',
+                                ),
+                                dmc.Group(
+                                    [
+                                        dmc.Stack(
+                                            [
+                                                dmc.Text('From:', fw=600),
+                                                dmc.Group(
+                                                    [
+                                                        dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='date-from'),
+                                                        dmc.TimeInput(value='07:00', id='time-from'),
+                                                    ],
+                                                    gap='sm',
+                                                ),
+                                            ],
+                                            gap=4,
+                                        ),
+                                        dmc.Stack(
+                                            [
+                                                dmc.Text('Until:', fw=600),
+                                                dmc.Group(
+                                                    [
+                                                        dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='date-until'),
+                                                        dmc.TimeInput(value='23:30', id='time-until'),
+                                                    ],
+                                                    gap='sm',
+                                                ),
+                                            ],
+                                            gap=4,
+                                        ),
+                                        dmc.Button('Apply', id='btn-apply-dates', variant='filled', size='sm'),
+                                    ],
+                                    gap='xl',
+                                    wrap='wrap',
+                                    align='flex-end',
+                                ),
+                            ],
+                            gap='md',
+                        ),
+                        p='lg',
+                        radius='lg',
+                        withBorder=True,
+                        shadow='sm',
+                    ),
+                    span=12,
+                ),
+                
+                # Main Chart Card - Top Row
+                dmc.GridCol(
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Revenue Overview', fw=600, size='lg'),
+                                        dmc.Badge('Live Data', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dcc.Graph(
+                                    id='total-overview-fig',
+                                    config={'displayModeBar': False},
+                                ),
+                            ],
+                            gap='sm',
                         ),
                         p='md',
-                        radius='md',
+                        radius='lg',
                         withBorder=True,
+                        shadow='sm',
                     ),
-                    span=6,
+                    span=8,
                 ),
+                
+                # KPI Cards - Top Row
                 dmc.GridCol(
-                    dmc.Paper('Financial Health', p='md', radius='md', withBorder=True),
-                    span=6,
-                ),
-                dmc.GridCol(
-                    dmc.Paper('Customer Experience', p='md', radius='md', withBorder=True),
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Financial Health', fw=600, size='lg'),
+                                        dmc.Badge('KPI', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Text('Revenue: Rp 0', size='xl', fw=600),
+                                dmc.Text('vs prev period: Rp 0 (0.0%)', size='sm', c='dimmed'),
+                                dmc.Text('Qty sold: 0', size='sm', c='dimmed'),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        shadow='sm',
+                    ),
                     span=4,
                 ),
+                
+                # Bottom Row Cards
                 dmc.GridCol(
-                    dmc.Paper('Inventory Management', p='md', radius='md', withBorder=True),
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Customer Experience', fw=600, size='md'),
+                                        dmc.Badge('CX', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Text('Customer satisfaction metrics', size='sm', c='dimmed'),
+                                dmc.Text('Coming soon...', size='lg', fw=500),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        shadow='sm',
+                    ),
                     span=4,
                 ),
+                
                 dmc.GridCol(
-                    dmc.Paper('Operational Efficiency', p='md', radius='md', withBorder=True),
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Inventory Management', fw=600, size='md'),
+                                        dmc.Badge('Inventory', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Text('Stock levels and turnover', size='sm', c='dimmed'),
+                                dmc.Text('Coming soon...', size='lg', fw=500),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        shadow='sm',
+                    ),
+                    span=4,
+                ),
+                
+                dmc.GridCol(
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Data Sync', fw=600, size='md'),
+                                        dmc.Badge('Ops', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Text('System performance metrics', size='sm', c='dimmed'),
+                                dmc.Text('Coming soon...', size='lg', fw=500),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        shadow='sm',
+                    ),
                     span=4,
                 ),
             ],
             gutter='lg',
-            mt='lg',
         ),
     ],
-    size='lg',
-    py='lg'
+    size='100%',  # Design Policy: Full viewport width
+    px='md',      # Design Policy: Horizontal padding
+    py='lg',      # Design Policy: Vertical padding
 )
 
 
@@ -214,6 +330,25 @@ def update_total_overview(n_clicks, date_from_input, date_until, time_from, time
     # Determine which input triggered the callback
     ctx = dash.callback_context
     trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'initial_load'
+
+    if not n_clicks:
+        fig = px.sunburst()
+        fig.update_layout(
+            template='plotly_white',
+            height=420,
+            annotations=[
+                dict(
+                    text='Click Apply to load data.',
+                    x=0.5,
+                    y=0.5,
+                    xref='paper',
+                    yref='paper',
+                    showarrow=False,
+                    font=dict(size=14, color='gray'),
+                )
+            ],
+        )
+        return fig
 
     # Use date_from_input which is the *latest value* of the 'date-from' component
     # regardless of whether the button or the datepicker triggered the update.

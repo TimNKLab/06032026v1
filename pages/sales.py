@@ -1,7 +1,13 @@
+import time
 import dash
 from dash import dcc, html, Output, Input, State
+from dash.exceptions import PreventUpdate
 import dash_mantine_components as dmc
 from datetime import date
+
+# Performance investigation: temporarily using fixed date range
+_INVESTIGATION_START_DATE = date(2025, 2, 10)
+_INVESTIGATION_END_DATE = date(2025, 2, 28)
 
 from services.sales_charts import (
     build_daily_revenue_chart,
@@ -22,84 +28,116 @@ dash.register_page(
 def layout():
     return dmc.Container(
         [
-            dmc.Title('Sales Performance', order=2),
-            dmc.Text('Comprehensive sales metrics and performance insights.', c='dimmed'),
+            dmc.Title('Sales Performance', order=2, mb='xs'),
+            dmc.Text('Comprehensive sales metrics and performance insights.', c='dimmed', mb='lg'),
             
-            # KPI Cards Row
+            # Bento Grid Layout
             dmc.Grid(
                 [
+                    # KPI Cards Row - Top Row
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Total Revenue', size='sm', c='dimmed'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Total Revenue', size='sm', c='dimmed'),
+                                        dmc.Badge('KPI', color='gray', variant='light', size='xs'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Text('Rp 0', size='xl', fw=600, id='sales-kpi-total-revenue'),
                                 dmc.Text('vs prev period: Rp 0 (0%)', size='xs', c='green', id='sales-kpi-total-revenue-change')
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='sm',
                         ),
-                        span={"base": 6, "sm": 3},  
+                        span={"base": 12, "sm": 3},  
                     ),
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Transactions', size='sm', c='dimmed'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Transactions', size='sm', c='dimmed'),
+                                        dmc.Badge('Count', color='gray', variant='light', size='xs'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Text('0', size='xl', fw=600, id='sales-kpi-transactions'),
                                 dmc.Text('vs prev period: 0 (0%)', size='xs', c='green', id='sales-kpi-transactions-change')
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='sm',
                         ),
-                        span={"base": 6, "sm": 3},
+                        span={"base": 12, "sm": 3},
                     ),
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Avg Basket Size', size='sm', c='dimmed'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Avg Basket Size', size='sm', c='dimmed'),
+                                        dmc.Badge('Average', color='gray', variant='light', size='xs'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Text('Rp 0', size='xl', fw=600, id='sales-kpi-avg-transaction-value'),
                                 dmc.Text('vs prev period: Rp 0 (0%)', size='xs', c='red', id='sales-kpi-avg-transaction-value-change')
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='sm',
                         ),
-                        span={"base": 6, "sm": 3},
+                        span={"base": 12, "sm": 3},
                     ),
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Items Sold', size='sm', c='dimmed'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Items Sold', size='sm', c='dimmed'),
+                                        dmc.Badge('Volume', color='gray', variant='light', size='xs'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Text('0', size='xl', fw=600, id='sales-kpi-items-sold'),
                                 dmc.Text('vs prev period: 0 (0%)', size='xs', c='green', id='sales-kpi-items-sold-change')
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='sm',
                         ),
-                        span={"base": 6, "sm": 3},
+                        span={"base": 12, "sm": 3},
                     ),
                 ],
                 gutter={"base": "md", "lg": "lg"},  
-                mt='md',
             ),
             
-            # Date Filters
+            # Date Filters Card - Full Width
             dmc.Paper(
                 dmc.Group(
                     [
                         dmc.Stack(
                             [
-                                dmc.Text('From:', fw=600),
-                                dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='sales-date-from'),
+                                dmc.Text('Date Range', fw=600, size='sm', c='dimmed'),
+                                dmc.DatePickerInput(value=_INVESTIGATION_START_DATE, placeholder='Select date', id='sales-date-from'),
                             ],
                             gap=4,
                         ),
                         dmc.Stack(
                             [
-                                dmc.Text('Until:', fw=600),
-                                dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='sales-date-until'),
+                                dmc.Text('To', fw=600, size='sm', c='dimmed'),
+                                dmc.DatePickerInput(value=_INVESTIGATION_END_DATE, placeholder='Select date', id='sales-date-until'),
                             ],
                             gap=4,
                         ),
@@ -108,19 +146,28 @@ def layout():
                     gap='xl',
                     align='flex-end',
                 ),
-                p='md',
-                radius='md',
+                p='lg',
+                radius='lg',
                 withBorder=True,
-                mt='md',
+                shadow='sm',
+                bg='gray.0',
+                mt='lg',
             ),
             
-            # Charts Row
+            # Main Charts Row - Top Row
             dmc.Grid(
                 [
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Revenue Trend', fw=600, mb='md'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Revenue Trend', fw=600, size='lg'),
+                                        dmc.Badge('Analytics', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Container(
                                     dcc.Graph(
                                         id='sales-revenue-trend',
@@ -134,8 +181,10 @@ def layout():
                                 )
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='xl',
+                            bg='white',
                             style={'height': '100%'}
                         ),
                         span={"base": 12, "sm": 8},
@@ -143,7 +192,14 @@ def layout():
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Sales by Principal', fw=600, mb='md'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Sales by Principal', fw=600, size='lg'),
+                                        dmc.Badge('Breakdown', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Box(
                                     dcc.Graph(
                                         id='sales-by-principal',
@@ -155,8 +211,10 @@ def layout():
                                 )
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='xl',
+                            bg='white',
                         ),
                         span={"base": 12, "sm": 4},  
                     ),
@@ -165,13 +223,20 @@ def layout():
                 mt='lg',
             ),
             
-            # Tables Row
+            # Bottom Row Cards
             dmc.Grid(
                 [
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Top Products', fw=600, mb='md'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Top Products', fw=600, size='lg'),
+                                        dmc.Badge('Best Sellers', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Box(
                                     dmc.Table(
                                         id='sales-top-products-table',
@@ -189,15 +254,24 @@ def layout():
                                 )
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='xl',
+                            bg='white',
                         ),
                         span={"base": 12, "sm": 6},  
                     ),
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Hourly Sales Pattern', fw=600, mb='md'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Hourly Sales Pattern', fw=600, size='lg'),
+                                        dmc.Badge('Heatmap', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Box(
                                     dcc.Graph(
                                         id='sales-hourly-pattern',
@@ -209,8 +283,10 @@ def layout():
                                 )
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='xl',
+                            bg='white',
                         ),
                         span={"base": 12, "sm": 6},  
                     ),
@@ -219,13 +295,20 @@ def layout():
                 mt='lg',
             ),
             
-            # Sales Flow Hierarchy Row
+            # Sales Flow Hierarchy - Full Width
             dmc.Grid(
                 [
                     dmc.GridCol(
                         dmc.Paper(
                             dmc.Stack([
-                                dmc.Text('Sales Flow Hierarchy', fw=600, mb='md'),
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Sales Flow Hierarchy', fw=600, size='lg'),
+                                        dmc.Badge('Sankey', color='gray', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
                                 dmc.Box(
                                     dcc.Graph(
                                         id='sales-category-breakdown',
@@ -237,8 +320,10 @@ def layout():
                                 )
                             ]),
                             p='md',
-                            radius='md',
+                            radius='lg',
                             withBorder=True,
+                            shadow='xl',
+                            bg='white',
                         ),
                         span=12,
                     ),
@@ -247,23 +332,32 @@ def layout():
                 mt='lg',
             ),
         ],
-        size='lg',
-        py='lg'
+        size='100%',  # Design Policy: Full viewport width
+        px='md',      # Design Policy: Horizontal padding
+        py='lg',      # Design Policy: Vertical padding
     )
 
 
 # Callbacks for sales dashboard
+def _log_timing(name, start_time):
+    elapsed = time.time() - start_time
+    print(f"[TIMING] {name}: {elapsed:.3f}s")
+
 @dash.callback(
     Output('sales-revenue-trend', 'figure'),
     Input('sales-btn-apply', 'n_clicks'),
     State('sales-date-from', 'value'),
     State('sales-date-until', 'value'),
-    prevent_initial_call=False,
+    prevent_initial_call=True,
 )
 def update_revenue_chart(n_clicks, date_from, date_until):
+    if not n_clicks:
+        raise PreventUpdate
+    start_time = time.time()
+    print(f"[CALLBACK] update_revenue_chart triggered")
     # Parse dates
-    start_date = date.today()
-    end_date = start_date
+    start_date = date(2025, 2, 10)
+    end_date = date(2025, 2, 28)
     
     if date_from:
         try:
@@ -278,7 +372,9 @@ def update_revenue_chart(n_clicks, date_from, date_until):
             pass
     
     # Build and return the daily revenue chart
-    return build_daily_revenue_chart(start_date, end_date)
+    result = build_daily_revenue_chart(start_date, end_date)
+    _log_timing('update_revenue_chart', start_time)
+    return result
 
 
 @dash.callback(
@@ -290,6 +386,10 @@ def update_revenue_chart(n_clicks, date_from, date_until):
     prevent_initial_call=True,
 )
 def update_additional_charts(n_clicks, date_from, date_until):
+    if not n_clicks:
+        raise PreventUpdate
+    start_time = time.time()
+    print(f"[CALLBACK] update_additional_charts triggered")
     # Parse dates
     start_date = date.today()
     end_date = start_date
@@ -307,11 +407,16 @@ def update_additional_charts(n_clicks, date_from, date_until):
             pass
     
     # Build Sankey chart
+    sankey_start = time.time()
     sankey_fig = build_category_sankey_chart(start_date, end_date)
+    print(f"[TIMING] build_category_sankey_chart: {time.time() - sankey_start:.3f}s")
     
     # Build hourly heatmap
+    heatmap_start = time.time()
     hourly_fig = build_hourly_heatmap_chart(start_date, end_date)
+    print(f"[TIMING] build_hourly_heatmap_chart: {time.time() - heatmap_start:.3f}s")
     
+    _log_timing('update_additional_charts (total)', start_time)
     return sankey_fig, hourly_fig
 
 
@@ -323,6 +428,10 @@ def update_additional_charts(n_clicks, date_from, date_until):
     prevent_initial_call=True,
 )
 def update_sales_by_principal_chart(n_clicks, date_from, date_until):
+    if not n_clicks:
+        raise PreventUpdate
+    start_time = time.time()
+    print(f"[CALLBACK] update_sales_by_principal_chart triggered")
     start_date = date.today()
     end_date = start_date
 
@@ -338,7 +447,9 @@ def update_sales_by_principal_chart(n_clicks, date_from, date_until):
         except (ValueError, TypeError):
             pass
 
-    return build_sales_by_principal_chart(start_date, end_date)
+    result = build_sales_by_principal_chart(start_date, end_date)
+    _log_timing('update_sales_by_principal_chart', start_time)
+    return result
 
 
 @dash.callback(
@@ -356,6 +467,10 @@ def update_sales_by_principal_chart(n_clicks, date_from, date_until):
     prevent_initial_call=True,
 )
 def update_kpi_cards(n_clicks, date_from, date_until):
+    if not n_clicks:
+        raise PreventUpdate
+    start_time = time.time()
+    print(f"[CALLBACK] update_kpi_cards triggered")
     # Parse dates
     start_date = date.today()
     end_date = start_date
@@ -373,8 +488,10 @@ def update_kpi_cards(n_clicks, date_from, date_until):
             pass
     
     # Get KPI data
+    kpi_start = time.time()
     try:
         revenue_comparison = get_revenue_comparison(start_date, end_date)
+        print(f"[TIMING] get_revenue_comparison: {time.time() - kpi_start:.3f}s")
         current = revenue_comparison['current']
         deltas = revenue_comparison['deltas']
         
@@ -406,6 +523,7 @@ def update_kpi_cards(n_clicks, date_from, date_until):
         atv_change_text = 'vs prev period: Rp 0 (0%)'
         items_change_text = 'vs prev period: 0 (0%)'
     
+    _log_timing('update_kpi_cards', start_time)
     return (
         revenue_text,
         transactions_text,
@@ -426,6 +544,10 @@ def update_kpi_cards(n_clicks, date_from, date_until):
     prevent_initial_call=True,
 )
 def update_top_products_table(n_clicks, date_from, date_until):
+    if not n_clicks:
+        raise PreventUpdate
+    start_time = time.time()
+    print(f"[CALLBACK] update_top_products_table triggered")
     # Parse dates
     start_date = date.today()
     end_date = start_date
@@ -444,7 +566,9 @@ def update_top_products_table(n_clicks, date_from, date_until):
     
     try:
         # Get top products data
+        query_start = time.time()
         top_products_df = get_top_products(start_date, end_date, limit=20)
+        print(f"[TIMING] get_top_products: {time.time() - query_start:.3f}s")
         
         if top_products_df.empty:
             return {
@@ -466,10 +590,12 @@ def update_top_products_table(n_clicks, date_from, date_until):
                 f"Rp {row['total_unit_price']:,.0f}"
             ])
         
+        _log_timing('update_top_products_table', start_time)
         return table_data
         
     except Exception as e:
         print(f"Error updating top products table: {e}")
+        _log_timing('update_top_products_table (error)', start_time)
         return {
             'head': ['Name', 'Category', 'Quantity Sold', 'Total Unit Price'],
             'body': [['Error loading data', '', '', '']]

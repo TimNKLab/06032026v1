@@ -1287,7 +1287,7 @@ app.conf.beat_schedule = {
     },
     'daily-stock-quants-etl': {
         'task': 'etl_tasks.daily_stock_quants_pipeline',
-        'schedule': crontab(hour=2, minute=20),
+        'schedule': crontab(hour=7, minute=0),
     },
     'incremental-dimension-refresh': {
         'task': 'etl_tasks.refresh_dimensions_incremental',

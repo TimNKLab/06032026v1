@@ -1,4 +1,9 @@
+import csv
+import os
 from datetime import date, datetime, timedelta
+from functools import lru_cache
+from pathlib import Path
+from typing import Iterable
 import math
 from typing import Dict, Optional
 
@@ -13,6 +18,16 @@ DEFAULT_ABC_THRESHOLDS = {
 
 DEFAULT_STOCK_LOOKBACK_DAYS = 30
 DEFAULT_LOW_STOCK_DAYS = 7
+
+_LEDGER_BASELINE_TS = datetime(2025, 2, 10, 7, 0, 0)
+_LEDGER_LOCATION_ID = 44
+_LEDGER_LOCATION_POOL = {44, 8, 154, 155, 156, 53, 157, 158}
+_LEDGER_BASELINE_FILENAME = 'reconcile stocks.csv'
+STOCK_LEDGER_BASELINE_DATE = _LEDGER_BASELINE_TS.date()
+
+
+def _to_utc_from_jakarta(dt_local: datetime) -> datetime:
+    return dt_local - timedelta(hours=7)
 
 
 def _normalize_snapshot_date(value: Optional[object]) -> Optional[date]:
@@ -34,9 +49,9 @@ def _get_snapshot_date(as_of_date: date) -> Optional[date]:
     conn = get_duckdb_connection()
     row = conn.execute(
         """
-        SELECT MAX(snapshot_date) AS snapshot_date
+        SELECT snapshot_date
         FROM fact_stock_on_hand_snapshot
-        WHERE snapshot_date <= ?
+        WHERE snapshot_date = ?
         """,
         [as_of_date],
     ).fetchone()
@@ -78,6 +93,186 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
     """
 
     return conn.execute(query, [snapshot_date, lookback_start, lookback_end]).df()
+
+
+def _data_lake_root() -> str:
+    return os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/app/data-lake')
+
+
+def _resolve_ledger_baseline_path() -> Path:
+    env_path = os.environ.get('STOCK_LEDGER_BASELINE_PATH')
+    if env_path:
+        return Path(env_path)
+
+    data_lake_path = Path(_data_lake_root()) / 'star-schema' / _LEDGER_BASELINE_FILENAME
+    if data_lake_path.exists():
+        return data_lake_path
+
+    return Path(__file__).resolve().parents[1] / _LEDGER_BASELINE_FILENAME
+
+
+def _parse_reconcile_stocks_csv(path: Path) -> pd.DataFrame:
+    rows = []
+    with path.open('r', encoding='utf-8', newline='') as f:
+        reader = csv.reader(f)
+        for outer in reader:
+            if not outer:
+                continue
+            inner_text = outer[0]
+            inner = next(csv.reader([inner_text]))
+            if not inner or inner[0] == 'Product/ID':
+                continue
+
+            product_id = inner[1] if len(inner) > 1 else None
+            qty = inner[3] if len(inner) > 3 else None
+            rows.append({'product_id': product_id, 'qty': qty})
+
+    df = pd.DataFrame(rows)
+    df['product_id'] = pd.to_numeric(df.get('product_id'), errors='coerce')
+    df['qty'] = pd.to_numeric(df.get('qty'), errors='coerce')
+    df = df.dropna(subset=['product_id']).copy()
+    df['product_id'] = df['product_id'].astype('int64')
+    df['qty'] = df['qty'].fillna(0.0).astype('float64')
+    df = df.groupby('product_id', as_index=False)['qty'].sum()
+    return df
+
+
+@lru_cache(maxsize=1)
+def _load_ledger_baseline() -> pd.DataFrame:
+    baseline_path = _resolve_ledger_baseline_path()
+    return _parse_reconcile_stocks_csv(baseline_path)
+
+
+def _query_location_ledger_deltas(
+    start_ts: datetime,
+    end_ts: datetime,
+    location_pool: set,
+) -> pd.DataFrame:
+    conn = get_duckdb_connection()
+    pool_values = sorted(location_pool)
+    pool_sql = ",".join(str(v) for v in pool_values)
+    query = """
+        SELECT
+            product_id,
+            SUM(
+                CASE
+                    WHEN location_dest_id IN ({pool_sql}) AND (location_src_id IS NULL OR location_src_id NOT IN ({pool_sql}))
+                        THEN ABS(qty_moved)
+                    WHEN location_src_id IN ({pool_sql}) AND (location_dest_id IS NULL OR location_dest_id NOT IN ({pool_sql}))
+                        THEN -ABS(qty_moved)
+                    ELSE 0
+                END
+            ) AS qty_delta
+        FROM fact_inventory_moves
+        WHERE movement_date > ? AND movement_date <= ?
+        GROUP BY 1
+    """.format(pool_sql=pool_sql)
+    return conn.execute(query, [start_ts, end_ts]).df()
+
+
+def get_stock_levels_ledger(
+    as_of_date: date,
+    lookback_days: int = DEFAULT_STOCK_LOOKBACK_DAYS,
+    low_stock_days: int = DEFAULT_LOW_STOCK_DAYS,
+) -> Dict[str, object]:
+    if not isinstance(as_of_date, date):
+        as_of_date = date.today()
+
+    lookback_days = max(1, int(lookback_days or DEFAULT_STOCK_LOOKBACK_DAYS))
+
+    cutoff_ts_local = datetime.combine(as_of_date, datetime.min.time()).replace(hour=7, minute=0, second=0)
+    if cutoff_ts_local < _LEDGER_BASELINE_TS:
+        empty_items = pd.DataFrame(columns=[
+            'product_id', 'product_name', 'product_category', 'product_brand',
+            'on_hand_qty', 'reserved_qty', 'units_sold', 'avg_daily_sold',
+            'days_of_cover', 'low_stock_flag', 'dead_stock_flag',
+        ])
+        return {
+            'snapshot_date': as_of_date,
+            'as_of_ts': cutoff_ts_local,
+            'baseline_ts': _LEDGER_BASELINE_TS,
+            'location_id': _LEDGER_LOCATION_ID,
+            'items': empty_items,
+            'summary': {
+                'total_on_hand': 0.0,
+                'low_stock_count': 0,
+                'dead_stock_count': 0,
+                'lookback_days': lookback_days,
+                'low_stock_days': low_stock_days,
+            },
+        }
+    baseline_df = _load_ledger_baseline()
+
+    # movement_date in fact_inventory_moves is stored as UTC; convert local cutoffs (UTC+07) to UTC.
+    baseline_ts_utc = _to_utc_from_jakarta(_LEDGER_BASELINE_TS)
+    cutoff_ts_utc = _to_utc_from_jakarta(cutoff_ts_local)
+    deltas_df = _query_location_ledger_deltas(baseline_ts_utc, cutoff_ts_utc, _LEDGER_LOCATION_POOL)
+
+    df = baseline_df.merge(deltas_df, on='product_id', how='outer')
+    df['qty'] = pd.to_numeric(df.get('qty'), errors='coerce').fillna(0.0)
+    df['qty_delta'] = pd.to_numeric(df.get('qty_delta'), errors='coerce').fillna(0.0)
+    df['on_hand_qty'] = df['qty'] + df['qty_delta']
+    df['reserved_qty'] = 0.0
+    df = df[['product_id', 'on_hand_qty', 'reserved_qty']].copy()
+
+    lookback_start = as_of_date - timedelta(days=lookback_days - 1)
+    conn = get_duckdb_connection()
+    sales_df = conn.execute(
+        """
+        SELECT product_id, SUM(quantity) AS units_sold
+        FROM fact_sales_all
+        WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+        GROUP BY 1
+        """,
+        [lookback_start, as_of_date],
+    ).df()
+
+    df = df.merge(sales_df, on='product_id', how='left')
+    df['units_sold'] = pd.to_numeric(df.get('units_sold'), errors='coerce').fillna(0.0)
+
+    products_df = conn.execute(
+        """
+        SELECT product_id, product_name, product_category, product_brand
+        FROM dim_products
+        """
+    ).df()
+    df = df.merge(products_df, on='product_id', how='left')
+
+    df['product_name'] = df['product_name'].fillna(df['product_id'].apply(lambda v: f'Product {v}'))
+    df['product_category'] = df['product_category'].fillna('Unknown Category')
+    df['product_brand'] = df['product_brand'].fillna('Unknown Brand')
+
+    df['avg_daily_sold'] = df['units_sold'] / float(lookback_days)
+    df['days_of_cover'] = df['on_hand_qty'] / df['avg_daily_sold'].replace(0, pd.NA)
+    df['low_stock_flag'] = df['days_of_cover'].notna() & (df['days_of_cover'] < low_stock_days)
+    df['dead_stock_flag'] = (df['on_hand_qty'] > 0) & (df['units_sold'] <= 0)
+
+    total_on_hand = float(df['on_hand_qty'].sum())
+    if math.isclose(total_on_hand, 0.0, abs_tol=1e-9):
+        total_on_hand = 0.0
+
+    summary = {
+        'total_on_hand': total_on_hand,
+        'low_stock_count': int(df['low_stock_flag'].sum()),
+        'dead_stock_count': int(df['dead_stock_flag'].sum()),
+        'lookback_days': lookback_days,
+        'low_stock_days': low_stock_days,
+    }
+
+    df = df[[
+        'product_id', 'product_name', 'product_category', 'product_brand',
+        'on_hand_qty', 'reserved_qty', 'units_sold', 'avg_daily_sold',
+        'days_of_cover', 'low_stock_flag', 'dead_stock_flag',
+    ]].copy()
+
+    return {
+        'snapshot_date': as_of_date,
+        'as_of_ts': cutoff_ts_local,
+        'baseline_ts': _LEDGER_BASELINE_TS,
+        'location_pool': sorted(_LEDGER_LOCATION_POOL),
+        'items': df,
+        'summary': summary,
+    }
 
 
 def get_stock_levels(
@@ -137,8 +332,12 @@ def get_stock_levels(
     df["low_stock_flag"] = df["days_of_cover"].notna() & (df["days_of_cover"] < low_stock_days)
     df["dead_stock_flag"] = (df["on_hand_qty"] > 0) & (df["units_sold"] <= 0)
 
+    total_on_hand = float(df["on_hand_qty"].sum())
+    if math.isclose(total_on_hand, 0.0, abs_tol=1e-9):
+        total_on_hand = 0.0
+
     summary = {
-        "total_on_hand": float(df["on_hand_qty"].sum()),
+        "total_on_hand": total_on_hand,
         "low_stock_count": int(df["low_stock_flag"].sum()),
         "dead_stock_count": int(df["dead_stock_flag"].sum()),
         "lookback_days": lookback_days,

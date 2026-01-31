@@ -2,6 +2,7 @@ import duckdb
 import os
 import logging
 import threading
+import time
 from datetime import date, timedelta
 from typing import Dict, Optional
 from functools import lru_cache
@@ -354,9 +355,13 @@ def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) 
         LIMIT ?
     """
 
+    query_start = time.time()
     try:
-        return conn.execute(query, [start_date, end_date, int(limit)]).df()
+        result = conn.execute(query, [start_date, end_date, int(limit)]).df()
+        print(f"[TIMING] query_sales_by_principal: {time.time() - query_start:.3f}s")
+        return result
     except Exception as exc:
+        print(f"[TIMING] query_sales_by_principal FAILED: {time.time() - query_start:.3f}s")
         logger.exception("DuckDB query failed in query_sales_by_principal: %s", exc)
         return pd.DataFrame(columns=["principal", "revenue"])
 
@@ -403,7 +408,10 @@ def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') 
     GROUP BY ds.period_start
     ORDER BY ds.period_start
     """
-    return conn.execute(query, [start_date, end_date]).fetchdf()
+    query_start = time.time()
+    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    print(f"[TIMING] query_sales_trends: {time.time() - query_start:.3f}s")
+    return result
 
 
 def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
@@ -426,27 +434,41 @@ def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     FROM hours h LEFT JOIN sales s ON h.hour = s.hour
     ORDER BY h.hour
     """
-    return conn.execute(query, [target_date, target_date]).fetchdf()
+    query_start = time.time()
+    result = conn.execute(query, [target_date, target_date]).fetchdf()
+    print(f"[TIMING] query_hourly_sales_pattern: {time.time() - query_start:.3f}s")
+    return result
 
 
 def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
-    """Query top products - single optimized query."""
+    """Query top products - optimized: aggregate by product_id first, then join."""
     conn = get_duckdb_connection()
 
     query = """
+    WITH sales_agg AS (
+        SELECT 
+            f.product_id,
+            SUM(f.quantity) as quantity_sold,
+            SUM(f.revenue) as total_unit_price
+        FROM fact_sales_all f
+        WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
+        GROUP BY f.product_id
+        ORDER BY total_unit_price DESC
+        LIMIT ?
+    )
     SELECT 
-        COALESCE(p.product_name, 'Product ' || f.product_id::VARCHAR) as product_name,
+        COALESCE(p.product_name, 'Product ' || s.product_id::VARCHAR) as product_name,
         COALESCE(p.product_category, 'Unknown Category') as category,
-        COALESCE(SUM(f.quantity), 0) as quantity_sold,
-        COALESCE(SUM(f.revenue), 0) as total_unit_price
-    FROM fact_sales_all f
-    LEFT JOIN dim_products p ON f.product_id = p.product_id
-    WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
-    GROUP BY 1, 2
-    ORDER BY total_unit_price DESC
-    LIMIT ?
+        s.quantity_sold,
+        s.total_unit_price
+    FROM sales_agg s
+    LEFT JOIN dim_products p ON s.product_id = p.product_id
+    ORDER BY s.total_unit_price DESC
     """
-    return conn.execute(query, [start_date, end_date, limit]).fetchdf()
+    query_start = time.time()
+    result = conn.execute(query, [start_date, end_date, limit]).fetchdf()
+    print(f"[TIMING] query_top_products: {time.time() - query_start:.3f}s")
+    return result
 
 
 def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
@@ -491,7 +513,9 @@ def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
         prev_start, end_date
     ]
 
+    query_start = time.time()
     row = conn.execute(query, params).fetchone()
+    print(f"[TIMING] query_revenue_comparison: {time.time() - query_start:.3f}s")
     cur_rev, cur_txn, cur_items, prev_rev, prev_txn, prev_items = [v or 0 for v in row]
 
     # Calculate averages
@@ -545,7 +569,10 @@ def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame
     GROUP BY 1, 2
     ORDER BY 1, 2
     """
-    return conn.execute(query, [start_date, end_date]).fetchdf()
+    query_start = time.time()
+    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    print(f"[TIMING] query_hourly_sales_heatmap: {time.time() - query_start:.3f}s")
+    return result
 
 
 def query_overview_summary(start_date: date, end_date: date) -> Dict:
@@ -571,7 +598,9 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
     UNION ALL SELECT 'brand', parent_cat, cat, brand, rev, NULL FROM by_brand
     """
 
+    query_start = time.time()
     results = conn.execute(query, [start_date, end_date]).fetchall()
+    print(f"[TIMING] query_overview_summary: {time.time() - query_start:.3f}s")
 
     categories_nested = {}
     brands_nested = {}

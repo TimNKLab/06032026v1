@@ -7,9 +7,11 @@ import pandas as pd
 from services.inventory_metrics import (
     get_abc_analysis,
     get_stock_levels,
+    get_stock_levels_ledger,
     get_sell_through_analysis,
     DEFAULT_STOCK_LOOKBACK_DAYS,
     DEFAULT_LOW_STOCK_DAYS,
+    STOCK_LEDGER_BASELINE_DATE,
 )
 from services.inventory_charts import (
     build_abc_pareto_chart,
@@ -88,6 +90,7 @@ def layout():
                                                             dmc.DatePickerInput(
                                                                 value=date.today(),
                                                                 placeholder='Select date',
+                                                                minDate=STOCK_LEDGER_BASELINE_DATE,
                                                                 id='inventory-stock-date',
                                                             ),
                                                         ],
@@ -479,8 +482,9 @@ def layout():
                 mt='md',
             ),
         ],
-        size='lg',
-        py='lg',
+        size='100%',  # Design Policy: Full viewport width
+        px='md',      # Design Policy: Horizontal padding
+        py='lg',      # Design Policy: Vertical padding
     )
 
 
@@ -510,6 +514,30 @@ def _format_snapshot_label(snapshot_date, prefix='Snapshot date'):
     if not snapshot_date:
         return f"{prefix}: —"
     return f"{prefix}: {snapshot_date.strftime('%d %b %Y')}"
+
+
+def _format_stock_levels_as_of_label(stock_result) -> str:
+    as_of_ts = stock_result.get('as_of_ts')
+    location_id = stock_result.get('location_id')
+    baseline_ts = stock_result.get('baseline_ts')
+    if not as_of_ts:
+        return "Snapshot: —"
+    baseline_label = baseline_ts.strftime('%d %b %Y %H:%M') if baseline_ts else '—'
+    loc_label = str(location_id) if location_id is not None else '—'
+    return (
+        f"Snapshot: {as_of_ts.strftime('%d %b %Y %H:%M')} (UTC+07) · "
+        f"Loc {loc_label} · Baseline {baseline_label}"
+    )
+
+
+def _normalize_display_number(value: float, abs_tol: float = 1e-9) -> float:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if abs(num) <= abs_tol:
+        return 0.0
+    return num
 
 
 @dash.callback(
@@ -601,7 +629,9 @@ def update_abc_analysis(n_clicks, date_from, date_until):
 )
 def update_stock_levels(n_clicks, date_value):
     as_of_date = _parse_date(date_value) or date.today()
-    stock_result = get_stock_levels(as_of_date)
+    if as_of_date < STOCK_LEDGER_BASELINE_DATE:
+        as_of_date = STOCK_LEDGER_BASELINE_DATE
+    stock_result = get_stock_levels_ledger(as_of_date)
 
     items_df = stock_result['items']
     summary = stock_result['summary']
@@ -630,9 +660,9 @@ def update_stock_levels(n_clicks, date_value):
     else:
         display_df = items_df.sort_values('on_hand_qty', ascending=False).head(50)
         for _, row in display_df.iterrows():
-            on_hand = float(row.get('on_hand_qty') or 0)
-            reserved = float(row.get('reserved_qty') or 0)
-            avg_daily = float(row.get('avg_daily_sold') or 0)
+            on_hand = _normalize_display_number(row.get('on_hand_qty') or 0)
+            reserved = _normalize_display_number(row.get('reserved_qty') or 0)
+            avg_daily = _normalize_display_number(row.get('avg_daily_sold') or 0)
             days_cover = row.get('days_of_cover')
             days_label = '—' if pd.isna(days_cover) else f"{float(days_cover):.1f}"
 
@@ -654,13 +684,13 @@ def update_stock_levels(n_clicks, date_value):
                 flags_label,
             ])
 
-    snapshot_label = _format_snapshot_label(snapshot_date)
+    snapshot_label = _format_stock_levels_as_of_label(stock_result)
 
     return (
         cover_fig,
         low_fig,
         table_data,
-        f"{summary.get('total_on_hand', 0):,.0f}",
+        f"{_normalize_display_number(summary.get('total_on_hand', 0)):,.0f}",
         f"{summary.get('low_stock_count', 0):,}",
         f"{summary.get('dead_stock_count', 0):,}",
         snapshot_label,

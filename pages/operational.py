@@ -227,81 +227,263 @@ def _run_sync_refresh(dataset_key: str, target_date: str):
 
 layout = dmc.Container(
     [
-        dmc.Title('ETL Ops', order=2),
-        dmc.Text('Scan missing partitions and trigger manual refresh jobs.', c='dimmed'),
+        dmc.Title('ETL Ops', order=2, mb='xs'),
+        dmc.Text('Scan missing partitions and trigger manual refresh jobs.', c='dimmed', mb='lg'),
         dcc.Store(id='etl-ops-bulk-state', storage_type='memory'),
         dcc.Interval(id='etl-ops-bulk-poll', interval=2000, disabled=True),
-        dmc.Paper(
+        
+        # Bento Grid Layout
+        dmc.Grid(
+            [
+                # Controls Card - Top Full Width
+                dmc.GridCol(
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Controls', fw=600, size='lg', c='blue.6'),
+                                        dmc.Badge('ETL Operations', color='blue', variant='light'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Divider(),
+                                dmc.Grid(
+                                    [
+                                        dmc.GridCol(
+                                            dmc.Stack(
+                                                [
+                                                    dmc.Text('Dataset', fw=500, size='sm', c='dimmed'),
+                                                    dmc.Select(
+                                                        id='etl-ops-dataset',
+                                                        data=DATASET_OPTIONS,
+                                                        value='pos',
+                                                        size='sm',
+                                                        w='100%',
+                                                    ),
+                                                ],
+                                                gap=4,
+                                            ),
+                                            span={'base': 12, 'sm': 4},
+                                        ),
+                                        dmc.GridCol(
+                                            dmc.Stack(
+                                                [
+                                                    dmc.Text('From', fw=500, size='sm', c='dimmed'),
+                                                    dmc.DatePickerInput(
+                                                        id='etl-ops-date-start',
+                                                        value=date.today(),
+                                                        placeholder='YYYY-MM-DD',
+                                                        size='sm',
+                                                        w='100%',
+                                                    ),
+                                                ],
+                                                gap=4,
+                                            ),
+                                            span={'base': 12, 'sm': 4},
+                                        ),
+                                        dmc.GridCol(
+                                            dmc.Stack(
+                                                [
+                                                    dmc.Text('Until', fw=500, size='sm', c='dimmed'),
+                                                    dmc.DatePickerInput(
+                                                        id='etl-ops-date-end',
+                                                        value=date.today(),
+                                                        placeholder='YYYY-MM-DD',
+                                                        size='sm',
+                                                        w='100%',
+                                                    ),
+                                                ],
+                                                gap=4,
+                                            ),
+                                            span={'base': 12, 'sm': 4},
+                                        ),
+                                    ],
+                                    gutter={'base': 'xs', 'sm': 'md'},
+                                ),
+                                dmc.Group(
+                                    [
+                                        dmc.Button('Scan Partitions', id='etl-ops-scan', variant='filled'),
+                                        dmc.Button('Trigger Refresh', id='etl-ops-trigger', variant='light'),
+                                        dmc.Button('Bulk Repair', id='etl-ops-bulk-run', variant='outline'),
+                                    ],
+                                    gap='sm',
+                                    mt='md'
+                                ),
+                                dmc.Grid(
+                                    [
+                                        dmc.GridCol(
+                                            dmc.Switch(
+                                                id='etl-ops-sync-mode',
+                                                label='Sync mode',
+                                                description='Wait for completion',
+                                                size='sm',
+                                            ),
+                                            span={'base': 12, 'sm': 6},
+                                        ),
+                                        dmc.GridCol(
+                                            dmc.Switch(
+                                                id='etl-ops-refresh-dims',
+                                                label='Refresh dimensions',
+                                                description='Slow operation',
+                                                size='sm',
+                                            ),
+                                            span={'base': 12, 'sm': 6},
+                                        ),
+                                    ],
+                                    gutter={'base': 'xs', 'sm': 'md'},
+                                    mt='sm',
+                                ),
+                            ],
+                            gap='md',
+                        ),
+                        p='lg',
+                        radius='lg',
+                        withBorder=True,
+                        shadow='sm',
+                    ),
+                    span=12,
+                ),
+                
+                # Status Cards - Middle Row
+                dmc.GridCol(
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Scan Summary', fw=600, size='md'),
+                                        dmc.Badge('Scan', color='gray', variant='light', size='xs'),
+                                    ],
+                                    gap='sm',
+                                    align='center'
+                                ),
+                                dmc.Text('Scan summary: —', id='etl-ops-summary', size='sm', c='dimmed'),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        h=120,
+                        shadow='sm',
+                    ),
+                    span=6,
+                ),
+                
+                dmc.GridCol(
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Trigger Status', fw=600, size='md'),
+                                        dmc.Badge('Status', color='gray', variant='light', size='xs'),
+                                    ],
+                                    gap='sm',
+                                    align='center'
+                                ),
+                                dmc.Text('Trigger status: —', id='etl-ops-trigger-status', size='sm', c='dimmed'),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        h=120,
+                        shadow='sm',
+                    ),
+                    span=6,
+                ),
+                
+                # Main Content Cards - Bottom Row
+                dmc.GridCol(
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Partition Status', fw=600, size='lg'),
+                                        dmc.Badge('Live Data', color='gray', variant='light', size='xs'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Table(
+                                    id='etl-ops-scan-table',
+                                    striped=True,
+                                    highlightOnHover=True,
+                                    withTableBorder=True,
+                                    horizontalSpacing='md',
+                                    verticalSpacing='xs',
+                                    fz='xs',
+                                    data=_table_data(['Date', 'Raw', 'Clean', 'Fact', 'Raw Rows', 'Clean Rows', 'Fact Rows']),
+                                ),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        h=500,
+                        style={'overflowY': 'auto'},
+                        shadow='sm',
+                    ),
+                    span=8,
+                ),
+                
+                dmc.GridCol(
+                    dmc.Paper(
+                        dmc.Stack(
+                            [
+                                dmc.Group(
+                                    [
+                                        dmc.Text('Dimension Files', fw=600, size='lg'),
+                                        dmc.Badge('System', color='gray', variant='light', size='xs'),
+                                    ],
+                                    justify='space-between',
+                                    align='center'
+                                ),
+                                dmc.Table(
+                                    id='etl-ops-dim-table',
+                                    striped=True,
+                                    highlightOnHover=True,
+                                    withTableBorder=True,
+                                    horizontalSpacing='md',
+                                    verticalSpacing='xs',
+                                    fz='xs',
+                                    data=_table_data(['Dimension', 'Exists', 'Path']),
+                                ),
+                            ],
+                            gap='sm',
+                        ),
+                        p='md',
+                        radius='lg',
+                        withBorder=True,
+                        h=500,
+                        style={'overflowY': 'auto'},
+                        shadow='sm',
+                    ),
+                    span=4,
+                ),
+            ],
+            gutter='lg',
+        ),
+        
+        # Info Alert
+        dmc.Alert(
             dmc.Stack(
                 [
-                    dmc.Group(
-                        [
-                            dmc.Stack(
-                                [
-                                    dmc.Text('Dataset', fw=600),
-                                    dmc.Select(
-                                        id='etl-ops-dataset',
-                                        data=DATASET_OPTIONS,
-                                        value='pos',
-                                    ),
-                                ],
-                                gap=4,
-                            ),
-                            dmc.Stack(
-                                [
-                                    dmc.Text('From', fw=600),
-                                    dmc.DatePickerInput(
-                                        id='etl-ops-date-start',
-                                        value=date.today(),
-                                        placeholder='YYYY-MM-DD',
-                                    ),
-                                ],
-                                gap=4,
-                            ),
-                            dmc.Stack(
-                                [
-                                    dmc.Text('Until (optional)', fw=600),
-                                    dmc.DatePickerInput(
-                                        id='etl-ops-date-end',
-                                        value=date.today(),
-                                        placeholder='YYYY-MM-DD',
-                                    ),
-                                ],
-                                gap=4,
-                            ),
-                            dmc.Button('Scan Partitions', id='etl-ops-scan', variant='filled'),
-                            dmc.Button('Trigger Refresh', id='etl-ops-trigger', variant='light'),
-                            dmc.Button('Bulk Scan + Repair (All Datasets)', id='etl-ops-bulk-run', variant='outline'),
-                            dmc.Switch(
-                                id='etl-ops-sync-mode',
-                                label='Run synchronously (wait for completion)',
-                                size='sm',
-                            ),
-                            dmc.Switch(
-                                id='etl-ops-refresh-dims',
-                                label='Refresh dimensions (slow)',
-                                size='sm',
-                            ),
-                        ],
-                        gap='lg',
-                        align='flex-end',
-                        wrap='wrap',
-                    ),
-                    dmc.Text('Scan summary: —', id='etl-ops-summary', size='sm', c='dimmed'),
-                    dmc.Text('Trigger status: —', id='etl-ops-trigger-status', size='sm', c='dimmed'),
-                    dmc.Text(
-                        'Note: Sync mode runs inside the web worker and can time out on large ranges. '
-                        'Use async trigger or force-refresh scripts for heavy workloads.',
-                        size='xs',
-                        c='dimmed',
-                    ),
+                    dmc.Text('💡 Tip: Sync mode runs inside the web worker and can time out on large ranges.', size='sm'),
+                    dmc.Text('Use async trigger or force-refresh scripts for heavy workloads.', size='sm', c='dimmed'),
                 ],
-                gap='sm',
+                gap=0,
             ),
-            p='md',
-            radius='md',
-            withBorder=True,
-            mt='md',
+            color='blue',
+            variant='light',
+            mt='lg',
+            radius='lg',
         ),
         dmc.Modal(
             id='etl-ops-bulk-modal',
@@ -344,66 +526,9 @@ layout = dmc.Container(
                 )
             ],
         ),
-        dmc.Grid(
-            [
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Text('Partition Status', fw=600),
-                                dmc.Table(
-                                    id='etl-ops-scan-table',
-                                    striped=True,
-                                    highlightOnHover=True,
-                                    withTableBorder=True,
-                                    horizontalSpacing='md',
-                                    verticalSpacing='xs',
-                                    fz='xs',
-                                    data=_table_data(['Date', 'Raw', 'Clean', 'Fact', 'Raw Rows', 'Clean Rows', 'Fact Rows']),
-                                ),
-                            ],
-                            gap='sm',
-                        ),
-                        p='md',
-                        radius='md',
-                        withBorder=True,
-                        h=420,
-                        style={'overflowY': 'auto'},
-                    ),
-                    span=7,
-                ),
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Text('Dimension Files', fw=600),
-                                dmc.Table(
-                                    id='etl-ops-dim-table',
-                                    striped=True,
-                                    highlightOnHover=True,
-                                    withTableBorder=True,
-                                    horizontalSpacing='md',
-                                    verticalSpacing='xs',
-                                    fz='xs',
-                                    data=_table_data(['Dimension', 'Exists', 'Path']),
-                                ),
-                            ],
-                            gap='sm',
-                        ),
-                        p='md',
-                        radius='md',
-                        withBorder=True,
-                        h=420,
-                        style={'overflowY': 'auto'},
-                    ),
-                    span=5,
-                ),
-            ],
-            gutter='lg',
-            mt='lg',
-        ),
     ],
-    size='lg',
+    size='100%',  # Changed from 'lg' to '100%' for full viewport width
+    px='md',      # Added horizontal padding for breathing room
     py='lg',
 )
 

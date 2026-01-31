@@ -30,8 +30,8 @@ NAV_LINKS = [
     ("Overview", "/"),
     ("Sales", "/sales"),
     ("Inventory Management", "/inventory"),
-    ("Operational Efficiency", "/operational"),
     ("Customer Experience", "/customer"),
+    ("Data Sync", "/operational")
 ]
 
 app = Dash(__name__, use_pages=True, external_stylesheets=["/assets/custom.css"], suppress_callback_exceptions=True)

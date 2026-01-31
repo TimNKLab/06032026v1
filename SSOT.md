@@ -93,6 +93,13 @@ When a milestone is marked **Validated**, it must meet all of the following.
 - **Artifacts:** `pages/inventory.py`, `services/inventory_metrics.py`, `services/inventory_charts.py`
 - **Note:** Inventory page is functional but does not yet handle inventory adjustments cleanly (see workstream NK_20260121_adjustments_8d9b).
 
+### M7 — UI/UX Design Enhancement (DMC-based)
+- **Status:** Planned
+- **Goal:** Enhance visual design and user experience using existing Dash Mantine Components (DMC) framework
+- **Scope:** Professional styling, modern layouts, improved data visualization, responsive design
+- **Artifacts:** Enhanced `app.py`, `pages/*`, custom CSS, DMC design system
+- **Plan:** See workstream NK_20260126_design_enhancement_4a7c
+
 ## 5) Oversight team (progress vs plan)
 This is a lightweight team to **regularly compare actual progress to the plan** and keep work aligned.
 
@@ -158,11 +165,27 @@ Use globally unique workstream IDs.
   - **Problem:** Adjustments (stock counts, write-offs, manual corrections) and manufacturing (production output/consumption) break sell-through and days-of-cover because they change on-hand without corresponding receipts/sales.
   - **Deliverables:**
     1. Tag moves in `fact_inventory_moves` with `movement_type` and `inventory_adjustment_flag` in ETL (including manufacturing: `'production_in'`, `'production_out'`). (Done)
-    2. Update sell-through query to exclude or isolate adjustments/manufacturing from “units received”. (Done)
-    3. Add “Adjustments” and “Manufacturing +/-” columns to Sell-through table for reconciliation visibility. (Planned)
+    2. Update sell-through query to exclude or isolate adjustments/manufacturing from "units received". (Done)
+    3. Add "Adjustments" and "Manufacturing +/-" columns to Sell-through table for reconciliation visibility. (Planned)
     4. Add a reconciliation KPI to Stock Levels: `Stock variance = (begin_on_hand + receipts - sales) - end_on_hand`. (Planned)
     5. Update UX: Add toggles to include/exclude adjustments and manufacturing output from sell-through calculations. (Planned)
   - **Notes:** This improves data reconciliation and prevents misleading KPIs when adjustments or manufacturing occur.
+
+- **NK_20260126_design_enhancement_4a7c** — UI/UX Design Enhancement using DMC framework
+  - **Status:** In Progress
+  - **Goal:** Enhance visual design and user experience using existing Dash Mantine Components (DMC) framework
+  - **Approach:** Maximize DMC 2.4.0 capabilities + custom CSS + modern design patterns
+  - **Deliverables:**
+    1. **DMC Design System:** Create consistent color palette, typography, spacing using DMC theme provider
+    2. **Enhanced Layouts:** Implement card-based designs, grid systems, responsive navigation
+    3. **Advanced Components:** Use DMC's Carousel, Stepper, Timeline, Loading overlays, transitions
+    4. **Custom Styling:** Add modern effects (gradients, shadows, glassmorphism) via custom CSS
+    5. **Data Visualization Enhancement:** Interactive charts with zoom, filters, custom color schemes
+    6. **UX Improvements:** Dark/light mode toggle, breadcrumb navigation, beautiful forms
+  - **Priority Pages:** Start with `pages/operational.py` (completed) and `app.py` header (completed)
+  - **Validation:** Visual review + responsive testing on mobile/desktop
+  - **Notes:** Avoid conflicts with existing DMC setup; enhance rather than replace components
+  - **🎯 DESIGN POLICY UPDATE:** All pages now use `dmc.Container(size='100%', px='md', py='lg')` for full viewport width with proper edge padding
 
 ## 8) Open questions (needs your confirmation)
 1. Who are the named owners for the oversight roles in section 5?
