@@ -359,3 +359,84 @@ For Stock Levels and Sell-through, validation requires comparing DuckDB-derived 
    - ABC query (Pareto + table) < 2s for typical ranges (30–90 days).
 4. **Evidence recorded**
    - Add a short “Validation evidence” entry in this SSOT for each release of the inventory page.
+
+## 10) Chart Building Policy and Query Strategy
+
+### 10.1 Purpose
+To ensure dashboards remain responsive and scalable as datasets grow, we adopt a consistent policy for building charts and executing queries. This section codifies the patterns and tools used in the `/sales` optimization workstream and serves as the reference for future pages.
+
+### 10.2 Core policies
+
+#### 10.2.1 Fail-fast to DuckDB; no Odoo fallbacks in runtime
+- **Rule:** All dashboard metrics must be served from DuckDB (data lake) at runtime.
+- **Implementation:** Remove or disable any Odoo RPC fallbacks in `services/*_metrics.py` and `pages/*` callbacks.
+- **Rationale:** Guarantees predictable latency and prevents cascading timeouts.
+
+#### 10.2.2 Server-side caching with TTL for expensive results
+- **Tool:** `flask-caching` (Redis if `REDIS_URL` is set; otherwise SimpleCache).
+- **Policy:** Apply `@cache.memoize()` to:
+  - Expensive chart builders (`services/*_charts.py` functions that build Plotly figures).
+  - Repeatedly used query results (e.g., overview summary used by multiple charts).
+- **TTL:** Controlled by `DASH_CACHE_TTL_SECONDS` (default 600s in docker-compose.yml).
+- **Keying:** Automatic by function signature (date range + parameters).
+- **Rationale:** Eliminates repeated DuckDB scans and Plotly figure construction for identical date ranges.
+
+#### 10.2.3 Progressive loading via dcc.Store (KPI first, then charts/tables)
+- **Pattern:** Add a hidden `dcc.Store(id='*-query-context')` to the page layout.
+- **Flow:**
+  1. User clicks Apply → a single “KPI” callback runs queries and writes query context (start/end dates) to the store.
+  2. Heavy chart/table callbacks trigger off the store (`Input('*-query-context', 'data')`), not the Apply button.
+- **UX benefit:** KPIs render immediately; heavy visualizations populate shortly after.
+- **Implementation notes:**
+  - KPI callback must output the store data (ISO dates and minimal metadata).
+  - Heavy callbacks must guard on missing store data (`if not data: raise PreventUpdate`).
+  - Keep the store payload small (dates + flags); do not store large DataFrames.
+
+#### 10.2.4 Consolidated queries; minimize per-callback DuckDB roundtrips
+- **Goal:** Reduce the number of DuckDB queries per Apply to as few as possible.
+- **Techniques:**
+  - Use CTEs and FILTER clauses to compute multiple metrics in one scan.
+  - Prefer DuckDB-side aggregation over Python-side `pivot_table`/groupby when feasible.
+  - For complex charts (Sankey, Heatmap), return “edge list” or pre-pivoted shapes from DuckDB to avoid heavy Python loops.
+- **Rationale:** Set-based work in DuckDB is faster than Python loops and reduces Python CPU/memory pressure.
+
+#### 10.2.5 Timing instrumentation everywhere
+- **Rule:** Every callback and every query function must log start/end timing.
+- **Pattern:** Use a helper `_log_timing(name, start_time)` in callbacks; print query timing in DuckDB connector functions.
+- **Output format:** `[TIMING] <function_name>: <elapsed_seconds>.3fs`
+- **Rationale:** Enables data-driven performance tuning and rapid regression detection.
+
+### 10.3 Query strategy guidelines
+
+#### 10.3.1 Date predicates must be pushed down
+- Always filter by date in DuckDB (`WHERE date >= ? AND date < ? + INTERVAL 1 DAY`).
+- Avoid pulling full tables into Pandas and then filtering by date.
+
+#### 10.3.2 Prefer single-scan aggregates
+- Use a single query with GROUP BY/CASE WHEN to compute multiple KPIs (e.g., revenue, transactions, items) rather than N separate queries.
+- Example: `query_revenue_comparison` uses FILTER to compute current vs previous period in one scan.
+
+#### 10.3.3 Limit Python-side reshaping
+- If a chart needs a pivot or edge list, try to produce that shape in DuckDB.
+- For Heatmap: return `(date, hour, revenue)` rows from DuckDB; avoid `pivot_table` in Python.
+- For Sankey: return `(source, target, value)` edges from DuckDB; limit top-N in SQL.
+
+#### 10.3.4 Use LIMIT/OFFSET for large result sets
+- Top-N queries should apply LIMIT in DuckDB (e.g., top 20 products).
+- Do not fetch thousands of rows into Python only to slice.
+
+### 10.4 Implementation checklist for new pages
+- [ ] Add `dcc.Store(id='*-query-context')` to layout.
+- [ ] Implement KPI callback that writes query context to store.
+- [ ] Wire heavy callbacks to read from store (not Apply button).
+- [ ] Add `@cache.memoize()` to chart builders and expensive query functions.
+- [ ] Ensure all queries have date predicates and timing logs.
+- [ ] Prefer single-scan aggregates; avoid per-callback full scans.
+- [ ] Verify Docker Compose includes `DASH_CACHE_TTL_SECONDS` and `REDIS_URL` if using Redis.
+- [ ] Test progressive loading: KPIs should appear before charts.
+- [ ] Test cache hit: second Apply with same dates should be faster.
+
+### 10.5 References and artifacts
+- **Plan:** `C:\Users\ThinkPad\.windsurf\plans\chart-building-optimizations-7dcd08.md`
+- **Code examples:** `pages/sales.py` (progressive loading), `services/sales_charts.py` (cached builders), `services/cache.py` (cache init).
+- **Docker:** `docker-compose.yml` (DASH_CACHE_TTL_SECONDS), `requirements.txt` (Flask-Caching).

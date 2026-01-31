@@ -12,3 +12,4 @@ redis
 duckdb==1.2.0
 pydantic
 pyarrow
+Flask-Caching==2.1.0

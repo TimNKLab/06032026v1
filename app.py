@@ -1,6 +1,7 @@
 import dash
 from dash import Dash, dcc, html, Output, Input, State
 import dash_mantine_components as dmc
+from services.cache import init_cache
 
 # Track B: Dash 2.14.2 + DMC 2.4.0 compatibility
 # Enforce React 18 for DMC 2.x
@@ -51,6 +52,8 @@ def header_nav_links():
 
 # Expose Flask server for Gunicorn
 server = app.server
+
+init_cache(server)
 
 app.layout = dmc.MantineProvider(
     theme={

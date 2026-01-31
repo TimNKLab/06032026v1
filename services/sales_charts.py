@@ -3,6 +3,8 @@ import plotly.graph_objects as go
 import pandas as pd
 from datetime import date
 
+from services.cache import cache
+
 from services.sales_metrics import (
     get_sales_trends_data,
     get_daily_transaction_counts,
@@ -114,6 +116,7 @@ def build_revenue_trend_chart(start_date: date, end_date: date, period: str = 'd
     return fig
 
 
+@cache.memoize()
 def build_sales_by_principal_chart(start_date: date, end_date: date, limit: int = 20) -> go.Figure:
     sales_df = get_sales_by_principal(start_date, end_date, limit=limit)
 
@@ -165,6 +168,7 @@ def build_sales_by_principal_chart(start_date: date, end_date: date, limit: int 
     return fig
 
 
+@cache.memoize()
 def build_daily_revenue_chart(start_date: date, end_date: date) -> go.Figure:
     """
     Build a daily revenue line chart for the specified date range.
@@ -237,6 +241,7 @@ def build_daily_revenue_chart(start_date: date, end_date: date) -> go.Figure:
     return fig
 
 
+@cache.memoize()
 def build_category_breakdown_chart(start_date: date, end_date: date) -> go.Figure:
     """
     Build a sales by category breakdown chart.
@@ -326,6 +331,7 @@ def build_category_breakdown_chart(start_date: date, end_date: date) -> go.Figur
     return fig
 
 
+@cache.memoize()
 def build_category_sankey_chart(start_date: date, end_date: date) -> go.Figure:
     """
     Build a Sankey diagram showing sales flow from parent_category > category > brand.
@@ -514,6 +520,7 @@ def build_category_sankey_chart(start_date: date, end_date: date) -> go.Figure:
     return fig
 
 
+@cache.memoize()
 def build_hourly_heatmap_chart(start_date: date, end_date: date) -> go.Figure:
     """
     Build a heatmap showing hourly sales pattern across multiple days.

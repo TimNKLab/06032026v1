@@ -31,6 +31,8 @@ def layout():
             dmc.Title('Sales Performance', order=2, mb='xs'),
             dmc.Text('Comprehensive sales metrics and performance insights.', c='dimmed', mb='lg'),
             
+            dcc.Store(id='sales-query-context', data=None),
+            
             # Bento Grid Layout
             dmc.Grid(
                 [
@@ -345,31 +347,17 @@ def _log_timing(name, start_time):
 
 @dash.callback(
     Output('sales-revenue-trend', 'figure'),
-    Input('sales-btn-apply', 'n_clicks'),
-    State('sales-date-from', 'value'),
-    State('sales-date-until', 'value'),
+    Input('sales-query-context', 'data'),
     prevent_initial_call=True,
 )
-def update_revenue_chart(n_clicks, date_from, date_until):
-    if not n_clicks:
+def update_revenue_chart(query_context):
+    if not query_context:
         raise PreventUpdate
     start_time = time.time()
     print(f"[CALLBACK] update_revenue_chart triggered")
     # Parse dates
-    start_date = date(2025, 2, 10)
-    end_date = date(2025, 2, 28)
-    
-    if date_from:
-        try:
-            start_date = date.fromisoformat(date_from)
-        except (ValueError, TypeError):
-            pass
-    
-    if date_until:
-        try:
-            end_date = date.fromisoformat(date_until)
-        except (ValueError, TypeError):
-            pass
+    start_date = date.fromisoformat(query_context['start_date'])
+    end_date = date.fromisoformat(query_context['end_date'])
     
     # Build and return the daily revenue chart
     result = build_daily_revenue_chart(start_date, end_date)
@@ -380,31 +368,17 @@ def update_revenue_chart(n_clicks, date_from, date_until):
 @dash.callback(
     Output('sales-category-breakdown', 'figure'),
     Output('sales-hourly-pattern', 'figure'),
-    Input('sales-btn-apply', 'n_clicks'),
-    State('sales-date-from', 'value'),
-    State('sales-date-until', 'value'),
+    Input('sales-query-context', 'data'),
     prevent_initial_call=True,
 )
-def update_additional_charts(n_clicks, date_from, date_until):
-    if not n_clicks:
+def update_additional_charts(query_context):
+    if not query_context:
         raise PreventUpdate
     start_time = time.time()
     print(f"[CALLBACK] update_additional_charts triggered")
     # Parse dates
-    start_date = date.today()
-    end_date = start_date
-    
-    if date_from:
-        try:
-            start_date = date.fromisoformat(date_from)
-        except (ValueError, TypeError):
-            pass
-    
-    if date_until:
-        try:
-            end_date = date.fromisoformat(date_until)
-        except (ValueError, TypeError):
-            pass
+    start_date = date.fromisoformat(query_context['start_date'])
+    end_date = date.fromisoformat(query_context['end_date'])
     
     # Build Sankey chart
     sankey_start = time.time()
@@ -422,31 +396,17 @@ def update_additional_charts(n_clicks, date_from, date_until):
 
 @dash.callback(
     Output('sales-by-principal', 'figure'),
-    Input('sales-btn-apply', 'n_clicks'),
-    State('sales-date-from', 'value'),
-    State('sales-date-until', 'value'),
+    Input('sales-query-context', 'data'),
     prevent_initial_call=True,
 )
-def update_sales_by_principal_chart(n_clicks, date_from, date_until):
-    if not n_clicks:
+def update_sales_by_principal_chart(query_context):
+    if not query_context:
         raise PreventUpdate
     start_time = time.time()
     print(f"[CALLBACK] update_sales_by_principal_chart triggered")
-    start_date = date.today()
-    end_date = start_date
-
-    if date_from:
-        try:
-            start_date = date.fromisoformat(date_from)
-        except (ValueError, TypeError):
-            pass
-
-    if date_until:
-        try:
-            end_date = date.fromisoformat(date_until)
-        except (ValueError, TypeError):
-            pass
-
+    start_date = date.fromisoformat(query_context['start_date'])
+    end_date = date.fromisoformat(query_context['end_date'])
+    
     result = build_sales_by_principal_chart(start_date, end_date)
     _log_timing('update_sales_by_principal_chart', start_time)
     return result
@@ -461,6 +421,7 @@ def update_sales_by_principal_chart(n_clicks, date_from, date_until):
     Output('sales-kpi-transactions-change', 'children'),
     Output('sales-kpi-avg-transaction-value-change', 'children'),
     Output('sales-kpi-items-sold-change', 'children'),
+    Output('sales-query-context', 'data'),
     Input('sales-btn-apply', 'n_clicks'),
     State('sales-date-from', 'value'),
     State('sales-date-until', 'value'),
@@ -532,37 +493,28 @@ def update_kpi_cards(n_clicks, date_from, date_until):
         revenue_change_text,
         transactions_change_text,
         atv_change_text,
-        items_change_text
+        items_change_text,
+        {
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+            'n_clicks': int(n_clicks),
+        }
     )
 
 
 @dash.callback(
     Output('sales-top-products-table', 'data'),
-    Input('sales-btn-apply', 'n_clicks'),
-    State('sales-date-from', 'value'),
-    State('sales-date-until', 'value'),
+    Input('sales-query-context', 'data'),
     prevent_initial_call=True,
 )
-def update_top_products_table(n_clicks, date_from, date_until):
-    if not n_clicks:
+def update_top_products_table(query_context):
+    if not query_context:
         raise PreventUpdate
     start_time = time.time()
     print(f"[CALLBACK] update_top_products_table triggered")
     # Parse dates
-    start_date = date.today()
-    end_date = start_date
-    
-    if date_from:
-        try:
-            start_date = date.fromisoformat(date_from)
-        except (ValueError, TypeError):
-            pass
-    
-    if date_until:
-        try:
-            end_date = date.fromisoformat(date_until)
-        except (ValueError, TypeError):
-            pass
+    start_date = date.fromisoformat(query_context['start_date'])
+    end_date = date.fromisoformat(query_context['end_date'])
     
     try:
         # Get top products data
