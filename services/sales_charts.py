@@ -136,6 +136,16 @@ def build_sales_by_principal_chart(start_date: date, end_date: date, limit: int 
 
     df['principal'] = df['principal'].fillna('').astype(str).replace({'': 'Unknown Principal'})
     df['revenue'] = pd.to_numeric(df['revenue'], errors='coerce').fillna(0)
+    # Filter out products without a principal (Unknown Principal, empty, '-', etc.)
+    df = df[~df['principal'].isin(['Unknown Principal', 'unknown principal', '', '-', 'None', 'null', 'NULL'])]
+    df = df[df['principal'].str.strip().str.len() > 1]
+    if df.empty:
+        return go.Figure().update_layout(
+            title='Sales by Principal',
+            template='plotly_white',
+            height=350,
+            showlegend=False,
+        )
     df = df.sort_values('revenue', ascending=False).head(limit)
 
     fig = px.icicle(

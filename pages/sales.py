@@ -28,9 +28,7 @@ dash.register_page(
 def layout():
     return dmc.Container(
         [
-            dmc.Title('Sales Performance', order=2, mb='xs'),
-            dmc.Text('Comprehensive sales metrics and performance insights.', c='dimmed', mb='lg'),
-            
+     
             dcc.Store(id='sales-query-context', data=None),
             
             # Bento Grid Layout
@@ -170,16 +168,14 @@ def layout():
                                     justify='space-between',
                                     align='center'
                                 ),
-                                dmc.Container(
+                                dmc.Box(
                                     dcc.Graph(
                                         id='sales-revenue-trend',
                                         figure={},  # Placeholder
                                         config={'displayModeBar': False},
-                                        style={'height': '100%', 'width': '100%'},
+                                        style={'height': '320px', 'width': '100%'},
                                     ),
-                                    p=0,
-                                    fluid=True,
-                                    style={'height': '100%'}
+                                    w='100%'
                                 )
                             ]),
                             p='md',
@@ -189,7 +185,7 @@ def layout():
                             bg='white',
                             style={'height': '100%'}
                         ),
-                        span={"base": 12, "sm": 8},
+                        span={"base": 12, "md": 7},
                     ),
                     dmc.GridCol(
                         dmc.Paper(
@@ -207,7 +203,7 @@ def layout():
                                         id='sales-by-principal',
                                         figure={},  # Placeholder
                                         config={'displayModeBar': False},
-                                        style={'height': {'base': '250px', 'sm': '350px', 'lg': '400px'}},
+                                        style={'height': {'base': '260px', 'md': '420px'}},
                                         responsive=True,
                                     )
                                 )
@@ -218,7 +214,7 @@ def layout():
                             shadow='xl',
                             bg='white',
                         ),
-                        span={"base": 12, "sm": 4},  
+                        span={"base": 12, "md": 5},  
                     ),
                 ],
                 gutter={"base": "md", "lg": "lg"},  
