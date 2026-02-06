@@ -118,6 +118,24 @@ def force_refresh_day(self, dataset_key: str, target_date: str, refresh_dims: bo
         records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
         return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
 
+    if dataset_key == "profit":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_events", "step_name": "Cost events", "pct": 25})
+        cost_events_path = update_product_cost_events.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_snapshot", "step_name": "Cost snapshot", "pct": 50})
+        cost_snapshot_path = update_product_cost_latest_daily.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "sales_profit", "step_name": "Sales profit", "pct": 75})
+        profit_lines_path = update_sales_lines_profit.run(target_date)
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "aggregates", "step_name": "Profit aggregates", "pct": 90})
+        agg_paths = update_profit_aggregates.run(target_date)
+        return {
+            "dataset": dataset_key,
+            "date": target_date,
+            "cost_events_path": cost_events_path,
+            "cost_snapshot_path": cost_snapshot_path,
+            "profit_lines_path": profit_lines_path,
+            "aggregate_paths": agg_paths,
+        }
+
     raise ValueError(f"Unsupported dataset_key: {dataset_key}")
 
 # ============================================================================
@@ -131,7 +149,8 @@ from etl.config import (
     CLEAN_SALES_INVOICE_PATH, CLEAN_PURCHASES_PATH, CLEAN_INVENTORY_MOVES_PATH, CLEAN_STOCK_QUANTS_PATH,
     STAR_SCHEMA_PATH, METADATA_PATH, DIM_PRODUCTS_FILE, DIM_LOCATIONS_FILE,
     DIM_UOMS_FILE, DIM_PARTNERS_FILE, DIM_USERS_FILE, DIM_COMPANIES_FILE,
-    DIM_LOTS_FILE,
+    DIM_LOTS_FILE, FACT_PRODUCT_COST_EVENTS_PATH, FACT_PRODUCT_COST_LATEST_DAILY_PATH,
+    FACT_SALES_LINES_PROFIT_PATH, AGG_PROFIT_DAILY_PATH, AGG_PROFIT_DAILY_BY_PRODUCT_PATH,
 )
 
 # ============================================================================
@@ -194,6 +213,46 @@ def to_local_datetime(col_name: str) -> pl.Expr:
         .dt.convert_time_zone(app.conf.timezone)
         .dt.replace_time_zone(None)
     )
+
+
+def _tax_multiplier_expr(tax_col: str) -> pl.Expr:
+    return (
+        pl.when(pl.col(tax_col).is_in([5, 2]))
+        .then(1.0)
+        .when(pl.col(tax_col).is_in([7, 6]))
+        .then(1.11)
+        .otherwise(1.0)
+    )
+
+
+def _has_parquet_files(path: str) -> bool:
+    if os.path.isdir(path):
+        for _, _, files in os.walk(path):
+            if any(name.endswith('.parquet') for name in files):
+                return True
+        return False
+    return os.path.isfile(path) and path.endswith('.parquet')
+
+
+def _read_parquet_or_empty(path: str, schema: Dict[str, pl.DataType]) -> pl.DataFrame:
+    if os.path.isfile(path):
+        return pl.read_parquet(path)
+    if _has_parquet_files(path):
+        return pl.read_parquet(f"{path}/**/*.parquet")
+    return pl.DataFrame(schema=schema)
+
+
+def _partition_path(base_path: str, target_date: str) -> str:
+    year, month, day = target_date.split('-')
+    return f'{base_path}/year={year}/month={month}/day={day}'
+
+
+def _write_partitioned(df: pl.DataFrame, base_path: str, target_date: str, filename_prefix: str) -> str:
+    partition_path = _partition_path(base_path, target_date)
+    os.makedirs(partition_path, exist_ok=True)
+    output_file = f'{partition_path}/{filename_prefix}_{target_date}.parquet'
+    atomic_write_parquet(df, output_file)
+    return output_file
 
 
 # ============================================================================
@@ -537,7 +596,7 @@ def clean_sales_invoice_lines(raw_file_path: Optional[str], target_date: str) ->
                     .cast(pl.Utf8, strict=False)
                     .str.strptime(pl.Date, '%Y-%m-%d', strict=False)
                     .alias('date'),
-                pl.col('move_id', 'customer_id', 'move_line_id', 'product_id')
+                pl.col('move_id', 'customer_id', 'move_line_id', 'product_id', 'tax_id')
                     .cast(pl.Int64, strict=False),
                 pl.col('move_name', 'customer_name').cast(pl.Utf8, strict=False).fill_null(''),
                 pl.col('price_unit', 'quantity').cast(pl.Float64, strict=False).fill_null(0),
@@ -553,6 +612,7 @@ def clean_sales_invoice_lines(raw_file_path: Optional[str], target_date: str) ->
                 'product_id',
                 'price_unit',
                 'quantity',
+                'tax_id',
                 'tax_ids_json',
             ])
         )
@@ -578,7 +638,7 @@ def clean_purchase_invoice_lines(raw_file_path: Optional[str], target_date: str)
             logger.warning(f"Invalid file path: {raw_file_path}")
             return None
 
-        df_clean = (
+        base = (
             pl.scan_parquet(raw_file_path)
             .with_columns(
                 pl.col('move_date')
@@ -602,6 +662,56 @@ def clean_purchase_invoice_lines(raw_file_path: Optional[str], target_date: str)
                 'move_line_id',
                 'product_id',
                 'price_unit',
+                'quantity',
+                'tax_id',
+                'tax_ids_json',
+            ])
+        )
+
+        line_totals = base.with_columns([
+            (pl.col('price_unit') * pl.col('quantity')).alias('line_total'),
+        ])
+
+        discount_by_move = line_totals.group_by('move_id').agg([
+            pl.when(pl.col('price_unit') >= 0)
+            .then(pl.col('line_total'))
+            .otherwise(0)
+            .sum()
+            .alias('gross_amount'),
+            pl.when(pl.col('price_unit') < 0)
+            .then(pl.col('line_total'))
+            .otherwise(0)
+            .sum()
+            .alias('discount_amount'),
+        ])
+
+        df_clean = (
+            line_totals
+            .join(discount_by_move, on='move_id', how='left')
+            .with_columns(
+                pl.when(pl.col('gross_amount') != 0)
+                .then(pl.col('discount_amount') / pl.col('gross_amount'))
+                .otherwise(0.0)
+                .alias('discount_pct')
+            )
+            .with_columns(
+                pl.when(pl.col('price_unit') < 0)
+                .then(0.0)
+                .otherwise(pl.col('price_unit') * (1 + pl.col('discount_pct')))
+                .alias('actual_price')
+            )
+            .select([
+                'date',
+                'move_id',
+                'move_name',
+                'vendor_id',
+                'vendor_name',
+                'purchase_order_id',
+                'purchase_order_name',
+                'move_line_id',
+                'product_id',
+                'price_unit',
+                'actual_price',
                 'quantity',
                 'tax_id',
                 'tax_ids_json',
@@ -889,6 +999,7 @@ def _update_fact_invoice_sales(df: pl.DataFrame, target_date: str) -> str:
         pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
         pl.col('price_unit').cast(pl.Float64, strict=False).fill_null(0),
         pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('tax_id').cast(pl.Int64, strict=False),
         pl.col('tax_ids_json').cast(pl.Utf8, strict=False).fill_null('[]'),
         pl.lit(False).alias('is_free_item'),
     ])
@@ -915,6 +1026,7 @@ def _update_fact_purchases(df: pl.DataFrame, target_date: str) -> str:
         pl.col('move_line_id').cast(pl.Int64, strict=False).fill_null(0),
         pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
         pl.col('price_unit').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('actual_price').cast(pl.Float64, strict=False).fill_null(0),
         pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
         pl.col('tax_id').cast(pl.Int64, strict=False),
         pl.lit('').alias('tax_name'),
@@ -1014,6 +1126,374 @@ def update_stock_quants_star_schema(clean_file_path: Optional[str], target_date:
         return _update_fact_stock_on_hand_snapshot(df, target_date)
     except Exception as e:
         logger.error(f"Error updating stock quants star schema for {target_date}: {e}", exc_info=True)
+        return None
+
+
+# ============================================================================
+# COST + PROFIT MATERIALIZATION
+# ============================================================================
+
+def _build_product_cost_events(target_date: str) -> pl.DataFrame:
+    purchases_schema = {
+        'date': pl.Date,
+        'move_id': pl.Int64,
+        'move_line_id': pl.Int64,
+        'product_id': pl.Int64,
+        'actual_price': pl.Float64,
+        'quantity': pl.Float64,
+        'tax_id': pl.Int64,
+    }
+    cost_schema = {
+        'date': pl.Date,
+        'product_id': pl.Int64,
+        'cost_unit_tax_in': pl.Float64,
+        'source_move_id': pl.Int64,
+        'source_tax_id': pl.Int64,
+    }
+
+    partition_path = _partition_path(f'{STAR_SCHEMA_PATH}/fact_purchases', target_date)
+    df = _read_parquet_or_empty(partition_path, purchases_schema)
+    if df.is_empty():
+        return pl.DataFrame(schema=cost_schema)
+
+    target_dt = date.fromisoformat(target_date)
+    df = (
+        df.with_columns(
+            pl.lit(target_dt).alias('date'),
+            pl.col('product_id').cast(pl.Int64, strict=False),
+            pl.col('actual_price').cast(pl.Float64, strict=False).fill_null(0),
+            pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+            pl.col('tax_id').cast(pl.Int64, strict=False).fill_null(0),
+        )
+        .filter(
+            (pl.col('product_id').is_not_null())
+            & (pl.col('product_id') != 0)
+            & (pl.col('actual_price') > 0)
+            & (pl.col('quantity') > 0)
+        )
+        .with_columns(
+            (pl.col('actual_price') * _tax_multiplier_expr('tax_id')).alias('cost_unit_tax_in')
+        )
+        .select([
+            'date',
+            'product_id',
+            'cost_unit_tax_in',
+            pl.col('move_id').alias('source_move_id'),
+            pl.col('tax_id').alias('source_tax_id'),
+        ])
+    )
+
+    if df.is_empty():
+        return pl.DataFrame(schema=cost_schema)
+    return df
+
+
+def _latest_cost_by_product(events: pl.DataFrame) -> pl.DataFrame:
+    if events.is_empty():
+        return events
+
+    return (
+        events.sort('source_move_id')
+        .group_by('product_id')
+        .agg([
+            pl.last('cost_unit_tax_in').alias('cost_unit_tax_in'),
+            pl.last('source_move_id').alias('source_move_id'),
+            pl.last('source_tax_id').alias('source_tax_id'),
+        ])
+    )
+
+
+def _build_cost_snapshot_from_events(target_date: str) -> pl.DataFrame:
+    cost_schema = {
+        'date': pl.Date,
+        'product_id': pl.Int64,
+        'cost_unit_tax_in': pl.Float64,
+        'source_move_id': pl.Int64,
+        'source_tax_id': pl.Int64,
+    }
+
+    events = _read_parquet_or_empty(FACT_PRODUCT_COST_EVENTS_PATH, cost_schema)
+    if events.is_empty():
+        return pl.DataFrame(schema=cost_schema)
+
+    target_dt = date.fromisoformat(target_date)
+    events = events.with_columns(
+        pl.col('date').cast(pl.Date, strict=False),
+        pl.col('product_id').cast(pl.Int64, strict=False),
+        pl.col('source_move_id').cast(pl.Int64, strict=False),
+        pl.col('source_tax_id').cast(pl.Int64, strict=False),
+        pl.col('cost_unit_tax_in').cast(pl.Float64, strict=False).fill_null(0),
+    )
+    events = events.filter(pl.col('date') <= pl.lit(target_dt))
+    if events.is_empty():
+        return pl.DataFrame(schema=cost_schema)
+
+    latest = (
+        events.sort(['date', 'source_move_id'])
+        .group_by('product_id')
+        .agg([
+            pl.last('cost_unit_tax_in').alias('cost_unit_tax_in'),
+            pl.last('source_move_id').alias('source_move_id'),
+            pl.last('source_tax_id').alias('source_tax_id'),
+        ])
+        .with_columns(pl.lit(target_dt).alias('date'))
+        .select(['date', 'product_id', 'cost_unit_tax_in', 'source_move_id', 'source_tax_id'])
+    )
+
+    if latest.is_empty():
+        return pl.DataFrame(schema=cost_schema)
+    return latest
+
+
+def _build_product_cost_latest_daily(target_date: str) -> pl.DataFrame:
+    cost_schema = {
+        'date': pl.Date,
+        'product_id': pl.Int64,
+        'cost_unit_tax_in': pl.Float64,
+        'source_move_id': pl.Int64,
+        'source_tax_id': pl.Int64,
+    }
+
+    target_dt = date.fromisoformat(target_date)
+    prev_date = (target_dt - timedelta(days=1)).isoformat()
+    prev_partition = _partition_path(FACT_PRODUCT_COST_LATEST_DAILY_PATH, prev_date)
+
+    if not _has_parquet_files(prev_partition):
+        return _build_cost_snapshot_from_events(target_date)
+
+    prev_df = _read_parquet_or_empty(prev_partition, cost_schema)
+    prev_df = prev_df.select([
+        'product_id', 'cost_unit_tax_in', 'source_move_id', 'source_tax_id',
+    ])
+
+    today_partition = _partition_path(FACT_PRODUCT_COST_EVENTS_PATH, target_date)
+    today_events = _read_parquet_or_empty(today_partition, cost_schema)
+    today_events = today_events.with_columns(
+        pl.col('product_id').cast(pl.Int64, strict=False),
+        pl.col('source_move_id').cast(pl.Int64, strict=False),
+        pl.col('source_tax_id').cast(pl.Int64, strict=False),
+        pl.col('cost_unit_tax_in').cast(pl.Float64, strict=False).fill_null(0),
+    )
+    today_latest = _latest_cost_by_product(today_events)
+
+    if prev_df.is_empty() and today_latest.is_empty():
+        return pl.DataFrame(schema=cost_schema)
+
+    merged = prev_df.join(today_latest, on='product_id', how='outer', suffix='_today')
+    snapshot = (
+        merged.with_columns(
+            pl.coalesce([pl.col('cost_unit_tax_in_today'), pl.col('cost_unit_tax_in')]).alias('cost_unit_tax_in'),
+            pl.coalesce([pl.col('source_move_id_today'), pl.col('source_move_id')]).alias('source_move_id'),
+            pl.coalesce([pl.col('source_tax_id_today'), pl.col('source_tax_id')]).alias('source_tax_id'),
+        )
+        .select(['product_id', 'cost_unit_tax_in', 'source_move_id', 'source_tax_id'])
+        .with_columns(pl.lit(target_dt).alias('date'))
+        .select(['date', 'product_id', 'cost_unit_tax_in', 'source_move_id', 'source_tax_id'])
+    )
+
+    if snapshot.is_empty():
+        return pl.DataFrame(schema=cost_schema)
+    return snapshot
+
+
+def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
+    sales_schema = {
+        'date': pl.Date,
+        'order_id': pl.Int64,
+        'line_id': pl.Int64,
+        'move_id': pl.Int64,
+        'move_line_id': pl.Int64,
+        'product_id': pl.Int64,
+        'quantity': pl.Float64,
+        'revenue': pl.Float64,
+        'price_unit': pl.Float64,
+        'tax_id': pl.Int64,
+    }
+    profit_schema = {
+        'date': pl.Date,
+        'txn_id': pl.Int64,
+        'line_id': pl.Int64,
+        'product_id': pl.Int64,
+        'quantity': pl.Float64,
+        'revenue_tax_in': pl.Float64,
+        'cost_unit_tax_in': pl.Float64,
+        'cogs_tax_in': pl.Float64,
+        'gross_profit': pl.Float64,
+        'source_cost_move_id': pl.Int64,
+        'source_cost_tax_id': pl.Int64,
+    }
+
+    target_dt = date.fromisoformat(target_date)
+    pos_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_sales', target_date)
+    invoice_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_invoice_sales', target_date)
+    cost_partition = _partition_path(FACT_PRODUCT_COST_LATEST_DAILY_PATH, target_date)
+
+    pos_df = _read_parquet_or_empty(pos_partition, sales_schema)
+    invoice_df = _read_parquet_or_empty(invoice_partition, sales_schema)
+    cost_df = _read_parquet_or_empty(cost_partition, {
+        'date': pl.Date,
+        'product_id': pl.Int64,
+        'cost_unit_tax_in': pl.Float64,
+        'source_move_id': pl.Int64,
+        'source_tax_id': pl.Int64,
+    })
+
+    pos_lines = (
+        pos_df.with_columns(
+            pl.lit(target_dt).alias('date'),
+            pl.col('order_id').cast(pl.Int64, strict=False).fill_null(0).alias('txn_id'),
+            pl.col('line_id').cast(pl.Int64, strict=False).fill_null(0),
+            pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
+            pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+            pl.col('revenue').cast(pl.Float64, strict=False).fill_null(0).alias('revenue_tax_in'),
+        )
+        .select(['date', 'txn_id', 'line_id', 'product_id', 'quantity', 'revenue_tax_in'])
+    )
+
+    invoice_lines = (
+        invoice_df.with_columns(
+            pl.lit(target_dt).alias('date'),
+            pl.col('move_id').cast(pl.Int64, strict=False).fill_null(0).alias('txn_id'),
+            pl.col('move_line_id').cast(pl.Int64, strict=False).fill_null(0).alias('line_id'),
+            pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
+            pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0),
+            pl.col('price_unit').cast(pl.Float64, strict=False).fill_null(0),
+            pl.col('tax_id').cast(pl.Int64, strict=False).fill_null(0),
+        )
+        .with_columns(
+            (
+                pl.col('price_unit')
+                * pl.col('quantity')
+                * _tax_multiplier_expr('tax_id')
+            ).alias('revenue_tax_in')
+        )
+        .select(['date', 'txn_id', 'line_id', 'product_id', 'quantity', 'revenue_tax_in'])
+    )
+
+    sales_lines = pl.concat([pos_lines, invoice_lines], how='vertical')
+    if sales_lines.is_empty():
+        return pl.DataFrame(schema=profit_schema)
+
+    cost_df = cost_df.select([
+        'product_id',
+        'cost_unit_tax_in',
+        pl.col('source_move_id').alias('source_cost_move_id'),
+        pl.col('source_tax_id').alias('source_cost_tax_id'),
+    ])
+
+    merged = sales_lines.join(cost_df, on='product_id', how='left')
+    merged = merged.with_columns(
+        pl.col('cost_unit_tax_in').cast(pl.Float64, strict=False).fill_null(0),
+        pl.col('source_cost_move_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('source_cost_tax_id').cast(pl.Int64, strict=False).fill_null(0),
+        (pl.col('cost_unit_tax_in') * pl.col('quantity')).alias('cogs_tax_in'),
+    )
+    merged = merged.with_columns(
+        (pl.col('revenue_tax_in') - pl.col('cogs_tax_in')).alias('gross_profit')
+    )
+
+    profit_df = merged.select([
+        'date',
+        'txn_id',
+        'line_id',
+        'product_id',
+        'quantity',
+        'revenue_tax_in',
+        'cost_unit_tax_in',
+        'cogs_tax_in',
+        'gross_profit',
+        'source_cost_move_id',
+        'source_cost_tax_id',
+    ])
+
+    if profit_df.is_empty():
+        return pl.DataFrame(schema=profit_schema)
+    return profit_df
+
+
+def _build_profit_aggregates(profit_df: pl.DataFrame) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    daily_schema = {
+        'date': pl.Date,
+        'revenue_tax_in': pl.Float64,
+        'cogs_tax_in': pl.Float64,
+        'gross_profit': pl.Float64,
+        'quantity': pl.Float64,
+        'transactions': pl.Int64,
+        'lines': pl.Int64,
+    }
+    by_product_schema = {
+        'date': pl.Date,
+        'product_id': pl.Int64,
+        'revenue_tax_in': pl.Float64,
+        'cogs_tax_in': pl.Float64,
+        'gross_profit': pl.Float64,
+        'quantity': pl.Float64,
+        'lines': pl.Int64,
+    }
+
+    if profit_df.is_empty():
+        return pl.DataFrame(schema=daily_schema), pl.DataFrame(schema=by_product_schema)
+
+    daily = profit_df.group_by('date').agg([
+        pl.sum('revenue_tax_in').alias('revenue_tax_in'),
+        pl.sum('cogs_tax_in').alias('cogs_tax_in'),
+        pl.sum('gross_profit').alias('gross_profit'),
+        pl.sum('quantity').alias('quantity'),
+        pl.col('txn_id').n_unique().alias('transactions'),
+        pl.len().alias('lines'),
+    ])
+
+    by_product = profit_df.group_by(['date', 'product_id']).agg([
+        pl.sum('revenue_tax_in').alias('revenue_tax_in'),
+        pl.sum('cogs_tax_in').alias('cogs_tax_in'),
+        pl.sum('gross_profit').alias('gross_profit'),
+        pl.sum('quantity').alias('quantity'),
+        pl.len().alias('lines'),
+    ])
+
+    return daily, by_product
+
+
+@app.task
+def update_product_cost_events(target_date: str) -> Optional[str]:
+    try:
+        df = _build_product_cost_events(target_date)
+        return _write_partitioned(df, FACT_PRODUCT_COST_EVENTS_PATH, target_date, 'fact_product_cost_events')
+    except Exception as exc:
+        logger.error(f"Error updating product cost events for {target_date}: {exc}", exc_info=True)
+        return None
+
+
+@app.task
+def update_product_cost_latest_daily(target_date: str) -> Optional[str]:
+    try:
+        df = _build_product_cost_latest_daily(target_date)
+        return _write_partitioned(df, FACT_PRODUCT_COST_LATEST_DAILY_PATH, target_date, 'fact_product_cost_latest_daily')
+    except Exception as exc:
+        logger.error(f"Error updating latest daily cost for {target_date}: {exc}", exc_info=True)
+        return None
+
+
+@app.task
+def update_sales_lines_profit(target_date: str) -> Optional[str]:
+    try:
+        df = _build_sales_lines_profit(target_date)
+        return _write_partitioned(df, FACT_SALES_LINES_PROFIT_PATH, target_date, 'fact_sales_lines_profit')
+    except Exception as exc:
+        logger.error(f"Error updating sales-line profit for {target_date}: {exc}", exc_info=True)
+        return None
+
+
+@app.task
+def update_profit_aggregates(target_date: str) -> Optional[Dict[str, str]]:
+    try:
+        profit_df = _build_sales_lines_profit(target_date)
+        daily_df, by_product_df = _build_profit_aggregates(profit_df)
+        daily_path = _write_partitioned(daily_df, AGG_PROFIT_DAILY_PATH, target_date, 'agg_profit_daily')
+        by_product_path = _write_partitioned(by_product_df, AGG_PROFIT_DAILY_BY_PRODUCT_PATH, target_date, 'agg_profit_daily_by_product')
+        return {'daily': daily_path, 'by_product': by_product_path}
+    except Exception as exc:
+        logger.error(f"Error updating profit aggregates for {target_date}: {exc}", exc_info=True)
         return None
 
 
@@ -1236,6 +1716,13 @@ def daily_stock_quants_pipeline(target_date: Optional[str] = None) -> str:
 
 
 @app.task
+def daily_profit_pipeline(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for cost/profit materialization."""
+    from etl.pipelines.daily import daily_profit_pipeline_impl
+    return daily_profit_pipeline_impl(target_date)
+
+
+@app.task
 def date_range_etl_pipeline(start_date: str, end_date: Optional[str] = None) -> Dict[str, Any]:
     """Process date range in parallel."""
     if end_date is None:
@@ -1289,6 +1776,10 @@ app.conf.beat_schedule = {
         'task': 'etl_tasks.daily_stock_quants_pipeline',
         'schedule': crontab(hour=7, minute=0),
     },
+    'daily-profit-etl': {
+        'task': 'etl_tasks.daily_profit_pipeline',
+        'schedule': crontab(hour=2, minute=20),
+    },
     'incremental-dimension-refresh': {
         'task': 'etl_tasks.refresh_dimensions_incremental',
         'schedule': crontab(hour='*/4', minute=0),
@@ -1320,5 +1811,9 @@ app.conf.task_routes = {
     'etl_tasks.save_raw_purchase_invoice_lines': {'queue': 'loading'},
     'etl_tasks.save_raw_inventory_moves': {'queue': 'loading'},
     'etl_tasks.save_raw_stock_quants': {'queue': 'loading'},
+    'etl_tasks.update_product_cost_events': {'queue': 'loading'},
+    'etl_tasks.update_product_cost_latest_daily': {'queue': 'loading'},
+    'etl_tasks.update_sales_lines_profit': {'queue': 'loading'},
+    'etl_tasks.update_profit_aggregates': {'queue': 'loading'},
     'etl_tasks.refresh_dimensions_incremental': {'queue': 'dimensions'},
 }

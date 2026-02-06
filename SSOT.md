@@ -144,6 +144,8 @@ Keep this brief and append-only.
 - **2025-12 (repo docs):** Data lake root inside containers should be `/data-lake` (Windows host bind mount typically `D:\data-lake → /data-lake`).
 - **2026-01 (ABC definition):** ABC classification changed from cumulative revenue-share to SKU-share thresholds (default A=top 20% SKUs by revenue, B=next 30%, C=rest). Pareto curve still uses cumulative revenue share for visualization.
 - **2026-01 (Inventory adjustments):** Inventory adjustments and manufacturing (production output/consumption) break sell-through and days-of-cover. Planned workstream NK_20260121_adjustments_8d9b to tag moves, exclude them from receipts, and add reconciliation visibility.
+- **2026-02 (Cost & Profit ETL):** Implemented tax-adjusted cost and gross profit calculation with materialized aggregates. Cost rule: "latest known cost" as of sale date (not future prices). Tax multipliers: purchase tax_id 5/2 → 1.0x, 7/6 → 1.11x, default 1.0. Bonus items (actual_price ≤ 0 or quantity ≤ 0) excluded from cost calculation. Daily pipeline scheduled at 02:20. Validated with unit tests and manual validation scripts.
+- **2026-02 (Odoo Data Sources):** Documented all Odoo tables used in ETL: pos.order (POS), account.move (sales/purchases), stock.move.line (inventory), stock.quant (snapshots), plus dimensions (product, category, brand, tax, partner). Derived tables: cost events, latest daily cost, sales line profit, profit aggregates.
 
 ## 7) Work tracking (active workstreams)
 Use globally unique workstream IDs.
@@ -154,11 +156,17 @@ Use globally unique workstream IDs.
 
 - **NK_20260119_inventory_kpis_3f2a** — Inventory KPIs + Inventory page build-out
   - **Status:** Done (code present)
-  - **Deliverables:** Inventory page implementing:
-    - Stock Levels
-    - Sell-through Ratio
-    - ABC Analysis
-  - **Plan:** See section 9.
+  - **Deliverables:** Stock quant snapshot ETL, inventory metrics, inventory page UI, stock levels/sell-through/ABC charts.
+
+- **NK_20260206_profit_etl_9a2b** — Cost & Profit ETL implementation and validation
+  - **Status:** Done (validated)
+  - **Deliverables:** 
+    - ETL tasks: `_build_product_cost_events`, `_build_product_cost_latest_daily`, `_build_sales_lines_profit`, `_build_profit_aggregates`
+    - Celery tasks: `update_product_cost_events`, `update_product_cost_latest_daily`, `update_sales_lines_profit`, `update_profit_aggregates`
+    - Daily pipeline: `daily_profit_pipeline_impl` scheduled at 02:20
+    - DuckDB views: `fact_product_cost_events`, `fact_product_cost_latest_daily`, `fact_sales_lines_profit`, `agg_profit_daily`, `agg_profit_daily_by_product`
+    - Validation: Unit tests (`tests/test_profit_etl.py`), manual validation scripts (`scripts/validate_profit_etl.py`, `scripts/run_profit_etl.py`)
+  - **Validation evidence:** All 7 unit tests pass; tax multipliers correct; bonus item exclusion working; profit calculations accurate; DuckDB views accessible.
 
 - **NK_20260121_adjustments_8d9b** — Inventory adjustments and manufacturing handling in reconciliation
   - **Status:** In progress
@@ -436,7 +444,67 @@ To ensure dashboards remain responsive and scalable as datasets grow, we adopt a
 - [ ] Test progressive loading: KPIs should appear before charts.
 - [ ] Test cache hit: second Apply with same dates should be faster.
 
-### 10.5 References and artifacts
+## 11) Odoo Data Sources and ETL Flow
+
+### 11.1 Direct Table Pulls (Raw Extraction)
+
+#### A. Transactional Data Tables
+
+| Data Source | Odoo Table | Purpose | Key Fields |
+|-------------|--------------|---------|------------|
+| **POS Sales** | `pos.order` | Point-of-sale transactions | `id`, `date_order`, `partner_id`, `user_id`, `state`, `lines`, `payments_id` |
+| **Invoice Sales** | `account.move` (filter: `move_type='out_invoice'`, `state='posted'`) | Customer invoices | `move_id`, `date`, `partner_id`, `product_id`, `quantity`, `price_unit`, `tax_id` |
+| **Purchases** | `account.move` (filter: `move_type='in_invoice'`, `state='posted'`) | Vendor bills | `move_id`, `date`, `partner_id`, `product_id`, `quantity`, `price_unit`, `actual_price`, `tax_id` |
+| **Inventory Moves** | `stock.move.line` (executed moves) | Stock movements | `move_id`, `date`, `product_id`, `quantity`, `location_id`, `location_dest_id` |
+| **Stock Quants** | `stock.quant` (optional snapshots) | Inventory levels | `product_id`, `location_id`, `quantity`, `reserved_quantity`, `lot_id` |
+
+#### B. Dimension/Reference Tables
+
+| Dimension | Odoo Table | Purpose | Key Fields |
+|-----------|--------------|---------|------------|
+| **Products** | `product.product` | Product master data | `id`, `name`, `default_code`, `categ_id`, `brand_id` |
+| **Categories** | `product.category` | Product categories | `id`, `name`, `parent_id` |
+| **Brands** | `product.brand` (if exists) | Product brands | `id`, `name` |
+| **Taxes** | `account.tax` | Tax definitions | `id`, `name`, `amount` |
+| **Partners** | `res.partner` | Customers/Vendors | `id`, `name`, `company_type` |
+
+### 11.2 Derived/Aggregated Tables
+
+| Derived Table | Source Data | Logic | Purpose |
+|--------------|--------------|-------|---------|
+| **Cost Events** | Purchases (`fact_purchases`) | Apply tax multipliers to `actual_price`, filter bonus items | Tax-adjusted cost per purchase line |
+| **Latest Daily Cost** | Cost Events | Incremental merge to get latest cost per product per day | Latest known cost as of each date |
+| **Sales Line Profit** | POS + Invoice Sales + Latest Cost | Join sales with cost, calculate profit per line | Revenue, COGS, gross profit per sales line |
+| **Profit Aggregates** | Sales Line Profit | Group by date and/or product | Daily and by-product profit summaries |
+
+### 11.3 ETL Data Flow
+
+```
+Odoo Transactional Tables:
+├── pos.order → POS Sales
+├── account.move (out_invoice) → Invoice Sales  
+├── account.move (in_invoice) → Purchases
+├── stock.move.line → Inventory Moves
+└── stock.quant → Stock Snapshots
+
+↓ ETL Processing ↓
+
+Derived/Aggregated Tables:
+├── Cost Events (from Purchases)
+├── Latest Daily Cost (from Cost Events)
+├── Sales Line Profit (from Sales + Cost)
+└── Profit Aggregates (from Sales Line Profit)
+
+Reference Dimensions:
+├── Products, Categories, Brands, Taxes, Partners
+```
+
+### 11.4 Key Business Rules Applied
+
+- **Cost Rule**: "Latest known cost" as of sale date (not future prices)
+- **Tax Multipliers**: Purchase tax_id 5/2 → 1.0x, 7/6 → 1.11x, default 1.0
+- **Bonus Exclusion**: Filter out purchases where `actual_price ≤ 0` or `quantity ≤ 0`
+- **Profit Calculation**: `gross_profit = revenue_tax_in - cogs_tax_in`
 - **Plan:** `C:\Users\ThinkPad\.windsurf\plans\chart-building-optimizations-7dcd08.md`
 - **Code examples:** `pages/sales.py` (progressive loading), `services/sales_charts.py` (cached builders), `services/cache.py` (cache init).
 - **Docker:** `docker-compose.yml` (DASH_CACHE_TTL_SECONDS), `requirements.txt` (Flask-Caching).

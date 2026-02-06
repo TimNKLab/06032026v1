@@ -45,6 +45,11 @@ class DuckDBManager:
             f"{data_lake}/star-schema/fact_purchases",
             f"{data_lake}/star-schema/fact_inventory_moves",
             f"{data_lake}/star-schema/fact_stock_on_hand_snapshot",
+            f"{data_lake}/star-schema/fact_product_cost_events",
+            f"{data_lake}/star-schema/fact_product_cost_latest_daily",
+            f"{data_lake}/star-schema/fact_sales_lines_profit",
+            f"{data_lake}/star-schema/agg_profit_daily",
+            f"{data_lake}/star-schema/agg_profit_daily_by_product",
             f"{data_lake}/star-schema/dim_products.parquet",
             f"{data_lake}/star-schema/dim_categories.parquet",
             f"{data_lake}/star-schema/dim_brands.parquet",
@@ -53,7 +58,22 @@ class DuckDBManager:
 
     def _setup_views(self, conn: duckdb.DuckDBPyConnection) -> None:
         """Setup DuckDB views - fails fast on errors."""
-        fact_path, fact_invoice_path, fact_purchases_path, fact_inventory_moves_path, fact_stock_snapshot_path, dim_products, dim_categories, dim_brands, dim_taxes = self._get_data_paths()
+        (
+            fact_path,
+            fact_invoice_path,
+            fact_purchases_path,
+            fact_inventory_moves_path,
+            fact_stock_snapshot_path,
+            cost_events_path,
+            cost_latest_path,
+            sales_profit_path,
+            agg_profit_daily_path,
+            agg_profit_daily_by_product_path,
+            dim_products,
+            dim_categories,
+            dim_brands,
+            dim_taxes,
+        ) = self._get_data_paths()
 
         def _parquet_columns(parquet_path: str) -> set:
             try:
@@ -64,6 +84,14 @@ class DuckDBManager:
                 return {r[0] for r in rows if r and r[0]}
             except Exception:
                 return set()
+
+        def _has_parquet_files(parquet_path: str) -> bool:
+            if os.path.isdir(parquet_path):
+                for _, _, files in os.walk(parquet_path):
+                    if any(name.endswith('.parquet') for name in files):
+                        return True
+                return False
+            return os.path.isfile(parquet_path) and parquet_path.endswith('.parquet')
 
         products_cols = _parquet_columns(dim_products)
         categories_cols = _parquet_columns(dim_categories)
@@ -138,6 +166,7 @@ class DuckDBManager:
                 COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
                 COALESCE(TRY_CAST(price_unit AS DOUBLE), 0) AS price_unit,
                 COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                COALESCE(TRY_CAST(tax_id AS BIGINT), 0) AS tax_id,
                 COALESCE(tax_ids_json, '[]') AS tax_ids_json,
                 FALSE AS is_free_item
             FROM read_parquet('{fact_invoice_path}/**/*.parquet', union_by_name=True, filename=true)
@@ -156,6 +185,7 @@ class DuckDBManager:
                 COALESCE(TRY_CAST(move_line_id AS BIGINT), 0) AS move_line_id,
                 COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
                 COALESCE(TRY_CAST(price_unit AS DOUBLE), 0) AS price_unit,
+                COALESCE(TRY_CAST(actual_price AS DOUBLE), 0) AS actual_price,
                 COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                 TRY_CAST(tax_id AS BIGINT) AS tax_id,
                 COALESCE(tax_name, '') AS tax_name,
@@ -235,6 +265,141 @@ class DuckDBManager:
                 WHERE FALSE
             """)
 
+        if _has_parquet_files(cost_events_path):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW fact_product_cost_events AS
+                SELECT
+                    TRY_CAST(date AS DATE) AS date,
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(cost_unit_tax_in AS DOUBLE), 0) AS cost_unit_tax_in,
+                    COALESCE(TRY_CAST(source_move_id AS BIGINT), 0) AS source_move_id,
+                    COALESCE(TRY_CAST(source_tax_id AS BIGINT), 0) AS source_tax_id
+                FROM read_parquet('{cost_events_path}/**/*.parquet', union_by_name=True, filename=true)
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW fact_product_cost_events AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST(NULL AS BIGINT) AS product_id,
+                    CAST(0 AS DOUBLE) AS cost_unit_tax_in,
+                    CAST(NULL AS BIGINT) AS source_move_id,
+                    CAST(NULL AS BIGINT) AS source_tax_id
+                WHERE FALSE
+            """)
+
+        if _has_parquet_files(cost_latest_path):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW fact_product_cost_latest_daily AS
+                SELECT
+                    TRY_CAST(date AS DATE) AS date,
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(cost_unit_tax_in AS DOUBLE), 0) AS cost_unit_tax_in,
+                    COALESCE(TRY_CAST(source_move_id AS BIGINT), 0) AS source_move_id,
+                    COALESCE(TRY_CAST(source_tax_id AS BIGINT), 0) AS source_tax_id
+                FROM read_parquet('{cost_latest_path}/**/*.parquet', union_by_name=True, filename=true)
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW fact_product_cost_latest_daily AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST(NULL AS BIGINT) AS product_id,
+                    CAST(0 AS DOUBLE) AS cost_unit_tax_in,
+                    CAST(NULL AS BIGINT) AS source_move_id,
+                    CAST(NULL AS BIGINT) AS source_tax_id
+                WHERE FALSE
+            """)
+
+        if _has_parquet_files(sales_profit_path):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW fact_sales_lines_profit AS
+                SELECT
+                    TRY_CAST(date AS DATE) AS date,
+                    COALESCE(TRY_CAST(txn_id AS BIGINT), 0) AS txn_id,
+                    COALESCE(TRY_CAST(line_id AS BIGINT), 0) AS line_id,
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                    COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
+                    COALESCE(TRY_CAST(cost_unit_tax_in AS DOUBLE), 0) AS cost_unit_tax_in,
+                    COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
+                    COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
+                    COALESCE(TRY_CAST(source_cost_move_id AS BIGINT), 0) AS source_cost_move_id,
+                    COALESCE(TRY_CAST(source_cost_tax_id AS BIGINT), 0) AS source_cost_tax_id
+                FROM read_parquet('{sales_profit_path}/**/*.parquet', union_by_name=True, filename=true)
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW fact_sales_lines_profit AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST(NULL AS BIGINT) AS txn_id,
+                    CAST(NULL AS BIGINT) AS line_id,
+                    CAST(NULL AS BIGINT) AS product_id,
+                    CAST(0 AS DOUBLE) AS quantity,
+                    CAST(0 AS DOUBLE) AS revenue_tax_in,
+                    CAST(0 AS DOUBLE) AS cost_unit_tax_in,
+                    CAST(0 AS DOUBLE) AS cogs_tax_in,
+                    CAST(0 AS DOUBLE) AS gross_profit,
+                    CAST(NULL AS BIGINT) AS source_cost_move_id,
+                    CAST(NULL AS BIGINT) AS source_cost_tax_id
+                WHERE FALSE
+            """)
+
+        if _has_parquet_files(agg_profit_daily_path):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW agg_profit_daily AS
+                SELECT
+                    TRY_CAST(date AS DATE) AS date,
+                    COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
+                    COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
+                    COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                    COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
+                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                FROM read_parquet('{agg_profit_daily_path}/**/*.parquet', union_by_name=True, filename=true)
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW agg_profit_daily AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST(0 AS DOUBLE) AS revenue_tax_in,
+                    CAST(0 AS DOUBLE) AS cogs_tax_in,
+                    CAST(0 AS DOUBLE) AS gross_profit,
+                    CAST(0 AS DOUBLE) AS quantity,
+                    CAST(0 AS BIGINT) AS transactions,
+                    CAST(0 AS BIGINT) AS lines
+                WHERE FALSE
+            """)
+
+        if _has_parquet_files(agg_profit_daily_by_product_path):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW agg_profit_daily_by_product AS
+                SELECT
+                    TRY_CAST(date AS DATE) AS date,
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
+                    COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
+                    COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                FROM read_parquet('{agg_profit_daily_by_product_path}/**/*.parquet', union_by_name=True, filename=true)
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW agg_profit_daily_by_product AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST(NULL AS BIGINT) AS product_id,
+                    CAST(0 AS DOUBLE) AS revenue_tax_in,
+                    CAST(0 AS DOUBLE) AS cogs_tax_in,
+                    CAST(0 AS DOUBLE) AS gross_profit,
+                    CAST(0 AS DOUBLE) AS quantity,
+                    CAST(0 AS BIGINT) AS lines
+                WHERE FALSE
+            """)
+
         conn.execute("""
             CREATE OR REPLACE VIEW fact_sales_all AS
             SELECT 
@@ -304,7 +469,7 @@ class DuckDBManager:
 
 def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     conn = DuckDBManager().get_connection()
-    _, _, _, _, _, dim_products, _, dim_brands, _ = DuckDBManager._get_data_paths()
+    _, _, _, _, _, _, _, _, _, _, dim_products, _, dim_brands, _ = DuckDBManager._get_data_paths()
 
     def _parquet_columns(parquet_path: str) -> set:
         try:

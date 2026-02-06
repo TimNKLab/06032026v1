@@ -215,9 +215,69 @@ Bagian ini menjelaskan alur data **end-to-end** dari Odoo sampai tampil di dashb
      - KPI & chart memanggil `services/sales_metrics.py` dan `services/sales_charts.py`
      - Modul tersebut melakukan query ke DuckDB (fast path), lalu fallback ke Odoo bila query gagal.
 
-#### 2) Katalog Task ETL (Apa fungsinya?)
+#### 2) Sumber Data Odoo & Tabel ETL
 
-Di bawah ini ringkasan tiap task utama, output file layer, dan siapa yang biasanya memanggilnya.
+Ringkasan tabel Odoo yang diakses oleh ETL dan tujuan masing-masing.
+
+##### A. Tabel Transaksional (Data Pull Langsung)
+
+| Sumber Data | Tabel Odoo | Tujuan | Field Utama |
+|-------------|--------------|---------|------------|
+| **Penjualan POS** | `pos.order` | Transaksi point-of-sale | `id`, `date_order`, `partner_id`, `user_id`, `state`, `lines`, `payments_id` |
+| **Penjualan Invoice** | `account.move` (filter: `move_type='out_invoice'`, `state='posted'`) | Invoice pelanggan | `move_id`, `date`, `partner_id`, `product_id`, `quantity`, `price_unit`, `tax_id` |
+| **Pembelian** | `account.move` (filter: `move_type='in_invoice'`, `state='posted'`) | Tagihan vendor | `move_id`, `date`, `partner_id`, `product_id`, `quantity`, `price_unit`, `actual_price`, `tax_id` |
+| **Pergerakan Stok** | `stock.move.line` (executed moves) | Pergerakan inventory | `move_id`, `date`, `product_id`, `quantity`, `location_id`, `location_dest_id` |
+| **Snapshot Stok** | `stock.quant` (opsional) | Level inventory | `product_id`, `location_id`, `quantity`, `reserved_quantity`, `lot_id` |
+
+##### B. Tabel Dimensi (Referensi)
+
+| Dimensi | Tabel Odoo | Tujuan | Field Utama |
+|----------|--------------|---------|------------|
+| **Produk** | `product.product` | Master data produk | `id`, `name`, `default_code`, `categ_id`, `brand_id` |
+| **Kategori** | `product.category` | Kategori produk | `id`, `name`, `parent_id` |
+| **Merek** | `product.brand` (jika ada) | Merek produk | `id`, `name` |
+| **Pajak** | `account.tax` | Definisi pajak | `id`, `name`, `amount` |
+| **Partner** | `res.partner` | Pelanggan/Vendor | `id`, `name`, `company_type` |
+
+##### C. Tabel Turunan/Aggregat (Hasil ETL)
+
+| Tabel Turunan | Sumber Data | Logika | Tujuan |
+|--------------|--------------|-------|---------|
+| **Cost Events** | Pembelian (`fact_purchases`) | Terapkan multiplier pajak ke `actual_price`, filter bonus | Cost per baris pembelian (tax-adjusted) |
+| **Latest Daily Cost** | Cost Events | Merge inkremental untuk cost terbaru per produk per hari | Cost terbaru yang diketahui per tanggal |
+| **Profit Baris Penjualan** | POS + Invoice + Latest Cost | Join penjualan dengan cost, hitung profit per baris | Revenue, COGS, gross profit per baris penjualan |
+| **Aggregat Profit** | Profit Baris Penjualan | Group per tanggal dan/atau produk | Ringkasan profit harian dan per produk |
+
+##### D. Alur Data ETL
+
+```
+Tabel Transaksional Odoo:
+├── pos.order → Penjualan POS
+├── account.move (out_invoice) → Penjualan Invoice  
+├── account.move (in_invoice) → Pembelian
+├── stock.move.line → Pergerakan Stok
+└── stock.quant → Snapshot Stok
+
+↓ Proses ETL ↓
+
+Tabel Turunan/Aggregat:
+├── Cost Events (dari Pembelian)
+├── Latest Daily Cost (dari Cost Events)
+├── Profit Baris Penjualan (dari Penjualan + Cost)
+└── Aggregat Profit (dari Profit Baris Penjualan)
+
+Dimensi Referensi:
+├── Produk, Kategori, Merek, Pajak, Partner
+```
+
+##### E. Aturan Bisnis Utama
+
+- **Rule Cost**: "Latest known cost" per tanggal penjualan (bukan harga masa depan)
+- **Multiplier Pajak**: Pembelian tax_id 5/2 → 1.0x, 7/6 → 1.11x, default 1.0
+- **Eksklusi Bonus**: Filter pembelian dengan `actual_price ≤ 0` atau `quantity ≤ 0`
+- **Kalkulasi Profit**: `gross_profit = revenue_tax_in - cogs_tax_in`
+
+#### 3) Katalog Task ETL (Apa fungsinya?)
 
 ##### A. Ekstraksi
 Setiap ekstraktor bisa diakses melalui penjadwalan maupun by command.
@@ -247,19 +307,38 @@ Setiap ekstraktor bisa diakses melalui penjadwalan maupun by command.
     - `etl_tasks.daily_inventory_moves_pipeline`
     - `scripts/force_refresh_pos_data.py --targets inventory-moves`
 
-###### Inventory moves — schema penting (untuk rekonsiliasi)
+##### E. Profit & Cost ETL (Baru - Feb 2026)
 
-`fact_inventory_moves` sekarang menyimpan kolom tambahan untuk klasifikasi pergerakan stok:
+- **`etl_tasks.update_sales_lines_profit(target_date)`**
+  - **Fungsi**: hitung gross profit per sales line (POS + invoice).
+  - **Output**: `fact_sales_lines_profit`.
+  - **Formula**: `gross_profit = revenue_tax_in - cogs_tax_in`.
+  - **Cost join**: left join ke latest daily cost, fallback 0 jika tidak ada cost.
 
-- **`movement_type`**: tipe pergerakan (string)
-  - `incoming`: penerimaan barang ke lokasi internal (vendor receipts)
-  - `production_in`: hasil produksi masuk ke stok internal
-  - `production_out`: konsumsi bahan baku untuk produksi
-  - `adjustment`: penyesuaian stok (stock count / write-off / koreksi manual; biasanya melibatkan location usage `inventory`)
-  - `transfer`: perpindahan internal (antar lokasi internal)
-- **`inventory_adjustment_flag`**: boolean, `True` jika diklasifikasikan sebagai adjustment
-- **`manufacturing_order_id`**: ID manufacturing order bila terkait produksi (output/consumption)
+- **`etl_tasks.update_profit_aggregates(target_date)`**
+  - **Fungsi**: build profit aggregates (daily dan by-product).
+  - **Output**: `agg_profit_daily`, `agg_profit_daily_by_product`.
+  - **Metrics**: revenue_tax_in, cogs_tax_in, gross_profit, quantity, transactions, lines.
 
+- **Pipeline**: `daily_profit_pipeline_impl` (dijadwalkan jam 02:20).
+  - Urutan: cost events → latest cost → sales profit → aggregates.
+  - **DuckDB views**: `fact_product_cost_events`, `fact_product_cost_latest_daily`, `fact_sales_lines_profit`, `agg_profit_daily`, `agg_profit_daily_by_product`.
+
+##### F. Validasi Profit & Cost ETL
+
+- **`scripts/validate_profit_etl.py --date YYYY-MM-DD`**
+  - **Fungsi**: validasi profit ETL untuk tanggal tertentu.
+  - **Validasi**: tax multipliers, cost events, sales profit, aggregates, DuckDB views.
+  - **Output**: laporan validasi + optional CSV samples.
+
+- **`scripts/run_profit_etl.py --date YYYY-MM-DD [--dry-run]`**
+  - **Fungsi**: jalankan manual profit ETL untuk tanggal tertentu.
+  - **Mode**: dry-run (tampilkan rencana) atau eksekusi aktual.
+  - **Output**: file parquet di data lake + laporan status.
+
+- **Unit tests**: `tests/test_profit_etl.py`
+  - **Coverage**: 7 test cases untuk semua komponen profit ETL.
+  - **Run**: `python -m pytest tests/test_profit_etl.py -v`
 Catatan:
 - Dashboard Sell-through menggunakan **`incoming + production_in`** sebagai “Units Received” default (adjustment & production_out tidak dihitung sebagai receipt).
 
@@ -454,6 +533,7 @@ docker-compose exec celery-worker celery -A etl_tasks purge -f
 ### Task Terjadwal
 - **ETL Harian**: berjalan pukul `02:00` waktu lokal (timezone Celery default `Asia/Jakarta` via `etl_tasks.py`).
 - **Pipeline harian lain**: invoice sales `02:05`, purchases `02:10`, inventory moves `02:15`.
+- **Profit ETL**: `daily_profit_pipeline_impl` jam `02:20` (cost events → latest cost → sales profit → aggregates).
 
 ## Pemantauan
 

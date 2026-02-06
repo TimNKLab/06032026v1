@@ -137,3 +137,27 @@ def daily_stock_quants_pipeline_impl(target_date: Optional[str] = None) -> str:
     result = pipeline.apply_async()
     logger.info(f"Stock quants pipeline submitted for {target_date}, task_id: {result.id}")
     return result.id
+
+
+def daily_profit_pipeline_impl(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for cost/profit materialization."""
+    if target_date is None:
+        target_date = date.today().isoformat()
+
+    logger.info(f"Starting profit pipeline for {target_date}")
+
+    from etl_tasks import (
+        update_product_cost_events, update_product_cost_latest_daily,
+        update_sales_lines_profit, update_profit_aggregates,
+    )
+
+    pipeline = (
+        update_product_cost_events.si(target_date) |
+        update_product_cost_latest_daily.si(target_date) |
+        update_sales_lines_profit.si(target_date) |
+        update_profit_aggregates.si(target_date)
+    )
+
+    result = pipeline.apply_async()
+    logger.info(f"Profit pipeline submitted for {target_date}, task_id: {result.id}")
+    return result.id
