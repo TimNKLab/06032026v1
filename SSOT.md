@@ -146,6 +146,7 @@ Keep this brief and append-only.
 - **2026-01 (Inventory adjustments):** Inventory adjustments and manufacturing (production output/consumption) break sell-through and days-of-cover. Planned workstream NK_20260121_adjustments_8d9b to tag moves, exclude them from receipts, and add reconciliation visibility.
 - **2026-02 (Cost & Profit ETL):** Implemented tax-adjusted cost and gross profit calculation with materialized aggregates. Cost rule: "latest known cost" as of sale date (not future prices). Tax multipliers: purchase tax_id 5/2 → 1.0x, 7/6 → 1.11x, default 1.0. Bonus items (actual_price ≤ 0 or quantity ≤ 0) excluded from cost calculation. Daily pipeline scheduled at 02:20. Validated with unit tests and manual validation scripts.
 - **2026-02 (Odoo Data Sources):** Documented all Odoo tables used in ETL: pos.order (POS), account.move (sales/purchases), stock.move.line (inventory), stock.quant (snapshots), plus dimensions (product, category, brand, tax, partner). Derived tables: cost events, latest daily cost, sales line profit, profit aggregates.
+- **2026-02 (Profit ETL Performance Optimization):** Implemented performance optimizations for profit ETL querying and serving layer. Enabled Hive partition pruning in all profit DuckDB views, added caching layer for profit queries and chart builders, created optimized query functions defaulting to aggregates, and added performance monitoring script for ongoing tracking.
 
 ## 7) Work tracking (active workstreams)
 Use globally unique workstream IDs.
@@ -158,9 +159,27 @@ Use globally unique workstream IDs.
   - **Status:** Done (code present)
   - **Deliverables:** Stock quant snapshot ETL, inventory metrics, inventory page UI, stock levels/sell-through/ABC charts.
 
+- **NK_20260206_profit_etl_perf_9a2b** — Profit ETL Performance Optimization
+  - **Status:** Done (implemented)
+  - **Description**: Implemented performance optimizations for profit ETL querying and serving layer.
+  - **Completed**:
+    - Enabled Hive partition pruning in all profit DuckDB views (highest ROI)
+    - Added caching layer for profit queries and chart builders (600s TTL)
+    - Created optimized query functions defaulting to aggregates
+    - Added performance monitoring script for ongoing tracking
+  - **Files Modified**:
+    - `services/duckdb_connector.py`: Added `hive_partitioning=1` to profit views
+    - `services/profit_metrics.py`: New cached profit query functions
+    - `services/profit_charts.py`: New cached profit chart builders  
+    - `scripts/monitor_profit_performance.py`: Performance monitoring tool
+  - **Expected Impact**:
+    - Faster 30-day queries via partition pruning
+    - Sub-second response for repeated queries via caching
+    - Optimized for daily totals → drill-down to by-product use case
+
 - **NK_20260206_profit_etl_9a2b** — Cost & Profit ETL implementation and validation
   - **Status:** Done (validated)
-  - **Deliverables:** 
+  - **Deliverables**: 
     - ETL tasks: `_build_product_cost_events`, `_build_product_cost_latest_daily`, `_build_sales_lines_profit`, `_build_profit_aggregates`
     - Celery tasks: `update_product_cost_events`, `update_product_cost_latest_daily`, `update_sales_lines_profit`, `update_profit_aggregates`
     - Daily pipeline: `daily_profit_pipeline_impl` scheduled at 02:20

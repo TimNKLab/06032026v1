@@ -274,7 +274,7 @@ class DuckDBManager:
                     COALESCE(TRY_CAST(cost_unit_tax_in AS DOUBLE), 0) AS cost_unit_tax_in,
                     COALESCE(TRY_CAST(source_move_id AS BIGINT), 0) AS source_move_id,
                     COALESCE(TRY_CAST(source_tax_id AS BIGINT), 0) AS source_tax_id
-                FROM read_parquet('{cost_events_path}/**/*.parquet', union_by_name=True, filename=true)
+                FROM read_parquet('{cost_events_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
             """)
         else:
             conn.execute("""
@@ -297,7 +297,7 @@ class DuckDBManager:
                     COALESCE(TRY_CAST(cost_unit_tax_in AS DOUBLE), 0) AS cost_unit_tax_in,
                     COALESCE(TRY_CAST(source_move_id AS BIGINT), 0) AS source_move_id,
                     COALESCE(TRY_CAST(source_tax_id AS BIGINT), 0) AS source_tax_id
-                FROM read_parquet('{cost_latest_path}/**/*.parquet', union_by_name=True, filename=true)
+                FROM read_parquet('{cost_latest_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
             """)
         else:
             conn.execute("""
@@ -326,7 +326,7 @@ class DuckDBManager:
                     COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
                     COALESCE(TRY_CAST(source_cost_move_id AS BIGINT), 0) AS source_cost_move_id,
                     COALESCE(TRY_CAST(source_cost_tax_id AS BIGINT), 0) AS source_cost_tax_id
-                FROM read_parquet('{sales_profit_path}/**/*.parquet', union_by_name=True, filename=true)
+                FROM read_parquet('{sales_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
             """)
         else:
             conn.execute("""
@@ -357,7 +357,7 @@ class DuckDBManager:
                     COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                     COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
                     COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                FROM read_parquet('{agg_profit_daily_path}/**/*.parquet', union_by_name=True, filename=true)
+                FROM read_parquet('{agg_profit_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
             """)
         else:
             conn.execute("""
@@ -384,7 +384,7 @@ class DuckDBManager:
                     COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
                     COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                     COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                FROM read_parquet('{agg_profit_daily_by_product_path}/**/*.parquet', union_by_name=True, filename=true)
+                FROM read_parquet('{agg_profit_daily_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
             """)
         else:
             conn.execute("""

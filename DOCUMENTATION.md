@@ -335,12 +335,46 @@ Setiap ekstraktor bisa diakses melalui penjadwalan maupun by command.
   - **Fungsi**: jalankan manual profit ETL untuk tanggal tertentu.
   - **Mode**: dry-run (tampilkan rencana) atau eksekusi aktual.
   - **Output**: file parquet di data lake + laporan status.
+  - **Pipeline lengkap**: cost events → latest cost → sales profit → aggregates.
 
 - **Unit tests**: `tests/test_profit_etl.py`
   - **Coverage**: 7 test cases untuk semua komponen profit ETL.
   - **Run**: `python -m pytest tests/test_profit_etl.py -v`
-Catatan:
-- Dashboard Sell-through menggunakan **`incoming + production_in`** sebagai “Units Received” default (adjustment & production_out tidak dihitung sebagai receipt).
+
+##### G. Manual Update & Aggregation
+
+**Pertanyaan**: Jika melakukan manual update, apakah aggregation dieksekusi juga?
+
+**Jawaban**: Ya, manual update profit ETL akan menjalankan seluruh pipeline termasuk aggregation.
+
+**Cara Manual Update**:
+
+1. **Menggunakan script lengkap** (direkomendasikan):
+   ```bash
+   python scripts/run_profit_etl.py --date 2025-03-15
+   ```
+   - Eksekusi semua step secara berurutan
+   - Termasuk aggregation (`update_profit_aggregates`)
+   - Output: status setiap step
+
+2. **Manual per-task** (harus ikuti urutan dependensi):
+   ```python
+   # Harus dijalankan dalam urutan ini
+   update_product_cost_events('2025-03-15')
+   update_product_cost_latest_daily('2025-03-15')    # Depend ke cost events
+   update_sales_lines_profit('2025-03-15')           # Depend ke latest cost
+   update_profit_aggregates('2025-03-15')             # Depend ke sales profit
+   ```
+
+3. **Pipeline terjadwal** (otomatis):
+   - `daily_profit_pipeline` jam 02:20
+   - Jalankan lengkap termasuk aggregation
+
+**Catatan Penting**:
+- **Aggregates selalu rebuild** saat manual update
+- **Date-specific**: hanya rebuild untuk tanggal yang dipilih
+- **Incremental**: dirancang untuk harian, tidak rebuild seluruh history
+- **Dependencies**: step terakhir memerlukan step sebelumnya selesai
 
 ##### B. Penyimpanan Raw
 
