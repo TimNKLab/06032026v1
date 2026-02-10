@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import date
 
 from services.overview_metrics import get_total_overview_summary
+from services.profit_metrics import query_profit_summary
 
 
 def _build_total_overview_figure(date_start, date_end=None):
@@ -218,9 +219,13 @@ layout = dmc.Container(
                                     justify='space-between',
                                     align='center'
                                 ),
-                                dmc.Text('Revenue: Rp 0', size='xl', fw=600),
-                                dmc.Text('vs prev period: Rp 0 (0.0%)', size='sm', c='dimmed'),
-                                dmc.Text('Qty sold: 0', size='sm', c='dimmed'),
+                                dmc.Text('Revenue: Rp 0', id='kpi-revenue', size='xl', fw=600),
+                                dmc.Text('vs prev period: Rp 0 (0.0%)', id='kpi-revenue-delta', size='sm', c='dimmed'),
+                                dmc.Text('Gross profit: Rp 0', id='kpi-gross-profit', size='sm', c='dimmed'),
+                                dmc.Text('Gross margin: 0.0%', id='kpi-gross-margin', size='sm', c='dimmed'),
+                                dmc.Text('Avg txn value: Rp 0', id='kpi-atv', size='sm', c='dimmed'),
+                                dmc.Text('Qty sold: 0', id='kpi-qty-sold', size='sm', c='dimmed'),
+                                dmc.Text('Transactions: 0', id='kpi-transactions', size='sm', c='dimmed'),
                             ],
                             gap='sm',
                         ),
@@ -319,6 +324,13 @@ layout = dmc.Container(
 
 @dash.callback(
     Output('total-overview-fig', 'figure'),
+    Output('kpi-revenue', 'children'),
+    Output('kpi-revenue-delta', 'children'),
+    Output('kpi-gross-profit', 'children'),
+    Output('kpi-gross-margin', 'children'),
+    Output('kpi-atv', 'children'),
+    Output('kpi-qty-sold', 'children'),
+    Output('kpi-transactions', 'children'),
     Input('btn-apply-dates', 'n_clicks'),
     State('date-from', 'value'),
     State('date-until', 'value'),
@@ -348,7 +360,16 @@ def update_total_overview(n_clicks, date_from_input, date_until, time_from, time
                 )
             ],
         )
-        return fig
+        return (
+            fig,
+            'Revenue: Rp 0',
+            'vs prev period: Rp 0 (0.0%)',
+            'Gross profit: Rp 0',
+            'Gross margin: 0.0%',
+            'Avg txn value: Rp 0',
+            'Qty sold: 0',
+            'Transactions: 0',
+        )
 
     # Use date_from_input which is the *latest value* of the 'date-from' component
     # regardless of whether the button or the datepicker triggered the update.
@@ -372,4 +393,50 @@ def update_total_overview(n_clicks, date_from_input, date_until, time_from, time
         except (ValueError, TypeError):
             pass
 
-    return _build_total_overview_figure(start_date, end_date)
+    fig = _build_total_overview_figure(start_date, end_date)
+
+    try:
+        profit_summary = query_profit_summary(start_date, end_date)
+        revenue = profit_summary.get('revenue', 0.0) or 0.0
+        gross_profit = profit_summary.get('gross_profit', 0.0) or 0.0
+        gross_margin_pct = profit_summary.get('gross_margin_pct', 0.0) or 0.0
+        atv = profit_summary.get('avg_transaction_value', 0.0) or 0.0
+        qty = profit_summary.get('quantity', 0.0) or 0.0
+        transactions = profit_summary.get('transactions', 0) or 0
+
+        days = (end_date - start_date).days + 1
+        prev_end = start_date.fromordinal(start_date.toordinal() - 1)
+        prev_start = start_date.fromordinal(start_date.toordinal() - days)
+
+        prev_profit_summary = query_profit_summary(prev_start, prev_end)
+        prev_revenue = prev_profit_summary.get('revenue', 0.0) or 0.0
+
+        delta_amount = revenue - prev_revenue
+        delta_pct = (delta_amount / prev_revenue * 100) if prev_revenue else None
+
+        if delta_pct is None:
+            delta_text = f"vs prev period: Rp {delta_amount:,.0f}"
+        else:
+            delta_text = f"vs prev period: Rp {delta_amount:,.0f} ({delta_pct:+.1f}%)"
+
+        return (
+            fig,
+            f"Revenue: Rp {revenue:,.0f}",
+            delta_text,
+            f"Gross profit: Rp {gross_profit:,.0f}",
+            f"Gross margin: {gross_margin_pct:.1f}%",
+            f"Avg txn value: Rp {atv:,.0f}",
+            f"Qty sold: {qty:,.0f}",
+            f"Transactions: {transactions:,}",
+        )
+    except Exception:
+        return (
+            fig,
+            'Revenue: Rp 0',
+            'vs prev period: Rp 0 (0.0%)',
+            'Gross profit: Rp 0',
+            'Gross margin: 0.0%',
+            'Avg txn value: Rp 0',
+            'Qty sold: 0',
+            'Transactions: 0',
+        )

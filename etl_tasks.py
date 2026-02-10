@@ -1297,6 +1297,8 @@ def _build_product_cost_latest_daily(target_date: str) -> pl.DataFrame:
 
 
 def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
+    from etl.config import FACT_PRODUCT_BEGINNING_COSTS_PATH
+    
     sales_schema = {
         'date': pl.Date,
         'order_id': pl.Int64,
@@ -1327,6 +1329,7 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
     pos_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_sales', target_date)
     invoice_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_invoice_sales', target_date)
     cost_partition = _partition_path(FACT_PRODUCT_COST_LATEST_DAILY_PATH, target_date)
+    beginning_costs_partition = FACT_PRODUCT_BEGINNING_COSTS_PATH
 
     pos_df = _read_parquet_or_empty(pos_partition, sales_schema)
     invoice_df = _read_parquet_or_empty(invoice_partition, sales_schema)
@@ -1336,6 +1339,13 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
         'cost_unit_tax_in': pl.Float64,
         'source_move_id': pl.Int64,
         'source_tax_id': pl.Int64,
+    })
+    beginning_costs_df = _read_parquet_or_empty(beginning_costs_partition, {
+        'product_id': pl.Int64,
+        'cost_unit_tax_in': pl.Float64,
+        'source_tax_id': pl.Int64,
+        'effective_date': pl.Date,
+        'is_active': pl.Boolean,
     })
 
     pos_lines = (
@@ -1381,7 +1391,45 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
         pl.col('source_tax_id').alias('source_cost_tax_id'),
     ])
 
+    beginning_costs_df = beginning_costs_df.filter(pl.col('is_active') == True).select([
+        'product_id',
+        'cost_unit_tax_in',
+        pl.col('source_tax_id').alias('source_cost_tax_id'),
+    ])
+
+    # Join with latest costs first, then apply beginning costs as fallback
     merged = sales_lines.join(cost_df, on='product_id', how='left')
+    
+    # Create a lookup dictionary for beginning costs
+    if not beginning_costs_df.is_empty():
+        # Join beginning costs separately to avoid shape issues
+        merged_with_beginning = merged.join(beginning_costs_df, on='product_id', how='left', suffix='_beginning')
+        
+        merged = merged_with_beginning.with_columns([
+            pl.when(
+                (pl.col('cost_unit_tax_in').is_null()) | (pl.col('cost_unit_tax_in') == 0)
+            ).then(
+                pl.col('cost_unit_tax_in_beginning')
+            ).otherwise(
+                pl.col('cost_unit_tax_in')
+            ).alias('cost_unit_tax_in'),
+            
+            pl.when(
+                (pl.col('source_cost_tax_id').is_null()) | (pl.col('source_cost_tax_id') == 0)
+            ).then(
+                pl.col('source_cost_tax_id_beginning')
+            ).otherwise(
+                pl.col('source_cost_tax_id')
+            ).alias('source_cost_tax_id'),
+        ])
+    else:
+        # No beginning costs available, keep original logic
+        merged = merged.with_columns(
+            pl.col('cost_unit_tax_in').cast(pl.Float64, strict=False).fill_null(0),
+            pl.col('source_cost_move_id').cast(pl.Int64, strict=False).fill_null(0),
+            pl.col('source_cost_tax_id').cast(pl.Int64, strict=False).fill_null(0),
+        )
+    
     merged = merged.with_columns(
         pl.col('cost_unit_tax_in').cast(pl.Float64, strict=False).fill_null(0),
         pl.col('source_cost_move_id').cast(pl.Int64, strict=False).fill_null(0),
@@ -1790,6 +1838,99 @@ app.conf.beat_schedule = {
     },
 }
 
+
+# ============================================================================
+# BEGINNING COSTS LOADING
+# ============================================================================
+
+def _tax_multiplier_expr(tax_id_col: str) -> pl.Expr:
+    """Create tax multiplier expression for purchase costs."""
+    return (pl.when(pl.col(tax_id_col).is_in([5, 2])).then(1.0)
+            .when(pl.col(tax_id_col).is_in([7, 6])).then(1.11)
+            .otherwise(1.0))
+
+
+def _validate_beginning_costs(df: pl.DataFrame) -> pl.DataFrame:
+    """Validate beginning costs data."""
+    # Check for valid product IDs
+    if not df.filter(pl.col('product_id').is_null() | (pl.col('product_id') <= 0)).is_empty():
+        raise ValueError("Invalid product_id found: must be positive integer")
+    
+    # Check for valid costs
+    if not df.filter(pl.col('cost_unit').is_null() | (pl.col('cost_unit') < 0)).is_empty():
+        raise ValueError("Invalid cost_unit found: must be non-negative")
+    
+    # Check for reasonable cost ranges (0 < cost < 10M)
+    if not df.filter(pl.col('cost_unit') > 10000000).is_empty():
+        logger.warning("Some costs exceed 10M - please verify these are correct")
+    
+    return df
+
+
+@app.task
+def load_beginning_costs_from_csv(csv_path: str) -> Optional[str]:
+    """Load beginning costs from CSV file."""
+    from etl.config import FACT_PRODUCT_BEGINNING_COSTS_PATH
+    
+    try:
+        logger.info(f"Loading beginning costs from {csv_path}")
+        
+        # Read CSV
+        df = pl.read_csv(csv_path)
+        
+        # Validate required columns
+        required_cols = ['product_id', 'cost_unit', 'purchase_tax_id']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
+        # Cast and validate data
+        df = df.with_columns([
+            pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
+            pl.col('cost_unit').cast(pl.Float64, strict=False).fill_null(0),
+            pl.col('purchase_tax_id').cast(pl.Int64, strict=False).fill_null(0),
+            pl.col('notes').cast(pl.Utf8, strict=False).fill_null(''),
+        ])
+        
+        # Validate data quality
+        df = _validate_beginning_costs(df)
+        
+        # Apply tax multipliers to get tax-inclusive costs
+        df = df.with_columns([
+            (pl.col('cost_unit') * _tax_multiplier_expr('purchase_tax_id')).alias('cost_unit_tax_in'),
+        ])
+        
+        # Build final schema
+        beginning_costs_df = df.with_columns([
+            pl.col('product_id'),
+            pl.col('cost_unit_tax_in'),
+            pl.col('purchase_tax_id').alias('source_tax_id'),
+            pl.lit(date(2025, 2, 10)).alias('effective_date'),
+            pl.lit(True).alias('is_active'),
+            pl.lit(datetime.now()).alias('created_at'),
+            pl.col('notes'),
+        ]).select([
+            'product_id',
+            'cost_unit_tax_in', 
+            'source_tax_id',
+            'effective_date',
+            'is_active',
+            'created_at',
+            'notes',
+        ])
+        
+        # Write to parquet
+        output_path = f'{FACT_PRODUCT_BEGINNING_COSTS_PATH}/beginning_costs_{datetime.now().strftime("%Y%m%d_%H%M%S")}.parquet'
+        beginning_costs_df.write_parquet(output_path)
+        
+        logger.info(f"Successfully loaded {len(beginning_costs_df)} beginning costs to {output_path}")
+        return output_path
+        
+    except Exception as exc:
+        logger.error(f"Error loading beginning costs from {csv_path}: {exc}", exc_info=True)
+        raise
+
+
 app.conf.task_routes = {
     'etl_tasks.extract_pos_order_lines': {'queue': 'extraction'},
     'etl_tasks.extract_sales_invoice_lines': {'queue': 'extraction'},
@@ -1815,5 +1956,6 @@ app.conf.task_routes = {
     'etl_tasks.update_product_cost_latest_daily': {'queue': 'loading'},
     'etl_tasks.update_sales_lines_profit': {'queue': 'loading'},
     'etl_tasks.update_profit_aggregates': {'queue': 'loading'},
+    'etl_tasks.load_beginning_costs_from_csv': {'queue': 'loading'},
     'etl_tasks.refresh_dimensions_incremental': {'queue': 'dimensions'},
 }

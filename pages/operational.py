@@ -695,7 +695,7 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
         return ({'status': 'error', 'message': msg}, True, False, True, msg, 0, empty_table)
 
     priority_datasets = ['pos']
-    other_datasets = ['invoice_sales', 'purchases', 'inventory_moves', 'stock_quants']
+    other_datasets = ['invoice_sales', 'purchases', 'inventory_moves', 'stock_quants', 'product_cost_events', 'product_cost_latest']
 
     jobs = []
     for ds in priority_datasets + other_datasets:

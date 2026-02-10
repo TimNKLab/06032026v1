@@ -1,0 +1,5 @@
+product_id,cost_unit,purchase_tax_id,notes
+12345,15000.00,5,Beginning cost from legacy system
+67890,25000.00,2,Wholesale purchase price
+11111,8500.50,7,Initial inventory cost
+22222,12000.00,5,Supplier opening balance

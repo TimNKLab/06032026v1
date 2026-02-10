@@ -2,11 +2,11 @@ from datetime import date
 from typing import Dict, Optional
 import pandas as pd
 import time
-from .cache import cache
+from functools import lru_cache
 from .duckdb_connector import get_duckdb_connection
 
 
-@cache.memoize()
+@lru_cache(maxsize=32)
 def query_profit_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Query profit trends - optimized for daily totals with optional drill-down."""
     conn = get_duckdb_connection()
@@ -59,7 +59,7 @@ def query_profit_trends(start_date: date, end_date: date, period: str = 'daily')
     return result
 
 
-@cache.memoize()
+@lru_cache(maxsize=32)
 def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     """Query top products by profit - uses aggregate table for performance."""
     conn = get_duckdb_connection()
@@ -103,7 +103,7 @@ def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -
     return result
 
 
-@cache.memoize()
+@lru_cache(maxsize=32)
 def query_profit_summary(start_date: date, end_date: date) -> Dict:
     """Get profit summary - single query for all key metrics."""
     conn = get_duckdb_connection()

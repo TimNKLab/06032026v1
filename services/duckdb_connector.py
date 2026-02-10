@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from typing import Dict, Optional
 from functools import lru_cache
 import pandas as pd
+from .cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class DuckDBManager:
             f"{data_lake}/star-schema/fact_stock_on_hand_snapshot",
             f"{data_lake}/star-schema/fact_product_cost_events",
             f"{data_lake}/star-schema/fact_product_cost_latest_daily",
+            f"{data_lake}/star-schema/fact_product_beginning_costs",
             f"{data_lake}/star-schema/fact_sales_lines_profit",
             f"{data_lake}/star-schema/agg_profit_daily",
             f"{data_lake}/star-schema/agg_profit_daily_by_product",
@@ -66,6 +68,7 @@ class DuckDBManager:
             fact_stock_snapshot_path,
             cost_events_path,
             cost_latest_path,
+            beginning_costs_path,
             sales_profit_path,
             agg_profit_daily_path,
             agg_profit_daily_by_product_path,
@@ -151,7 +154,7 @@ class DuckDBManager:
                 COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
                 COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                 COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue
-            FROM read_parquet('{fact_path}/**/*.parquet', union_by_name=True, filename=true)
+            FROM read_parquet('{fact_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
         """)
 
         conn.execute(f"""
@@ -169,7 +172,7 @@ class DuckDBManager:
                 COALESCE(TRY_CAST(tax_id AS BIGINT), 0) AS tax_id,
                 COALESCE(tax_ids_json, '[]') AS tax_ids_json,
                 FALSE AS is_free_item
-            FROM read_parquet('{fact_invoice_path}/**/*.parquet', union_by_name=True, filename=true)
+            FROM read_parquet('{fact_invoice_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
         """)
 
         conn.execute(f"""
@@ -191,7 +194,7 @@ class DuckDBManager:
                 COALESCE(tax_name, '') AS tax_name,
                 COALESCE(tax_ids_json, '[]') AS tax_ids_json,
                 COALESCE(TRY_CAST(is_free_item AS BOOLEAN), FALSE) AS is_free_item
-            FROM read_parquet('{fact_purchases_path}/**/*.parquet', union_by_name=True, filename=true)
+            FROM read_parquet('{fact_purchases_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
         """)
 
         conn.execute(f"""
@@ -308,6 +311,32 @@ class DuckDBManager:
                     CAST(0 AS DOUBLE) AS cost_unit_tax_in,
                     CAST(NULL AS BIGINT) AS source_move_id,
                     CAST(NULL AS BIGINT) AS source_tax_id
+                WHERE FALSE
+            """)
+
+        if _has_parquet_files(beginning_costs_path):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW fact_product_beginning_costs AS
+                SELECT
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(cost_unit_tax_in AS DOUBLE), 0) AS cost_unit_tax_in,
+                    COALESCE(TRY_CAST(source_tax_id AS BIGINT), 0) AS source_tax_id,
+                    COALESCE(TRY_CAST(effective_date AS DATE), CAST('2025-02-10' AS DATE)) AS effective_date,
+                    COALESCE(TRY_CAST(is_active AS BOOLEAN), TRUE) AS is_active,
+                    COALESCE(notes, '') AS notes
+                FROM read_parquet('{beginning_costs_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                WHERE COALESCE(TRY_CAST(is_active AS BOOLEAN), TRUE) = TRUE
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW fact_product_beginning_costs AS
+                SELECT
+                    CAST(NULL AS BIGINT) AS product_id,
+                    CAST(0 AS DOUBLE) AS cost_unit_tax_in,
+                    CAST(NULL AS BIGINT) AS source_tax_id,
+                    CAST('2025-02-10' AS DATE) AS effective_date,
+                    CAST(TRUE AS BOOLEAN) AS is_active,
+                    CAST('' AS VARCHAR) AS notes
                 WHERE FALSE
             """)
 
@@ -469,7 +498,7 @@ class DuckDBManager:
 
 def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     conn = DuckDBManager().get_connection()
-    _, _, _, _, _, _, _, _, _, _, dim_products, _, dim_brands, _ = DuckDBManager._get_data_paths()
+    fact_path, fact_invoice_path, fact_purchases_path, fact_inventory_moves_path, fact_stock_snapshot_path, cost_events_path, cost_latest_path, beginning_costs_path, sales_profit_path, agg_profit_daily_path, agg_profit_daily_by_product_path, dim_products, dim_categories, dim_brands = DuckDBManager._get_data_paths()
 
     def _parquet_columns(parquet_path: str) -> set:
         try:
@@ -499,31 +528,25 @@ def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) 
         principal_expr = "'Unknown Principal'"
         brand_join = "FALSE"
 
-    query = f"""
-        WITH base AS (
-            SELECT
-                {principal_expr} AS principal,
-                f.revenue AS revenue
-            FROM fact_sales_all f
-            LEFT JOIN dim_products p
-                ON f.product_id = p.product_id
-            LEFT JOIN read_parquet('{dim_brands}', union_by_name=True) b
-                ON {brand_join}
-            WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
-        )
-        SELECT
-            principal,
-            SUM(revenue) AS revenue
-        FROM base
-        GROUP BY 1
+    query = """
+        SELECT 
+            COALESCE(p.product_brand, 'Unknown') as principal,
+            SUM(f.revenue) as revenue
+        FROM fact_sales_all f
+        LEFT JOIN dim_products p ON f.product_id = p.product_id
+        WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
+        GROUP BY principal
         ORDER BY revenue DESC
         LIMIT ?
     """
 
     query_start = time.time()
     try:
-        result = conn.execute(query, [start_date, end_date, int(limit)]).df()
+        result = conn.execute(query, [start_date, end_date, int(limit)]).fetchdf()
         print(f"[TIMING] query_sales_by_principal: {time.time() - query_start:.3f}s")
+        print(f"[DEBUG] Returned columns: {list(result.columns)}")
+        print(f"[DEBUG] Number of columns: {len(result.columns)}")
+        print(f"[DEBUG] Sample row: {result.iloc[0].to_dict() if not result.empty else 'No rows'}")
         return result
     except Exception as exc:
         print(f"[TIMING] query_sales_by_principal FAILED: {time.time() - query_start:.3f}s")
@@ -536,6 +559,7 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     return DuckDBManager().get_connection()
 
 
+@lru_cache(maxsize=32)
 def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Query sales trends - optimized with single scan."""
     conn = get_duckdb_connection()
@@ -605,6 +629,7 @@ def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     return result
 
 
+@lru_cache(maxsize=32)
 def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     """Query top products - optimized: aggregate by product_id first, then join."""
     conn = get_duckdb_connection()
@@ -636,6 +661,7 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
     return result
 
 
+@lru_cache(maxsize=32)
 def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     """Compare revenue - SINGLE query for both periods using FILTER."""
     conn = get_duckdb_connection()
@@ -740,6 +766,7 @@ def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame
     return result
 
 
+@lru_cache(maxsize=32)
 def query_overview_summary(start_date: date, end_date: date) -> Dict:
     """Get overview summary - combined into fewer queries."""
     conn = get_duckdb_connection()
