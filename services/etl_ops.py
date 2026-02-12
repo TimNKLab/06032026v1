@@ -33,6 +33,7 @@ from etl_tasks import (
     daily_invoice_purchases_pipeline,
     daily_inventory_moves_pipeline,
     daily_stock_quants_pipeline,
+    daily_profit_pipeline,
     refresh_dimensions_incremental,
     group,  # Add group to the import
 )
@@ -106,6 +107,17 @@ DATASETS: Dict[str, DatasetConfig] = {
         fact_base=f"{STAR_SCHEMA_PATH}/fact_stock_on_hand_snapshot",
         fact_filename="fact_stock_on_hand_snapshot_{date}.parquet",
         task=daily_stock_quants_pipeline,
+    ),
+    "profit": DatasetConfig(
+        key="profit",
+        label="Profit (Cost + Aggregates)",
+        raw_base=None,
+        raw_filename=None,
+        clean_base=None,
+        clean_filename=None,
+        fact_base=f"{STAR_SCHEMA_PATH}/agg_profit_daily",
+        fact_filename="agg_profit_daily_{date}.parquet",
+        task=daily_profit_pipeline,
     ),
 }
 

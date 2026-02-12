@@ -527,3 +527,29 @@ Reference Dimensions:
 - **Plan:** `C:\Users\ThinkPad\.windsurf\plans\chart-building-optimizations-7dcd08.md`
 - **Code examples:** `pages/sales.py` (progressive loading), `services/sales_charts.py` (cached builders), `services/cache.py` (cache init).
 - **Docker:** `docker-compose.yml` (DASH_CACHE_TTL_SECONDS), `requirements.txt` (Flask-Caching).
+
+## 12) Profit aggregates — operational runbook
+
+### 12.1 What tables power the homepage profit KPIs and revenue chart
+- Homepage KPI card and revenue chart should use the profit aggregates:
+  - `agg_profit_daily`
+  - `agg_profit_daily_by_product`
+
+### 12.2 When you change upstream data
+If you change any of the following, you must refresh profit outputs for the affected date range:
+- Purchases (`fact_purchases`) or purchase tax logic
+- Beginning costs (`fact_product_beginning_costs`)
+- Sales inputs (POS / invoice sales)
+
+### 12.3 How to refresh profit outputs
+Preferred (UI):
+- Go to `/operational` (ETL Ops)
+- Select dataset: `Profit (Cost + Aggregates)`
+- Choose date range
+- Trigger async (recommended) or sync refresh
+
+CLI (direct):
+- `python scripts/run_profit_etl.py --date YYYY-MM-DD`
+
+### 12.4 Notes on freshness/caching
+- DuckDB runs in-memory and views are created on app startup. If you updated parquet files and results appear stale, restart the Dash app (and Celery worker if needed).

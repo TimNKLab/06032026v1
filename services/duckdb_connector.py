@@ -39,7 +39,7 @@ class DuckDBManager:
     @lru_cache(maxsize=1)
     def _get_data_paths() -> tuple:
         """Cache data paths to avoid repeated env lookups."""
-        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/app/data-lake')
+        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
         return (
             f"{data_lake}/star-schema/fact_sales",
             f"{data_lake}/star-schema/fact_invoice_sales",
@@ -429,25 +429,31 @@ class DuckDBManager:
                 WHERE FALSE
             """)
 
-        conn.execute("""
+        conn.execute(f"""
             CREATE OR REPLACE VIEW fact_sales_all AS
-            SELECT 
-                date,
+            SELECT
+                MAKE_DATE(year, CAST(month AS INTEGER), CAST(day AS INTEGER)) AS date,
                 order_id AS txn_id,
                 line_id AS line_id,
                 product_id,
                 revenue,
-                quantity
-            FROM fact_sales
+                quantity,
+                year,
+                month,
+                day
+            FROM read_parquet('{fact_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
             UNION ALL
-            SELECT 
-                date,
+            SELECT
+                MAKE_DATE(year, CAST(month AS INTEGER), CAST(day AS INTEGER)) AS date,
                 move_id AS txn_id,
                 move_line_id AS line_id,
                 product_id,
                 price_unit * quantity AS revenue,
-                quantity
-            FROM fact_invoice_sales
+                quantity,
+                year,
+                month,
+                day
+            FROM read_parquet('{fact_invoice_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
         """)
 
         conn.execute(f"""

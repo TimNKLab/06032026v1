@@ -150,6 +150,43 @@ def query_profit_summary(start_date: date, end_date: date) -> Dict:
     }
 
 
+@lru_cache(maxsize=32)
+def query_profit_revenue_by_category(start_date: date, end_date: date) -> Dict[str, Dict[str, float]]:
+    conn = get_duckdb_connection()
+
+    query = """
+    SELECT
+        COALESCE(NULLIF(TRIM(p.product_parent_category), ''), 'Unknown') as parent_category,
+        COALESCE(NULLIF(TRIM(p.product_category), ''), 'Unknown') as category,
+        SUM(a.revenue_tax_in) as revenue_tax_in
+    FROM agg_profit_daily_by_product a
+    LEFT JOIN dim_products p ON a.product_id = p.product_id
+    WHERE a.date >= ? AND a.date < ? + INTERVAL 1 DAY
+    GROUP BY 1, 2
+    ORDER BY 1, 2
+    """
+
+    query_start = time.time()
+    rows = conn.execute(query, [start_date, end_date]).fetchall()
+    print(f"[TIMING] query_profit_revenue_by_category: {time.time() - query_start:.3f}s")
+
+    nested: Dict[str, Dict[str, float]] = {}
+    for parent, child, amt in rows:
+        parent = parent or 'Unknown'
+        child = child or 'Unknown'
+        nested.setdefault(parent, {})[child] = float(amt or 0)
+
+    return nested
+
+
+def clear_profit_caches() -> None:
+    """Clear all cached profit query functions to force fresh reads after ETL updates."""
+    query_profit_summary.cache_clear()
+    query_profit_revenue_by_category.cache_clear()
+    query_profit_trends.cache_clear()
+    query_profit_by_product.cache_clear()
+
+
 def query_profit_drilldown(start_date: date, end_date: date, product_id: Optional[int] = None) -> pd.DataFrame:
     """Drill-down to line-level profit details - use sparingly for detailed analysis."""
     conn = get_duckdb_connection()

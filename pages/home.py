@@ -6,17 +6,24 @@ import pandas as pd
 from datetime import date
 
 from services.overview_metrics import get_total_overview_summary
-from services.profit_metrics import query_profit_summary
+from services.profit_metrics import query_profit_summary, query_profit_revenue_by_category
 
 
 def _build_total_overview_figure(date_start, date_end=None):
     summary = get_total_overview_summary(date_start, date_end)
     date_start = summary['target_date_start']
     date_end = summary['target_date_end']
-    today_amount = summary['today_amount']
-    today_qty = summary['today_qty']
-    categories_nested = summary['categories_nested']
-    prev_amount = summary['prev_amount']
+
+    profit_summary = query_profit_summary(date_start, date_end)
+    today_amount = profit_summary.get('revenue', 0.0) or 0.0
+    today_qty = profit_summary.get('quantity', 0.0) or 0.0
+
+    categories_nested = query_profit_revenue_by_category(date_start, date_end)
+    days = (date_end - date_start).days + 1
+    prev_end = date_start.fromordinal(date_start.toordinal() - 1)
+    prev_start = date_start.fromordinal(date_start.toordinal() - days)
+    prev_profit_summary = query_profit_summary(prev_start, prev_end)
+    prev_amount = prev_profit_summary.get('revenue', 0.0) or 0.0
 
     if categories_nested:
         records = [
@@ -42,7 +49,7 @@ def _build_total_overview_figure(date_start, date_end=None):
 
     if df.empty:
         fig.update_layout(
-            annotations=[dict(text='No POS data available for the selected date.', x=0.5, y=0.5, showarrow=False, font=dict(size=14, color='gray'))]
+            annotations=[dict(text='No revenue data available for the selected date.', x=0.5, y=0.5, showarrow=False, font=dict(size=14, color='gray'))]
         )
 
     delta_amount = today_amount - prev_amount
@@ -226,82 +233,6 @@ layout = dmc.Container(
                                 dmc.Text('Avg txn value: Rp 0', id='kpi-atv', size='sm', c='dimmed'),
                                 dmc.Text('Qty sold: 0', id='kpi-qty-sold', size='sm', c='dimmed'),
                                 dmc.Text('Transactions: 0', id='kpi-transactions', size='sm', c='dimmed'),
-                            ],
-                            gap='sm',
-                        ),
-                        p='md',
-                        radius='lg',
-                        withBorder=True,
-                        shadow='sm',
-                    ),
-                    span=4,
-                ),
-                
-                # Bottom Row Cards
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Group(
-                                    [
-                                        dmc.Text('Customer Experience', fw=600, size='md'),
-                                        dmc.Badge('CX', color='gray', variant='light'),
-                                    ],
-                                    justify='space-between',
-                                    align='center'
-                                ),
-                                dmc.Text('Customer satisfaction metrics', size='sm', c='dimmed'),
-                                dmc.Text('Coming soon...', size='lg', fw=500),
-                            ],
-                            gap='sm',
-                        ),
-                        p='md',
-                        radius='lg',
-                        withBorder=True,
-                        shadow='sm',
-                    ),
-                    span=4,
-                ),
-                
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Group(
-                                    [
-                                        dmc.Text('Inventory Management', fw=600, size='md'),
-                                        dmc.Badge('Inventory', color='gray', variant='light'),
-                                    ],
-                                    justify='space-between',
-                                    align='center'
-                                ),
-                                dmc.Text('Stock levels and turnover', size='sm', c='dimmed'),
-                                dmc.Text('Coming soon...', size='lg', fw=500),
-                            ],
-                            gap='sm',
-                        ),
-                        p='md',
-                        radius='lg',
-                        withBorder=True,
-                        shadow='sm',
-                    ),
-                    span=4,
-                ),
-                
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Group(
-                                    [
-                                        dmc.Text('Data Sync', fw=600, size='md'),
-                                        dmc.Badge('Ops', color='gray', variant='light'),
-                                    ],
-                                    justify='space-between',
-                                    align='center'
-                                ),
-                                dmc.Text('System performance metrics', size='sm', c='dimmed'),
-                                dmc.Text('Coming soon...', size='lg', fw=500),
                             ],
                             gap='sm',
                         ),

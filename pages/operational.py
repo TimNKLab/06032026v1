@@ -8,6 +8,7 @@ from services.etl_ops import (
     scan_dimension_files,
     parse_date,
 )
+from services.profit_metrics import clear_profit_caches
 from etl_tasks import (
     app,
     force_refresh_day,
@@ -32,6 +33,10 @@ from etl_tasks import (
     save_raw_stock_quants,
     clean_stock_quants,
     update_stock_quants_star_schema,
+    update_product_cost_events,
+    update_product_cost_latest_daily,
+    update_sales_lines_profit,
+    update_profit_aggregates,
 )
 from celery.result import AsyncResult
 from celery import chain
@@ -51,6 +56,7 @@ DATASET_OPTIONS = [
     {'value': 'purchases', 'label': 'Purchase Invoices'},
     {'value': 'inventory_moves', 'label': 'Inventory Moves'},
     {'value': 'stock_quants', 'label': 'Stock Quants'},
+    {'value': 'profit', 'label': 'Profit (Cost + Aggregates)'},
     {'value': 'dimensions', 'label': 'Dimensions Only'},
 ]
 
@@ -135,6 +141,23 @@ def _run_sync_refresh(dataset_key: str, target_date: str):
             "message": "Dimensions refreshed",
             "records": None,
             "result": result,
+        }
+
+    if dataset_key == "profit":
+        cost_events_path = update_product_cost_events.apply(args=(target_date,), throw=True).get()
+        cost_snapshot_path = update_product_cost_latest_daily.apply(args=(target_date,), throw=True).get()
+        profit_lines_path = update_sales_lines_profit.apply(args=(target_date,), throw=True).get()
+        agg_paths = update_profit_aggregates.apply(args=(target_date,), throw=True).get()
+        return {
+            "status": "success",
+            "message": f"Profit refreshed for {target_date}",
+            "records": None,
+            "result": {
+                "cost_events_path": cost_events_path,
+                "cost_snapshot_path": cost_snapshot_path,
+                "profit_lines_path": profit_lines_path,
+                "aggregate_paths": agg_paths,
+            },
         }
 
     if dataset_key == "pos":
@@ -816,6 +839,15 @@ def bulk_poll(n_intervals, bulk_state):
     if done >= total:
         bulk_state['status'] = 'done'
         msg = f"Done: {done}/{total} job(s) finished"
+        # Auto-clear dashboard caches if any profit-affecting datasets were processed
+        profit_affecting = {'pos', 'invoice_sales', 'purchases', 'product_cost_events', 'profit'}
+        processed_datasets = {job.get('dataset') for job in updated_jobs}
+        if processed_datasets & profit_affecting:
+            try:
+                clear_profit_caches()
+                msg += " | Cleared dashboard caches"
+            except Exception:
+                msg += " | Failed to clear dashboard caches"
         return bulk_state, msg, 100, table, True
 
     msg = f"Running: {done}/{total} job(s) finished"
