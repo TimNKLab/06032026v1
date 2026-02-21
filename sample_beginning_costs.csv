@@ -1,6 +1,0 @@
-product_id,cost_unit,purchase_tax_id,notes
-105761,12000.00,5,Beginning cost from legacy system
-51825,8500.50,2,Wholesale purchase price  
-54540,15000.00,5,Initial inventory cost
-54531,11000.00,5,Supplier opening balance
-54991,9500.75,7,Bulk purchase discount

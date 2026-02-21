@@ -49,6 +49,8 @@ class DuckDBManager:
             f"{data_lake}/star-schema/fact_product_cost_events",
             f"{data_lake}/star-schema/fact_product_cost_latest_daily",
             f"{data_lake}/star-schema/fact_product_beginning_costs",
+            f"{data_lake}/star-schema/fact_product_legacy_costs",
+            f"{data_lake}/star-schema/fact_product_costs_unified",
             f"{data_lake}/star-schema/fact_sales_lines_profit",
             f"{data_lake}/star-schema/agg_profit_daily",
             f"{data_lake}/star-schema/agg_profit_daily_by_product",
@@ -69,6 +71,8 @@ class DuckDBManager:
             cost_events_path,
             cost_latest_path,
             beginning_costs_path,
+            legacy_costs_path,
+            unified_costs_path,
             sales_profit_path,
             agg_profit_daily_path,
             agg_profit_daily_by_product_path,
@@ -340,6 +344,89 @@ class DuckDBManager:
                 WHERE FALSE
             """)
 
+        # Create view for legacy costs table
+        if _has_parquet_files(legacy_costs_path):
+            conn.execute(f"""
+                CREATE OR REPLACE VIEW fact_product_legacy_costs AS
+                SELECT
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(cost_unit_tax_in AS DOUBLE), 0) AS cost_unit_tax_in,
+                    COALESCE(TRY_CAST(source_tax_id AS BIGINT), 0) AS source_tax_id,
+                    COALESCE(TRY_CAST(effective_date AS DATE), CAST('2025-02-10' AS DATE)) AS effective_date,
+                    COALESCE(TRY_CAST(cost_source AS VARCHAR), 'unknown') AS cost_source,
+                    COALESCE(TRY_CAST(priority AS INTEGER), 3) AS priority,
+                    COALESCE(TRY_CAST(is_active AS BOOLEAN), TRUE) AS is_active,
+                    COALESCE(TRY_CAST(created_at AS TIMESTAMP), CAST('2025-02-10 00:00:00' AS TIMESTAMP)) AS created_at,
+                    COALESCE(notes, '') AS notes
+                FROM read_parquet('{legacy_costs_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                WHERE COALESCE(TRY_CAST(is_active AS BOOLEAN), TRUE) = TRUE
+            """)
+        else:
+            conn.execute("""
+                CREATE OR REPLACE VIEW fact_product_legacy_costs AS
+                SELECT
+                    CAST(NULL AS BIGINT) AS product_id,
+                    CAST(0 AS DOUBLE) AS cost_unit_tax_in,
+                    CAST(NULL AS BIGINT) AS source_tax_id,
+                    CAST('2025-02-10' AS DATE) AS effective_date,
+                    CAST('unknown' AS VARCHAR) AS cost_source,
+                    CAST(3 AS INTEGER) AS priority,
+                    CAST(TRUE AS BOOLEAN) AS is_active,
+                    CAST('2025-02-10 00:00:00' AS TIMESTAMP) AS created_at,
+                    CAST('' AS VARCHAR) AS notes
+                WHERE FALSE
+            """)
+
+        # Create unified costs view with priority logic
+        conn.execute(f"""
+            CREATE OR REPLACE VIEW fact_product_costs_unified AS
+            WITH latest_costs AS (
+                SELECT 
+                    product_id,
+                    cost_unit_tax_in,
+                    source_tax_id,
+                    'latest_purchase' as cost_source,
+                    1 as priority,
+                    date as effective_date
+                FROM read_parquet('{cost_latest_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                WHERE cost_unit_tax_in > 0
+            ),
+            legacy_costs AS (
+                SELECT 
+                    product_id,
+                    cost_unit_tax_in,
+                    source_tax_id,
+                    cost_source,
+                    priority,
+                    effective_date
+                FROM fact_product_legacy_costs
+                WHERE is_active = TRUE AND cost_unit_tax_in > 0
+            ),
+            all_costs AS (
+                SELECT * FROM latest_costs
+                UNION ALL
+                SELECT * FROM legacy_costs
+            ),
+            ranked_costs AS (
+                SELECT 
+                    product_id,
+                    cost_unit_tax_in,
+                    source_tax_id,
+                    cost_source,
+                    effective_date,
+                    ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY priority ASC, effective_date DESC) as rn
+                FROM all_costs
+            )
+            SELECT 
+                product_id,
+                cost_unit_tax_in,
+                source_tax_id,
+                cost_source,
+                effective_date
+            FROM ranked_costs
+            WHERE rn = 1
+        """)
+
         if _has_parquet_files(sales_profit_path):
             conn.execute(f"""
                 CREATE OR REPLACE VIEW fact_sales_lines_profit AS
@@ -440,8 +527,10 @@ class DuckDBManager:
                 quantity,
                 year,
                 month,
-                day
+                day,
+                order_ref
             FROM read_parquet('{fact_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+            WHERE COALESCE(order_ref, '') != '/' OR order_ref IS NULL
             UNION ALL
             SELECT
                 MAKE_DATE(year, CAST(month AS INTEGER), CAST(day AS INTEGER)) AS date,
@@ -452,8 +541,10 @@ class DuckDBManager:
                 quantity,
                 year,
                 month,
-                day
+                day,
+                move_name AS order_ref
             FROM read_parquet('{fact_invoice_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+            WHERE COALESCE(move_name, '') != '/' OR move_name IS NULL
         """)
 
         conn.execute(f"""

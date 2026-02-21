@@ -78,6 +78,7 @@ services:
       - REDIS_CONNECTION_POOL_SIZE=10
       - REDIS_MAX_CONNECTIONS=20
       - DASH_CACHE_TTL_SECONDS=600
+      - DATA_LAKE_ROOT=/data-lake
     volumes:
       - .:/app
       - D:\data-lake:/data-lake

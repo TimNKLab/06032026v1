@@ -147,6 +147,8 @@ Keep this brief and append-only.
 - **2026-02 (Cost & Profit ETL):** Implemented tax-adjusted cost and gross profit calculation with materialized aggregates. Cost rule: "latest known cost" as of sale date (not future prices). Tax multipliers: purchase tax_id 5/2 → 1.0x, 7/6 → 1.11x, default 1.0. Bonus items (actual_price ≤ 0 or quantity ≤ 0) excluded from cost calculation. Daily pipeline scheduled at 02:20. Validated with unit tests and manual validation scripts.
 - **2026-02 (Odoo Data Sources):** Documented all Odoo tables used in ETL: pos.order (POS), account.move (sales/purchases), stock.move.line (inventory), stock.quant (snapshots), plus dimensions (product, category, brand, tax, partner). Derived tables: cost events, latest daily cost, sales line profit, profit aggregates.
 - **2026-02 (Profit ETL Performance Optimization):** Implemented performance optimizations for profit ETL querying and serving layer. Enabled Hive partition pruning in all profit DuckDB views, added caching layer for profit queries and chart builders, created optimized query functions defaulting to aggregates, and added performance monitoring script for ongoing tracking.
+- **2026-02 (Sales Transaction Filtering):** Implemented filtering to exclude cancelled transactions where `order_ref = "/"` from sales reconciliation. Updated `fact_sales_all` view and profit ETL pipeline to apply filter at both view and ETL levels. Fixed discrepancy where Feb 10, 2025 showed 247,446,157 instead of correct 247,203,048.
+- **2026-02 (Beginning Costs Implementation):** Created `fact_product_beginning_costs` table with 48,455 products to provide cost fallback for dates without purchase history. Fixed data types (product_id, source_tax_id, effective_date) and validated profit calculations showing realistic margins (1.9% vs previous 100%). ETL pipeline now uses beginning costs when latest purchase costs are unavailable.
 
 ## 7) Work tracking (active workstreams)
 Use globally unique workstream IDs.
@@ -213,6 +215,24 @@ Use globally unique workstream IDs.
   - **Validation:** Visual review + responsive testing on mobile/desktop
   - **Notes:** Avoid conflicts with existing DMC setup; enhance rather than replace components
   - **🎯 DESIGN POLICY UPDATE:** All pages now use `dmc.Container(size='100%', px='md', py='lg')` for full viewport width with proper edge padding
+
+- **NK_20260221_beginning_costs_1f3c** — Beginning Costs Table Implementation and Type Fix
+  - **Status:** Done (implemented and validated)
+  - **Problem:** Profit calculations showed 100% margin for dates with no purchase history because there was no beginning costs fallback table
+  - **Deliverables:**
+    1. **Created `fact_product_beginning_costs.parquet`** with 48,455 products and initial costs
+    2. **Fixed data types**: product_id (VARCHAR→BIGINT), source_tax_id (DOUBLE→BIGINT), effective_date (VARCHAR→DATE)
+    3. **Updated ETL pipeline** to use beginning costs as fallback when latest purchase costs are unavailable
+    4. **Validated profit calculations**: Feb 10, 2025 margin changed from 100% (zero costs) to 1.9% (realistic costs)
+  - **Files Modified/Created:**
+    - `fix_beginning_costs_types.py`: Type conversion script
+    - `fact_product_beginning_costs.parquet`: Beginning costs data (48,455 records)
+    - `etl_tasks.py`: Already had beginning costs fallback logic (now activated)
+  - **Impact:**
+    - **Before**: COGS = Rp 0, Gross Margin = 100% (unrealistic)
+    - **After**: COGS = Rp 3,190,321, Gross Margin = 1.9% (realistic)
+    - **188 products** now have beginning costs applied, **10,541** still need costs
+  - **Validation Evidence:** Profit summary for Feb 10, 2025 shows proper cost calculation and realistic margins
 
 ## 8) Open questions (needs your confirmation)
 1. Who are the named owners for the oversight roles in section 5?

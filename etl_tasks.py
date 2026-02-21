@@ -1297,7 +1297,7 @@ def _build_product_cost_latest_daily(target_date: str) -> pl.DataFrame:
 
 
 def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
-    from etl.config import FACT_PRODUCT_BEGINNING_COSTS_PATH
+    from etl.config import FACT_PRODUCT_COSTS_UNIFIED_PATH
     
     sales_schema = {
         'date': pl.Date,
@@ -1310,6 +1310,8 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
         'revenue': pl.Float64,
         'price_unit': pl.Float64,
         'tax_id': pl.Int64,
+        'order_ref': pl.Utf8,
+        'move_name': pl.Utf8,
     }
     profit_schema = {
         'date': pl.Date,
@@ -1328,25 +1330,40 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
     target_dt = date.fromisoformat(target_date)
     pos_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_sales', target_date)
     invoice_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_invoice_sales', target_date)
-    cost_partition = _partition_path(FACT_PRODUCT_COST_LATEST_DAILY_PATH, target_date)
-    beginning_costs_partition = FACT_PRODUCT_BEGINNING_COSTS_PATH
+    unified_costs_partition = FACT_PRODUCT_COSTS_UNIFIED_PATH
 
     pos_df = _read_parquet_or_empty(pos_partition, sales_schema)
     invoice_df = _read_parquet_or_empty(invoice_partition, sales_schema)
-    cost_df = _read_parquet_or_empty(cost_partition, {
-        'date': pl.Date,
-        'product_id': pl.Int64,
-        'cost_unit_tax_in': pl.Float64,
-        'source_move_id': pl.Int64,
-        'source_tax_id': pl.Int64,
-    })
-    beginning_costs_df = _read_parquet_or_empty(beginning_costs_partition, {
-        'product_id': pl.Int64,
-        'cost_unit_tax_in': pl.Float64,
-        'source_tax_id': pl.Int64,
-        'effective_date': pl.Date,
-        'is_active': pl.Boolean,
-    })
+    
+    # Filter out records where order_ref is only "/"
+    if 'order_ref' in pos_df.columns:
+        pos_df = pos_df.filter(
+            (pl.col('order_ref').is_null()) | 
+            (pl.col('order_ref') != '/')
+        )
+    
+    if 'move_name' in invoice_df.columns:
+        invoice_df = invoice_df.filter(
+            (pl.col('move_name').is_null()) | 
+            (pl.col('move_name') != '/')
+        )
+    
+    # Read unified costs from DuckDB view (priority logic already applied)
+    from services.duckdb_connector import get_duckdb_connection
+    conn = get_duckdb_connection()
+    
+    unified_costs_query = """
+    SELECT 
+        product_id,
+        cost_unit_tax_in,
+        source_tax_id,
+        cost_source,
+        effective_date
+    FROM fact_product_costs_unified
+    WHERE cost_unit_tax_in > 0
+    """
+    
+    unified_costs_df = pl.from_pandas(conn.execute(unified_costs_query).fetchdf())
 
     pos_lines = (
         pos_df.with_columns(
@@ -1384,56 +1401,12 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
     if sales_lines.is_empty():
         return pl.DataFrame(schema=profit_schema)
 
-    cost_df = cost_df.select([
-        'product_id',
-        'cost_unit_tax_in',
-        pl.col('source_move_id').alias('source_cost_move_id'),
-        pl.col('source_tax_id').alias('source_cost_tax_id'),
-    ])
+    # Simple single join with unified costs (priority logic already applied in view)
+    merged = sales_lines.join(unified_costs_df, on='product_id', how='left')
 
-    beginning_costs_df = beginning_costs_df.filter(pl.col('is_active') == True).select([
-        'product_id',
-        'cost_unit_tax_in',
-        pl.col('source_tax_id').alias('source_cost_tax_id'),
-    ])
-
-    # Join with latest costs first, then apply beginning costs as fallback
-    merged = sales_lines.join(cost_df, on='product_id', how='left')
-    
-    # Create a lookup dictionary for beginning costs
-    if not beginning_costs_df.is_empty():
-        # Join beginning costs separately to avoid shape issues
-        merged_with_beginning = merged.join(beginning_costs_df, on='product_id', how='left', suffix='_beginning')
-        
-        merged = merged_with_beginning.with_columns([
-            pl.when(
-                (pl.col('cost_unit_tax_in').is_null()) | (pl.col('cost_unit_tax_in') == 0)
-            ).then(
-                pl.col('cost_unit_tax_in_beginning')
-            ).otherwise(
-                pl.col('cost_unit_tax_in')
-            ).alias('cost_unit_tax_in'),
-            
-            pl.when(
-                (pl.col('source_cost_tax_id').is_null()) | (pl.col('source_cost_tax_id') == 0)
-            ).then(
-                pl.col('source_cost_tax_id_beginning')
-            ).otherwise(
-                pl.col('source_cost_tax_id')
-            ).alias('source_cost_tax_id'),
-        ])
-    else:
-        # No beginning costs available, keep original logic
-        merged = merged.with_columns(
-            pl.col('cost_unit_tax_in').cast(pl.Float64, strict=False).fill_null(0),
-            pl.col('source_cost_move_id').cast(pl.Int64, strict=False).fill_null(0),
-            pl.col('source_cost_tax_id').cast(pl.Int64, strict=False).fill_null(0),
-        )
-    
     merged = merged.with_columns(
         pl.col('cost_unit_tax_in').cast(pl.Float64, strict=False).fill_null(0),
-        pl.col('source_cost_move_id').cast(pl.Int64, strict=False).fill_null(0),
-        pl.col('source_cost_tax_id').cast(pl.Int64, strict=False).fill_null(0),
+        pl.col('source_tax_id').cast(pl.Int64, strict=False).fill_null(0),
         (pl.col('cost_unit_tax_in') * pl.col('quantity')).alias('cogs_tax_in'),
     )
     merged = merged.with_columns(
@@ -1450,8 +1423,8 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
         'cost_unit_tax_in',
         'cogs_tax_in',
         'gross_profit',
-        'source_cost_move_id',
-        'source_cost_tax_id',
+        pl.lit(None).alias('source_cost_move_id').cast(pl.Int64),  # Placeholder for compatibility
+        pl.col('source_tax_id').alias('source_cost_tax_id'),
     ])
 
     if profit_df.is_empty():

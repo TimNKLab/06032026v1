@@ -3,6 +3,8 @@ from dash import Dash, dcc, html, Output, Input, State
 import dash_mantine_components as dmc
 from services.cache import init_cache
 
+from datetime import date
+
 # Track B: Dash 2.14.2 + DMC 2.4.0 compatibility
 # Enforce React 18 for DMC 2.x
 try:
@@ -30,6 +32,7 @@ _check_versions()
 NAV_LINKS = [
     ("Overview", "/"),
     ("Sales", "/sales"),
+    ("Sales Drilldowns", "/sales-drilldown"),
     ("Inventory Management", "/inventory"),
     ("Customer Experience", "/customer"),
     ("Data Sync", "/operational")
@@ -70,6 +73,18 @@ app.layout = dmc.MantineProvider(
             "height": 80,
         },
         children=[
+            dcc.Location(id='app-location', refresh=False),
+            dcc.Store(
+                id='sales-global-query-context',
+                storage_type='session',
+                data={
+                    'start_date': date.today().replace(day=1).isoformat(),
+                    'end_date': date.today().isoformat(),
+                    'period': 'daily',
+                    'source': 'default_mtd',
+                },
+            ),
+            dcc.Store(id='overview-view-state', storage_type='session'),
             # Header with title and navigation links
             dmc.AppShellHeader(
                 children=[

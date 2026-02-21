@@ -1,373 +1,276 @@
 import dash
 from dash import dcc, Output, Input, State
+from dash.exceptions import PreventUpdate
 import dash_mantine_components as dmc
 import plotly.express as px
-import pandas as pd
 from datetime import date
 
-from services.overview_metrics import get_total_overview_summary
-from services.profit_metrics import query_profit_summary, query_profit_revenue_by_category
+from services.profit_metrics import query_profit_summary, query_profit_trends
 
+CHART_HEIGHT = 380
 
-def _build_total_overview_figure(date_start, date_end=None):
-    summary = get_total_overview_summary(date_start, date_end)
-    date_start = summary['target_date_start']
-    date_end = summary['target_date_end']
+dash.register_page(__name__, path='/', name='Overview', title='Executive Overview')
 
-    profit_summary = query_profit_summary(date_start, date_end)
-    today_amount = profit_summary.get('revenue', 0.0) or 0.0
-    today_qty = profit_summary.get('quantity', 0.0) or 0.0
+# ── helpers ───────────────────────────────────────────────────────
 
-    categories_nested = query_profit_revenue_by_category(date_start, date_end)
-    days = (date_end - date_start).days + 1
-    prev_end = date_start.fromordinal(date_start.toordinal() - 1)
-    prev_start = date_start.fromordinal(date_start.toordinal() - days)
-    prev_profit_summary = query_profit_summary(prev_start, prev_end)
-    prev_amount = prev_profit_summary.get('revenue', 0.0) or 0.0
-
-    if categories_nested:
-        records = [
-            {
-                'parent_category': parent,
-                'category': child,
-                'amount': amt,
-            }
-            for parent, child_map in categories_nested.items()
-            for child, amt in child_map.items()
-        ]
-        df = pd.DataFrame(records)
-        fig = px.sunburst(
-            df,
-            path=['parent_category', 'category'],
-            values='amount',
-            color='parent_category',
-            color_discrete_sequence=px.colors.qualitative.Set3,
-        )
-    else:
-        df = pd.DataFrame()
-        fig = px.sunburst()
-
-    if df.empty:
-        fig.update_layout(
-            annotations=[dict(text='No revenue data available for the selected date.', x=0.5, y=0.5, showarrow=False, font=dict(size=14, color='gray'))]
-        )
-
-    delta_amount = today_amount - prev_amount
-    delta_pct = (delta_amount / prev_amount * 100) if prev_amount else None
-
-    if delta_pct is None:
-        delta_text = f" vs prev period: Rp {delta_amount:,.0f}"
-    else:
-        delta_text = f" vs prev period: Rp {delta_amount:,.0f} ({delta_pct:+.1f}%)"
-
-    # Title shows single date or range
-    if date_start == date_end:
-        title_str = f"Total Overview – {date_start.strftime('%d %b %Y')}"
-    else:
-        title_str = f"Total Overview – {date_start.strftime('%d %b %Y')} to {date_end.strftime('%d %b %Y')}"
-
+def _empty_fig(msg='No data'):
+    fig = px.bar()
     fig.update_layout(
-        title=title_str,
-        legend_title_text='Product Category',
-        template='plotly_white',
-        height=420,
-        margin=dict(t=90, b=60, l=40, r=40),
-
-        annotations=[
-            dict(
-                text=f"Revenue: Rp {today_amount:,.0f}",
-                x=0,
-                y=1.15,
-                xref='paper',
-                yref='paper',
-                showarrow=False,
-                font=dict(size=16, color='#1864ab'),
-            ),
-            dict(
-                text=delta_text,
-                x=0,
-                y=1.07,
-                xref='paper',
-                yref='paper',
-                showarrow=False,
-                font=dict(size=12, color='#495057'),
-            ),
-            dict(
-                text=f"Qty sold: {today_qty:,.0f}",
-                x=0,
-                y=1.0,
-                xref='paper',
-                yref='paper',
-                showarrow=False,
-                font=dict(size=12, color='#495057'),
-            )
-        ],
+        template='plotly_white', height=CHART_HEIGHT,
+        margin=dict(t=30, b=30, l=50, r=20),
+        annotations=[dict(text=msg, x=.5, y=.5, xref='paper', yref='paper',
+                          showarrow=False, font=dict(size=14, color='gray'))],
     )
     return fig
 
 
-dash.register_page(__name__, path='/', name='Overview', title='Executive Overview')
+def _build_figure(d_start, d_end, period='daily'):
+    trends = query_profit_trends(d_start, d_end, period=period)
+    if trends is None or trends.empty:
+        return _empty_fig('No data for selected range.')
+    df = trends[['date', 'revenue', 'gross_profit']].rename(
+        columns={'revenue': 'Revenue', 'gross_profit': 'Gross Profit'})
+    fig = px.bar(df, x='date', y=['Revenue', 'Gross Profit'], barmode='group',
+                 color_discrete_map={'Revenue': '#228be6', 'Gross Profit': '#40c057'})
+    title = (d_start.strftime('%d %b %Y') if d_start == d_end
+             else f"{d_start.strftime('%d %b %Y')} → {d_end.strftime('%d %b %Y')}")
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=13), x=0, xanchor='left'),
+        template='plotly_white', height=CHART_HEIGHT,
+        margin=dict(t=45, b=30, l=50, r=20),
+        yaxis=dict(tickprefix='Rp ', tickformat=',.0f'),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02,
+                    xanchor='left', x=0, font=dict(size=11), title_text=''),
+        plot_bgcolor='rgba(0,0,0,0)',
+    )
+    fig.update_xaxes(title_text='')
+    fig.update_yaxes(title_text='')
+    return fig
 
-layout = dmc.Container(
-    [
-        dmc.Title('Executive Dashboard', order=2, mb='xs'),
-        dmc.Text('High-level overview of business performance and key metrics.', c='dimmed', mb='lg'),
-        
-        # Bento Grid Layout
-        dmc.Grid(
-            [
-                # Controls Card - Top Full Width
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Group(
-                                    [
-                                        dmc.Text('Date Controls', fw=600, size='lg'),
-                                        dmc.Badge('Time Period', color='gray', variant='light'),
-                                    ],
-                                    justify='space-between',
-                                    align='center'
-                                ),
-                                dmc.Divider(),
-                                dmc.Group(
-                                    [
-                                        dmc.Button('Weekly', variant='light', size='xs', id='btn-weekly'),
-                                        dmc.Button('Monthly', variant='light', size='xs', id='btn-monthly'),
-                                        dmc.Button('Quarterly', variant='light', size='xs', id='btn-quarterly'),
-                                        dmc.Button('Semesterly', variant='light', size='xs', id='btn-semesterly'),
-                                        dmc.Button('Yearly', variant='light', size='xs', id='btn-yearly'),
-                                    ],
-                                    gap='xs',
-                                ),
-                                dmc.Group(
-                                    [
-                                        dmc.Stack(
-                                            [
-                                                dmc.Text('From:', fw=600),
-                                                dmc.Group(
-                                                    [
-                                                        dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='date-from'),
-                                                        dmc.TimeInput(value='07:00', id='time-from'),
-                                                    ],
-                                                    gap='sm',
-                                                ),
-                                            ],
-                                            gap=4,
-                                        ),
-                                        dmc.Stack(
-                                            [
-                                                dmc.Text('Until:', fw=600),
-                                                dmc.Group(
-                                                    [
-                                                        dmc.DatePickerInput(value=date.today(), placeholder='Select date', id='date-until'),
-                                                        dmc.TimeInput(value='23:30', id='time-until'),
-                                                    ],
-                                                    gap='sm',
-                                                ),
-                                            ],
-                                            gap=4,
-                                        ),
-                                        dmc.Button('Apply', id='btn-apply-dates', variant='filled', size='sm'),
-                                    ],
-                                    gap='xl',
-                                    wrap='wrap',
-                                    align='flex-end',
-                                ),
-                            ],
-                            gap='md',
-                        ),
-                        p='lg',
-                        radius='lg',
-                        withBorder=True,
-                        shadow='sm',
-                    ),
-                    span=12,
-                ),
-                
-                # Main Chart Card - Top Row
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Group(
-                                    [
-                                        dmc.Text('Revenue Overview', fw=600, size='lg'),
-                                        dmc.Badge('Live Data', color='gray', variant='light'),
-                                    ],
-                                    justify='space-between',
-                                    align='center'
-                                ),
-                                dcc.Graph(
-                                    id='total-overview-fig',
-                                    config={'displayModeBar': False},
-                                ),
-                            ],
-                            gap='sm',
-                        ),
-                        p='md',
-                        radius='lg',
-                        withBorder=True,
-                        shadow='sm',
-                    ),
-                    span=8,
-                ),
-                
-                # KPI Cards - Top Row
-                dmc.GridCol(
-                    dmc.Paper(
-                        dmc.Stack(
-                            [
-                                dmc.Group(
-                                    [
-                                        dmc.Text('Financial Health', fw=600, size='lg'),
-                                        dmc.Badge('KPI', color='gray', variant='light'),
-                                    ],
-                                    justify='space-between',
-                                    align='center'
-                                ),
-                                dmc.Text('Revenue: Rp 0', id='kpi-revenue', size='xl', fw=600),
-                                dmc.Text('vs prev period: Rp 0 (0.0%)', id='kpi-revenue-delta', size='sm', c='dimmed'),
-                                dmc.Text('Gross profit: Rp 0', id='kpi-gross-profit', size='sm', c='dimmed'),
-                                dmc.Text('Gross margin: 0.0%', id='kpi-gross-margin', size='sm', c='dimmed'),
-                                dmc.Text('Avg txn value: Rp 0', id='kpi-atv', size='sm', c='dimmed'),
-                                dmc.Text('Qty sold: 0', id='kpi-qty-sold', size='sm', c='dimmed'),
-                                dmc.Text('Transactions: 0', id='kpi-transactions', size='sm', c='dimmed'),
-                            ],
-                            gap='sm',
-                        ),
-                        p='md',
-                        radius='lg',
-                        withBorder=True,
-                        shadow='sm',
-                    ),
-                    span=4,
-                ),
-            ],
-            gutter='lg',
-        ),
-    ],
-    size='100%',  # Design Policy: Full viewport width
-    px='md',      # Design Policy: Horizontal padding
-    py='lg',      # Design Policy: Vertical padding
-)
 
+def _coerce(v):
+    if isinstance(v, date): return v
+    if isinstance(v, str):
+        try: return date.fromisoformat(v)
+        except Exception: pass
+    return None
+
+
+def _kpi_card(label, vid, vdef, sid=None, sdef=None, color='blue'):
+    ch = [
+        dmc.Text(label, size='xs', c='dimmed', fw=700,
+                 style={'textTransform': 'uppercase', 'letterSpacing': '0.5px'}),
+        dmc.Space(h=4),
+        dmc.Text(vdef, id=vid, size='xl', fw=700),
+    ]
+    if sid:
+        ch += [dmc.Space(h=4), dmc.Text(sdef, id=sid, size='xs', c='dimmed')]
+    return dmc.Paper(
+        dmc.Stack(ch, gap=0), p='md', radius='md', withBorder=True, shadow='xs',
+        style={'borderTop': f'3px solid var(--mantine-color-{color}-6)', 'flex': '1'},
+    )
+
+
+# ── layout ────────────────────────────────────────────────────────
+
+layout = dmc.Container([
+    dmc.Paper(
+        dmc.Group([
+            dmc.Title('Executive Dashboard', order=4),
+            dmc.Group([
+                dmc.Button('W', variant='subtle', size='xs', id='btn-weekly'),
+                dmc.Button('M', variant='subtle', size='xs', id='btn-monthly'),
+                dmc.Button('Q', variant='subtle', size='xs', id='btn-quarterly'),
+                dmc.Button('S', variant='subtle', size='xs', id='btn-semesterly'),
+                dmc.Button('Y', variant='subtle', size='xs', id='btn-yearly'),
+                dmc.Divider(orientation='vertical', style={'height': '24px'}),
+                dmc.DatePickerInput(
+                    value=date.today(), id='date-from', size='xs', w=130,
+                    persistence=True, persistence_type='session',   # ← NEW
+                ),
+                dmc.TimeInput(
+                    value='07:00', id='time-from', size='xs', w=70,
+                    persistence=True, persistence_type='session',   # ← NEW
+                ),
+                dmc.Text('–', c='dimmed', size='sm'),
+                dmc.DatePickerInput(
+                    value=date.today(), id='date-until', size='xs', w=130,
+                    persistence=True, persistence_type='session',   # ← NEW
+                ),
+                dmc.TimeInput(
+                    value='23:30', id='time-until', size='xs', w=70,
+                    persistence=True, persistence_type='session',   # ← NEW
+                ),
+                dmc.Divider(orientation='vertical', style={'height': '24px'}),
+                dmc.SegmentedControl(
+                    id='overview-period', value='daily', size='xs',
+                    data=[{'label': 'D', 'value': 'daily'},
+                          {'label': 'W', 'value': 'weekly'},
+                          {'label': 'M', 'value': 'monthly'}],
+                    persistence=True, persistence_type='session',   # ← NEW
+                ),
+                dmc.Button('Apply', id='btn-apply-dates', variant='filled', size='xs'),
+            ], gap=6, align='center', wrap='wrap'),
+        ], justify='space-between', align='center', wrap='wrap'),
+        p='xs', px='md', radius='md', withBorder=True, shadow='xs', mb='sm',
+    ),
+
+    dmc.Grid([
+        dmc.GridCol(_kpi_card('Revenue', 'kpi-revenue', 'Rp 0',
+                              'kpi-revenue-delta', '–', 'blue'), span=3, style={'display':'flex'}),
+        dmc.GridCol(_kpi_card('Gross Profit', 'kpi-gross-profit', 'Rp 0',
+                              'kpi-gross-margin', '0.0% margin', 'teal'), span=3, style={'display':'flex'}),
+        dmc.GridCol(_kpi_card('Avg Transaction', 'kpi-atv', 'Rp 0',
+                              color='violet'), span=3, style={'display':'flex'}),
+        dmc.GridCol(_kpi_card('Volume', 'kpi-qty-sold', '0 items',
+                              'kpi-transactions', '0 transactions', 'orange'), span=3, style={'display':'flex'}),
+    ], gutter='sm', mb='sm'),
+
+    dmc.Paper(
+        dmc.Stack([
+            dmc.Group([
+                dmc.Text('Revenue & Profit Trend', fw=600, size='sm'),
+                dmc.Badge('Live', color='green', variant='dot', size='sm'),
+            ], justify='space-between'),
+            dcc.Graph(id='total-overview-fig', config={'displayModeBar': False}),
+        ], gap='xs'),
+        p='md', pt='sm', radius='md', withBorder=True, shadow='xs',
+    ),
+], size='100%', px='md', py='sm')
+
+
+# ══════════════════════════════════════════════════════════════════
+#  SINGLE callback — Apply, restore, first-visit
+# ══════════════════════════════════════════════════════════════════
 
 @dash.callback(
-    Output('total-overview-fig', 'figure'),
-    Output('kpi-revenue', 'children'),
-    Output('kpi-revenue-delta', 'children'),
-    Output('kpi-gross-profit', 'children'),
-    Output('kpi-gross-margin', 'children'),
-    Output('kpi-atv', 'children'),
-    Output('kpi-qty-sold', 'children'),
-    Output('kpi-transactions', 'children'),
+    Output('total-overview-fig',  'figure'),
+    Output('kpi-revenue',         'children'),
+    Output('kpi-revenue-delta',   'children'),
+    Output('kpi-gross-profit',    'children'),
+    Output('kpi-gross-margin',    'children'),
+    Output('kpi-atv',             'children'),
+    Output('kpi-qty-sold',        'children'),
+    Output('kpi-transactions',    'children'),
+    Output('sales-global-query-context', 'data'),
+    Output('overview-view-state',        'data'),
+    Input('app-location',    'pathname'),
     Input('btn-apply-dates', 'n_clicks'),
-    State('date-from', 'value'),
-    State('date-until', 'value'),
-    State('time-from', 'value'),
-    State('time-until', 'value'),
+    State('overview-period', 'value'),
+    State('date-from',       'value'),
+    State('date-until',      'value'),
+    State('time-from',       'value'),
+    State('time-until',      'value'),
+    State('overview-view-state', 'data'),
     prevent_initial_call=False,
 )
-def update_total_overview(n_clicks, date_from_input, date_until, time_from, time_until):
-    # Determine which input triggered the callback
-    ctx = dash.callback_context
-    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'initial_load'
+def update_overview(pathname, n_clicks,
+                    period_st, dfrom_st, duntil_st, tfrom_st, tuntil_st,
+                    view_state):
 
-    if not n_clicks:
-        fig = px.sunburst()
-        fig.update_layout(
-            template='plotly_white',
-            height=420,
-            annotations=[
-                dict(
-                    text='Click Apply to load data.',
-                    x=0.5,
-                    y=0.5,
-                    xref='paper',
-                    yref='paper',
-                    showarrow=False,
-                    font=dict(size=14, color='gray'),
-                )
-            ],
+    NO = dash.no_update
+    trigs = {t['prop_id'].split('.')[0] for t in (dash.callback_context.triggered or [])}
+
+    # ── DEBUG — remove once it works ──────────────────────────
+    print(f"[overview] trigs={trigs}  pathname={pathname}  n_clicks={n_clicks}  "
+          f"vs={'HAS ' + str(len(view_state)) + ' keys' if view_state else 'NONE'}")
+
+    # ignore if we're on a different page
+    if pathname != '/':
+        raise PreventUpdate
+
+    # ── APPLY pressed ─────────────────────────────────────────
+    if 'btn-apply-dates' in trigs:
+        start  = _coerce(dfrom_st)  or date.today()
+        end    = _coerce(duntil_st) or start
+        period = period_st or 'daily'
+
+        fig = _build_figure(start, end, period)
+
+        global_ctx = dict(start_date=start.isoformat(), end_date=end.isoformat(),
+                          period=period, source='overview')
+
+        # ── view_state: ONLY small scalars, NO figure ─────────
+        vs = dict(
+            has_data=True,
+            date_from=start.isoformat(),
+            date_until=end.isoformat(),
+            period=period,
+            time_from=tfrom_st or '07:00',
+            time_until=tuntil_st or '23:30',
         )
-        return (
-            fig,
-            'Revenue: Rp 0',
-            'vs prev period: Rp 0 (0.0%)',
-            'Gross profit: Rp 0',
-            'Gross margin: 0.0%',
-            'Avg txn value: Rp 0',
-            'Qty sold: 0',
-            'Transactions: 0',
-        )
 
-    # Use date_from_input which is the *latest value* of the 'date-from' component
-    # regardless of whether the button or the datepicker triggered the update.
-
-    selected_date_str = date_from_input
-    selected_date = date.today() # Default
-
-    if selected_date_str:
         try:
-            # DatePickerInput returns ISO format string (YYYY-MM-DD)
-            selected_date = date.fromisoformat(selected_date_str)
-        except (ValueError, TypeError):
-            pass # Keep default date.today()
+            ps   = query_profit_summary(start, end)
+            rev  = ps.get('revenue', 0) or 0
+            gp   = ps.get('gross_profit', 0) or 0
+            gm   = ps.get('gross_margin_pct', 0) or 0
+            atv  = ps.get('avg_transaction_value', 0) or 0
+            qty  = ps.get('quantity', 0) or 0
+            txns = ps.get('transactions', 0) or 0
 
-    # Parse start and end dates
-    start_date = selected_date
-    end_date = start_date
-    if date_until:
-        try:
-            end_date = date.fromisoformat(date_until)
-        except (ValueError, TypeError):
-            pass
+            days    = (end - start).days + 1
+            p_end   = date.fromordinal(start.toordinal() - 1)
+            p_start = date.fromordinal(start.toordinal() - days)
+            p_rev   = (query_profit_summary(p_start, p_end).get('revenue', 0) or 0)
+            delta   = rev - p_rev
+            dpct    = (delta / p_rev * 100) if p_rev else None
+            dtxt    = (f"{dpct:+.1f}% vs prev (Rp {delta:,.0f})"
+                       if dpct is not None else f"Rp {delta:,.0f} vs prev")
 
-    fig = _build_total_overview_figure(start_date, end_date)
+            vs.update(
+                kpi_revenue=f"Rp {rev:,.0f}",       kpi_revenue_delta=dtxt,
+                kpi_gross_profit=f"Rp {gp:,.0f}",   kpi_gross_margin=f"{gm:.1f}% margin",
+                kpi_atv=f"Rp {atv:,.0f}",
+                kpi_qty_sold=f"{qty:,.0f} items",    kpi_transactions=f"{txns:,} transactions",
+            )
+        except Exception as exc:
+            print(f"[overview] query error: {exc}")
+            vs.update(
+                kpi_revenue='Rp 0', kpi_revenue_delta='–',
+                kpi_gross_profit='Rp 0', kpi_gross_margin='0.0% margin',
+                kpi_atv='Rp 0', kpi_qty_sold='0 items', kpi_transactions='0 transactions',
+            )
 
-    try:
-        profit_summary = query_profit_summary(start_date, end_date)
-        revenue = profit_summary.get('revenue', 0.0) or 0.0
-        gross_profit = profit_summary.get('gross_profit', 0.0) or 0.0
-        gross_margin_pct = profit_summary.get('gross_margin_pct', 0.0) or 0.0
-        atv = profit_summary.get('avg_transaction_value', 0.0) or 0.0
-        qty = profit_summary.get('quantity', 0.0) or 0.0
-        transactions = profit_summary.get('transactions', 0) or 0
-
-        days = (end_date - start_date).days + 1
-        prev_end = start_date.fromordinal(start_date.toordinal() - 1)
-        prev_start = start_date.fromordinal(start_date.toordinal() - days)
-
-        prev_profit_summary = query_profit_summary(prev_start, prev_end)
-        prev_revenue = prev_profit_summary.get('revenue', 0.0) or 0.0
-
-        delta_amount = revenue - prev_revenue
-        delta_pct = (delta_amount / prev_revenue * 100) if prev_revenue else None
-
-        if delta_pct is None:
-            delta_text = f"vs prev period: Rp {delta_amount:,.0f}"
-        else:
-            delta_text = f"vs prev period: Rp {delta_amount:,.0f} ({delta_pct:+.1f}%)"
+        print(f"[overview] APPLY → storing view_state with {len(vs)} keys")
 
         return (
             fig,
-            f"Revenue: Rp {revenue:,.0f}",
-            delta_text,
-            f"Gross profit: Rp {gross_profit:,.0f}",
-            f"Gross margin: {gross_margin_pct:.1f}%",
-            f"Avg txn value: Rp {atv:,.0f}",
-            f"Qty sold: {qty:,.0f}",
-            f"Transactions: {transactions:,}",
+            vs['kpi_revenue'],      vs['kpi_revenue_delta'],
+            vs['kpi_gross_profit'], vs['kpi_gross_margin'],
+            vs['kpi_atv'],          vs['kpi_qty_sold'],
+            vs['kpi_transactions'],
+            global_ctx, vs,
         )
-    except Exception:
+
+    # ── NAV-BACK: restore from view_state (rebuild fig) ──────
+    if view_state and view_state.get('has_data'):
+        print("[overview] RESTORING from view_state")
+        vs = view_state
+        start  = _coerce(vs['date_from'])  or date.today()
+        end    = _coerce(vs['date_until']) or start
+        period = vs.get('period', 'daily')
+
+        # rebuild the figure from params — this is fast
+        fig = _build_figure(start, end, period)
+
         return (
             fig,
-            'Revenue: Rp 0',
-            'vs prev period: Rp 0 (0.0%)',
-            'Gross profit: Rp 0',
-            'Gross margin: 0.0%',
-            'Avg txn value: Rp 0',
-            'Qty sold: 0',
-            'Transactions: 0',
+            vs.get('kpi_revenue',      'Rp 0'),
+            vs.get('kpi_revenue_delta', '–'),
+            vs.get('kpi_gross_profit', 'Rp 0'),
+            vs.get('kpi_gross_margin', '0.0% margin'),
+            vs.get('kpi_atv',         'Rp 0'),
+            vs.get('kpi_qty_sold',    '0 items'),
+            vs.get('kpi_transactions','0 transactions'),
+            NO, NO,
         )
+
+    # ── FIRST VISIT ───────────────────────────────────────────
+    print("[overview] FIRST VISIT — empty state")
+    return (
+        _empty_fig('Click Apply to load data.'),
+        'Rp 0', '–', 'Rp 0', '0.0% margin',
+        'Rp 0', '0 items', '0 transactions',
+        NO, NO,
+    )
