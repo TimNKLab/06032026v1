@@ -1,6 +1,7 @@
 import dash
 from dash import dcc, html
 import dash_mantine_components as dmc
+import dash_ag_grid as dag
 from datetime import date, timedelta
 
 from services.etl_ops import (
@@ -63,6 +64,22 @@ DATASET_OPTIONS = [
 
 def _table_data(head):
     return {'head': head, 'body': []}
+
+
+def _aggrid_default_col_def() -> dict:
+    return {
+        'sortable': True,
+        'filter': True,
+        'resizable': True,
+        'minWidth': 90,
+    }
+
+
+def _aggrid_pagination_options(page_size: int = 50) -> dict:
+    return {
+        'pagination': True,
+        'paginationPageSize': int(page_size),
+    }
 
 
 def _date_range(start: date, end: date):
@@ -433,15 +450,30 @@ layout = dmc.Container(
                                     justify='space-between',
                                     align='center'
                                 ),
-                                dmc.Table(
+                                dmc.Group(
+                                    [
+                                        dmc.Button('Export CSV', id='etl-ops-scan-export', variant='light', size='xs'),
+                                    ],
+                                    justify='flex-end',
+                                ),
+                                dag.AgGrid(
                                     id='etl-ops-scan-table',
-                                    striped=True,
-                                    highlightOnHover=True,
-                                    withTableBorder=True,
-                                    horizontalSpacing='md',
-                                    verticalSpacing='xs',
-                                    fz='xs',
-                                    data=_table_data(['Date', 'Raw', 'Clean', 'Fact', 'Raw Rows', 'Clean Rows', 'Fact Rows']),
+                                    columnDefs=[
+                                        {'field': 'date', 'headerName': 'Date', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                                        {'field': 'raw', 'headerName': 'Raw', 'filter': 'agTextColumnFilter', 'minWidth': 110},
+                                        {'field': 'clean', 'headerName': 'Clean', 'filter': 'agTextColumnFilter', 'minWidth': 110},
+                                        {'field': 'fact', 'headerName': 'Fact', 'filter': 'agTextColumnFilter', 'minWidth': 110},
+                                        {'field': 'raw_rows', 'headerName': 'Raw Rows', 'type': 'numericColumn', 'filter': 'agNumberColumnFilter', 'minWidth': 110,
+                                         'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'}},
+                                        {'field': 'clean_rows', 'headerName': 'Clean Rows', 'type': 'numericColumn', 'filter': 'agNumberColumnFilter', 'minWidth': 120,
+                                         'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'}},
+                                        {'field': 'fact_rows', 'headerName': 'Fact Rows', 'type': 'numericColumn', 'filter': 'agNumberColumnFilter', 'minWidth': 110,
+                                         'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'}},
+                                    ],
+                                    defaultColDef=_aggrid_default_col_def(),
+                                    rowData=[],
+                                    dashGridOptions=_aggrid_pagination_options(),
+                                    csvExportParams={'fileName': 'etl_partition_status.csv'},
                                 ),
                             ],
                             gap='sm',
@@ -468,15 +500,23 @@ layout = dmc.Container(
                                     justify='space-between',
                                     align='center'
                                 ),
-                                dmc.Table(
+                                dmc.Group(
+                                    [
+                                        dmc.Button('Export CSV', id='etl-ops-dim-export', variant='light', size='xs'),
+                                    ],
+                                    justify='flex-end',
+                                ),
+                                dag.AgGrid(
                                     id='etl-ops-dim-table',
-                                    striped=True,
-                                    highlightOnHover=True,
-                                    withTableBorder=True,
-                                    horizontalSpacing='md',
-                                    verticalSpacing='xs',
-                                    fz='xs',
-                                    data=_table_data(['Dimension', 'Exists', 'Path']),
+                                    columnDefs=[
+                                        {'field': 'dimension', 'headerName': 'Dimension', 'filter': 'agTextColumnFilter', 'minWidth': 160},
+                                        {'field': 'exists', 'headerName': 'Exists', 'filter': 'agTextColumnFilter', 'minWidth': 110},
+                                        {'field': 'path', 'headerName': 'Path', 'filter': 'agTextColumnFilter', 'minWidth': 300},
+                                    ],
+                                    defaultColDef=_aggrid_default_col_def(),
+                                    rowData=[],
+                                    dashGridOptions=_aggrid_pagination_options(),
+                                    csvExportParams={'fileName': 'etl_dimension_files.csv'},
                                 ),
                             ],
                             gap='sm',
@@ -525,15 +565,25 @@ layout = dmc.Container(
                             [
                                 dmc.Text('Status: —', id='etl-ops-bulk-status', size='sm', c='dimmed'),
                                 dmc.Progress(id='etl-ops-bulk-progress', value=0, striped=True, animated=True),
-                                dmc.Table(
+                                dmc.Group(
+                                    [
+                                        dmc.Button('Export CSV', id='etl-ops-bulk-export', variant='light', size='xs'),
+                                    ],
+                                    justify='flex-end',
+                                ),
+                                dag.AgGrid(
                                     id='etl-ops-bulk-table',
-                                    striped=True,
-                                    highlightOnHover=True,
-                                    withTableBorder=True,
-                                    horizontalSpacing='md',
-                                    verticalSpacing='xs',
-                                    fz='xs',
-                                    data={'head': ['Dataset', 'Range', 'Step', 'Task', 'State'], 'body': []},
+                                    columnDefs=[
+                                        {'field': 'dataset', 'headerName': 'Dataset', 'filter': 'agTextColumnFilter', 'minWidth': 150},
+                                        {'field': 'range', 'headerName': 'Range', 'filter': 'agTextColumnFilter', 'minWidth': 180},
+                                        {'field': 'step', 'headerName': 'Step', 'filter': 'agTextColumnFilter', 'minWidth': 150},
+                                        {'field': 'task', 'headerName': 'Task', 'filter': 'agTextColumnFilter', 'minWidth': 230},
+                                        {'field': 'state', 'headerName': 'State', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                                    ],
+                                    defaultColDef=_aggrid_default_col_def(),
+                                    rowData=[],
+                                    dashGridOptions=_aggrid_pagination_options(),
+                                    csvExportParams={'fileName': 'etl_bulk_jobs.csv'},
                                 ),
                                 dmc.Group(
                                     [
@@ -558,8 +608,8 @@ layout = dmc.Container(
 
 @dash.callback(
     [
-        dash.Output('etl-ops-scan-table', 'data'),
-        dash.Output('etl-ops-dim-table', 'data'),
+        dash.Output('etl-ops-scan-table', 'rowData'),
+        dash.Output('etl-ops-dim-table', 'rowData'),
         dash.Output('etl-ops-summary', 'children'),
     ],
     dash.Input('etl-ops-scan', 'n_clicks'),
@@ -572,19 +622,19 @@ def scan_partitions(n_clicks, dataset_key, date_start, date_end):
     start_date = parse_date(date_start) or date.today()
     end_date = parse_date(date_end) or start_date
 
-    scan_table = _table_data(['Date', 'Raw', 'Clean', 'Fact', 'Raw Rows', 'Clean Rows', 'Fact Rows'])
-    dim_table = _table_data(['Dimension', 'Exists', 'Path'])
+    scan_row_data: list[dict] = []
+    dim_row_data: list[dict] = []
 
     if dataset_key == 'dimensions':
         dim_rows = scan_dimension_files()
         for row in dim_rows:
-            dim_table['body'].append([
-                row['dimension'],
-                'OK' if row['exists'] else 'Missing',
-                row['path'],
-            ])
+            dim_row_data.append({
+                'dimension': row.get('dimension'),
+                'exists': 'OK' if row.get('exists') else 'Missing',
+                'path': row.get('path'),
+            })
         summary = f"Dimensions checked: {len(dim_rows)}"
-        return scan_table, dim_table, summary
+        return scan_row_data, dim_row_data, summary
 
     rows = scan_dataset_partitions(dataset_key, start_date, end_date)
     missing_raw = 0
@@ -606,23 +656,23 @@ def scan_partitions(n_clicks, dataset_key, date_start, date_end):
             missing_fact += 1
         elif row['fact'] == 'Empty':
             empty_fact += 1
-        scan_table['body'].append([
-            row['date'],
-            row['raw'],
-            row['clean'],
-            row['fact'],
-            row['raw_rows'],
-            row['clean_rows'],
-            row['fact_rows'],
-        ])
+        scan_row_data.append({
+            'date': row.get('date'),
+            'raw': row.get('raw'),
+            'clean': row.get('clean'),
+            'fact': row.get('fact'),
+            'raw_rows': row.get('raw_rows'),
+            'clean_rows': row.get('clean_rows'),
+            'fact_rows': row.get('fact_rows'),
+        })
 
     dim_rows = scan_dimension_files()
     for row in dim_rows:
-        dim_table['body'].append([
-            row['dimension'],
-            'OK' if row['exists'] else 'Missing',
-            row['path'],
-        ])
+        dim_row_data.append({
+            'dimension': row.get('dimension'),
+            'exists': 'OK' if row.get('exists') else 'Missing',
+            'path': row.get('path'),
+        })
 
     summary = (
         f"Range {start_date.isoformat()} → {end_date.isoformat()} | "
@@ -630,7 +680,7 @@ def scan_partitions(n_clicks, dataset_key, date_start, date_end):
         f"Missing clean: {missing_clean}, empty clean: {empty_clean} | "
         f"Missing fact: {missing_fact}, empty fact: {empty_fact}"
     )
-    return scan_table, dim_table, summary
+    return scan_row_data, dim_row_data, summary
 
 
 @dash.callback(
@@ -696,7 +746,7 @@ def trigger_refresh(n_clicks, dataset_key, date_start, date_end, sync_mode, refr
         dash.Output('etl-ops-bulk-poll', 'disabled'),
         dash.Output('etl-ops-bulk-status', 'children'),
         dash.Output('etl-ops-bulk-progress', 'value'),
-        dash.Output('etl-ops-bulk-table', 'data'),
+        dash.Output('etl-ops-bulk-table', 'rowData'),
     ],
     dash.Input('etl-ops-bulk-run', 'n_clicks'),
     [
@@ -714,11 +764,18 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
     day_count = (end_date - start_date).days + 1
     if day_count > 31:
         msg = f"ERROR: Range too large ({day_count} days). Limit to 31 days for bulk repair."
-        empty_table = {'head': ['Dataset', 'Range', 'Task', 'State'], 'body': []}
-        return ({'status': 'error', 'message': msg}, True, False, True, msg, 0, empty_table)
+        return ({'status': 'error', 'message': msg}, True, False, True, msg, 0, [])
 
     priority_datasets = ['pos']
-    other_datasets = ['invoice_sales', 'purchases', 'inventory_moves', 'stock_quants', 'product_cost_events', 'product_cost_latest']
+    other_datasets = [
+        'invoice_sales',
+        'purchases',
+        'inventory_moves',
+        'stock_quants',
+        'product_cost_events',
+        'product_cost_latest',
+        'profit',
+    ]
 
     jobs = []
     for ds in priority_datasets + other_datasets:
@@ -739,22 +796,22 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
         'jobs': jobs,
     }
 
-    table = {'head': ['Dataset', 'Range', 'Step', 'Task', 'State'], 'body': []}
+    row_data = []
     for job in jobs:
-        table['body'].append([
-            job['dataset'],
-            f"{job['start']} → {job['end']}",
-            job.get('step_name', '-'),
-            job.get('task_id') or '-',
-            job.get('state') or '-',
-        ])
+        row_data.append({
+            'dataset': job.get('dataset'),
+            'range': f"{job.get('start')} → {job.get('end')}",
+            'step': job.get('step_name', '-') or '-',
+            'task': job.get('task_id') or '-',
+            'state': job.get('state') or '-',
+        })
 
     if not jobs:
         msg = f"OK: No missing/empty partitions found in {start_date.isoformat()} → {end_date.isoformat()}."
-        return ({'status': 'done', 'message': msg, 'jobs': []}, True, False, True, msg, 100, table)
+        return ({'status': 'done', 'message': msg, 'jobs': []}, True, False, True, msg, 100, row_data)
 
     msg = f"Running: queued {len(jobs)} task(s) for {start_date.isoformat()} → {end_date.isoformat()}"
-    return (state, True, False, False, msg, 0, table)
+    return (state, True, False, False, msg, 0, row_data)
 
 
 @dash.callback(
@@ -762,7 +819,7 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
         dash.Output('etl-ops-bulk-state', 'data', allow_duplicate=True),
         dash.Output('etl-ops-bulk-status', 'children', allow_duplicate=True),
         dash.Output('etl-ops-bulk-progress', 'value', allow_duplicate=True),
-        dash.Output('etl-ops-bulk-table', 'data', allow_duplicate=True),
+        dash.Output('etl-ops-bulk-table', 'rowData', allow_duplicate=True),
         dash.Output('etl-ops-bulk-poll', 'disabled', allow_duplicate=True),
     ],
     dash.Input('etl-ops-bulk-poll', 'n_intervals'),
@@ -822,25 +879,31 @@ def bulk_poll(n_intervals, bulk_state):
             elif st == 'PROGRESS' and isinstance(job.get('pct'), (int, float)):
                 progress_sum += float(job.get('pct'))
         pct = int(progress_sum / total)
-    table = {'head': ['Dataset', 'Range', 'Step', 'Task', 'State'], 'body': []}
+    row_data = []
     for job in updated_jobs:
         step_display = job.get('step_name', '-')
         if job.get('state') == 'PROGRESS' and isinstance(job.get('pct'), (int, float)):
             step_display = f"{step_display} ({int(job.get('pct'))}%)"
-
-        table['body'].append([
-            job['dataset'],
-            f"{job['start']} → {job['end']}",
-            step_display,
-            job.get('task_id') or '-',
-            job.get('state') or '-',
-        ])
+        row_data.append({
+            'dataset': job.get('dataset') or '-',
+            'range': f"{job.get('start')} → {job.get('end')}",
+            'step': step_display,
+            'task': job.get('task_id') or '-',
+            'state': job.get('state') or '-',
+        })
 
     if done >= total:
         bulk_state['status'] = 'done'
         msg = f"Done: {done}/{total} job(s) finished"
         # Auto-clear dashboard caches if any profit-affecting datasets were processed
-        profit_affecting = {'pos', 'invoice_sales', 'purchases', 'product_cost_events', 'profit'}
+        profit_affecting = {
+            'pos',
+            'invoice_sales',
+            'purchases',
+            'product_cost_events',
+            'product_cost_latest',
+            'profit',
+        }
         processed_datasets = {job.get('dataset') for job in updated_jobs}
         if processed_datasets & profit_affecting:
             try:
@@ -848,10 +911,37 @@ def bulk_poll(n_intervals, bulk_state):
                 msg += " | Cleared dashboard caches"
             except Exception:
                 msg += " | Failed to clear dashboard caches"
-        return bulk_state, msg, 100, table, True
+        return bulk_state, msg, 100, row_data, True
 
     msg = f"Running: {done}/{total} job(s) finished"
-    return bulk_state, msg, pct, table, False
+    return bulk_state, msg, pct, row_data, False
+
+
+@dash.callback(
+    dash.Output('etl-ops-scan-table', 'exportDataAsCsv'),
+    dash.Input('etl-ops-scan-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_etl_ops_scan(n_clicks):
+    return True
+
+
+@dash.callback(
+    dash.Output('etl-ops-dim-table', 'exportDataAsCsv'),
+    dash.Input('etl-ops-dim-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_etl_ops_dim(n_clicks):
+    return True
+
+
+@dash.callback(
+    dash.Output('etl-ops-bulk-table', 'exportDataAsCsv'),
+    dash.Input('etl-ops-bulk-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_etl_ops_bulk(n_clicks):
+    return True
 
 
 @dash.callback(

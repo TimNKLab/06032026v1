@@ -3,6 +3,9 @@ from dash import Dash, dcc, html, Output, Input, State
 import dash_mantine_components as dmc
 from services.cache import init_cache
 
+import importlib
+import pkgutil
+
 from datetime import date
 
 # Track B: Dash 2.14.2 + DMC 2.4.0 compatibility
@@ -146,6 +149,31 @@ app.layout = dmc.MantineProvider(
         ],
     ),
 )
+
+
+def _build_validation_layout():
+    try:
+        import pages  # type: ignore
+        for mod in pkgutil.iter_modules(pages.__path__):
+            if mod.name.startswith("__"):
+                continue
+            importlib.import_module(f"pages.{mod.name}")
+    except Exception:
+        pass
+
+    page_layouts = []
+    for page in dash.page_registry.values():
+        layout = page.get("layout")
+        if layout is None:
+            continue
+        try:
+            page_layouts.append(layout() if callable(layout) else layout)
+        except Exception:
+            continue
+    return html.Div([app.layout, *page_layouts])
+
+
+app.validation_layout = _build_validation_layout()
 
 
 # Callback to toggle mobile navigation drawer

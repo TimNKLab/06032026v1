@@ -2,8 +2,6 @@ import dash
 from dash import dcc
 import dash_mantine_components as dmc
 
-dash.register_page(__name__, path="/_smoke", name="Smoke", title="Smoke Test")
-
 layout = dmc.Container(
     dmc.Stack(
         [
@@ -16,3 +14,5 @@ layout = dmc.Container(
     size="sm",
     py="md"
 )
+
+dash.register_page(__name__, path="/_smoke", name="Smoke", title="Smoke Test", layout=layout)

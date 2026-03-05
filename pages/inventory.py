@@ -1,6 +1,7 @@
 import dash
 from dash import dcc, Output, Input, State
 import dash_mantine_components as dmc
+import dash_ag_grid as dag
 from datetime import date, datetime
 import pandas as pd
 
@@ -182,19 +183,110 @@ def layout():
                                     dmc.Stack(
                                         [
                                             dmc.Text('Stock Levels Table', fw=600, mb='md'),
+                                            dmc.Group(
+                                                [
+                                                    dmc.Button('Export CSV', id='inventory-stock-export', variant='light', size='xs'),
+                                                ],
+                                                justify='flex-end',
+                                            ),
                                             dmc.Box(
-                                                dmc.Table(
+                                                dag.AgGrid(
                                                     id='inventory-stock-table',
-                                                    striped=True,
-                                                    highlightOnHover=True,
-                                                    withTableBorder=True,
-                                                    horizontalSpacing='md',
-                                                    verticalSpacing='xs',
-                                                    fz='xs',
-                                                    data={},
+                                                    columnDefs=[
+                                                        {
+                                                            'field': 'product_name',
+                                                            'headerName': 'SKU',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'minWidth': 200,
+                                                        },
+                                                        {
+                                                            'field': 'product_category',
+                                                            'headerName': 'Category',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'minWidth': 150,
+                                                        },
+                                                        {
+                                                            'field': 'product_brand',
+                                                            'headerName': 'Brand',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'minWidth': 120,
+                                                        },
+                                                        {
+                                                            'field': 'on_hand_qty',
+                                                            'headerName': 'On-hand',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'valueFormatter': {'function': 'params.value ? params.value.toLocaleString() : "0"'},
+                                                            'minWidth': 100,
+                                                        },
+                                                        {
+                                                            'field': 'reserved_qty',
+                                                            'headerName': 'Reserved',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'valueFormatter': {'function': 'params.value ? params.value.toLocaleString() : "0"'},
+                                                            'minWidth': 100,
+                                                        },
+                                                        {
+                                                            'field': 'avg_daily_sold',
+                                                            'headerName': 'Avg Daily Sold',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'valueFormatter': {'function': 'params.value ? params.value.toFixed(2) : "0.00"'},
+                                                            'minWidth': 120,
+                                                        },
+                                                        {
+                                                            'field': 'days_of_cover',
+                                                            'headerName': 'Days of Cover',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'valueFormatter': {'function': 'params.value ? params.value.toFixed(1) : "—"'},
+                                                            'minWidth': 120,
+                                                        },
+                                                        {
+                                                            'field': 'flags',
+                                                            'headerName': 'Flags',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'sortable': True,
+                                                            'resizable': True,
+                                                            'minWidth': 100,
+                                                            'cellRenderer': 'agAnimateShowChangeCellRenderer',
+                                                        },
+                                                    ],
+                                                    defaultColDef={
+                                                        'sortable': True,
+                                                        'filter': True,
+                                                        'resizable': True,
+                                                        'minWidth': 80,
+                                                    },
+                                                    rowData=[],
+                                                    dashGridOptions={
+                                                        'pagination': True,
+                                                        'paginationPageSize': 50,
+                                                        'enableRangeSelection': True,
+                                                        'enableCellTextSelection': True,
+                                                        'animateRows': True,
+                                                    },
+                                                    csvExportParams={
+                                                        'fileName': 'stock_levels.csv',
+                                                    },
                                                 ),
                                                 h=420,
-                                                style={'overflowY': 'auto'},
+                                                style={'height': '100%'},
                                             ),
                                         ]
                                     ),
@@ -320,19 +412,86 @@ def layout():
                                     dmc.Stack(
                                         [
                                             dmc.Text('Sell-through Table', fw=600, mb='md'),
+                                            dmc.Group(
+                                                [
+                                                    dmc.Button('Export CSV', id='inventory-sell-export', variant='light', size='xs'),
+                                                ],
+                                                justify='flex-end',
+                                            ),
                                             dmc.Box(
-                                                dmc.Table(
+                                                dag.AgGrid(
                                                     id='inventory-sell-table',
-                                                    striped=True,
-                                                    highlightOnHover=True,
-                                                    withTableBorder=True,
-                                                    horizontalSpacing='md',
-                                                    verticalSpacing='xs',
-                                                    fz='xs',
-                                                    data={},
+                                                    columnDefs=[
+                                                        {
+                                                            'field': 'product_name',
+                                                            'headerName': 'SKU',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'minWidth': 200,
+                                                        },
+                                                        {
+                                                            'field': 'product_category',
+                                                            'headerName': 'Category',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'minWidth': 150,
+                                                        },
+                                                        {
+                                                            'field': 'product_brand',
+                                                            'headerName': 'Brand',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'minWidth': 120,
+                                                        },
+                                                        {
+                                                            'field': 'begin_on_hand',
+                                                            'headerName': 'Begin On-hand',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'},
+                                                            'minWidth': 130,
+                                                        },
+                                                        {
+                                                            'field': 'units_received',
+                                                            'headerName': 'Units Received',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'},
+                                                            'minWidth': 130,
+                                                        },
+                                                        {
+                                                            'field': 'units_sold',
+                                                            'headerName': 'Units Sold',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'},
+                                                            'minWidth': 110,
+                                                        },
+                                                        {
+                                                            'field': 'sell_through',
+                                                            'headerName': 'Sell-through',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'valueFormatter': {
+                                                                'function': 'params.value != null ? (params.value * 100).toFixed(1) + "%" : "0.0%"'
+                                                            },
+                                                            'minWidth': 120,
+                                                        },
+                                                    ],
+                                                    defaultColDef={
+                                                        'sortable': True,
+                                                        'filter': True,
+                                                        'resizable': True,
+                                                        'minWidth': 80,
+                                                    },
+                                                    rowData=[],
+                                                    dashGridOptions={
+                                                        'pagination': True,
+                                                        'paginationPageSize': 50,
+                                                    },
+                                                    csvExportParams={
+                                                        'fileName': 'sell_through.csv',
+                                                    },
                                                 ),
                                                 h=420,
-                                                style={'overflowY': 'auto'},
+                                                style={'height': '100%'},
                                             ),
                                         ]
                                     ),
@@ -451,19 +610,86 @@ def layout():
                                     dmc.Stack(
                                         [
                                             dmc.Text('ABC Product Table', fw=600, mb='md'),
+                                            dmc.Group(
+                                                [
+                                                    dmc.Button('Export CSV', id='inventory-abc-export', variant='light', size='xs'),
+                                                ],
+                                                justify='flex-end',
+                                            ),
                                             dmc.Box(
-                                                dmc.Table(
+                                                dag.AgGrid(
                                                     id='inventory-abc-table',
-                                                    striped=True,
-                                                    highlightOnHover=True,
-                                                    withTableBorder=True,
-                                                    horizontalSpacing='md',
-                                                    verticalSpacing='xs',
-                                                    fz='xs',
-                                                    data={},
+                                                    columnDefs=[
+                                                        {
+                                                            'field': 'product_name',
+                                                            'headerName': 'SKU',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'minWidth': 200,
+                                                        },
+                                                        {
+                                                            'field': 'product_category',
+                                                            'headerName': 'Category',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'minWidth': 150,
+                                                        },
+                                                        {
+                                                            'field': 'product_brand',
+                                                            'headerName': 'Brand',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'minWidth': 120,
+                                                        },
+                                                        {
+                                                            'field': 'revenue',
+                                                            'headerName': 'Revenue',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'valueFormatter': {
+                                                                'function': 'params.value != null ? "Rp " + params.value.toLocaleString() : "Rp 0"'
+                                                            },
+                                                            'minWidth': 120,
+                                                        },
+                                                        {
+                                                            'field': 'quantity',
+                                                            'headerName': 'Units',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'},
+                                                            'minWidth': 90,
+                                                        },
+                                                        {
+                                                            'field': 'cumulative_share',
+                                                            'headerName': 'Cumulative %',
+                                                            'type': 'numericColumn',
+                                                            'filter': 'agNumberColumnFilter',
+                                                            'valueFormatter': {
+                                                                'function': 'params.value != null ? (params.value * 100).toFixed(1) + "%" : "0.0%"'
+                                                            },
+                                                            'minWidth': 120,
+                                                        },
+                                                        {
+                                                            'field': 'abc_class',
+                                                            'headerName': 'Class',
+                                                            'filter': 'agTextColumnFilter',
+                                                            'minWidth': 90,
+                                                        },
+                                                    ],
+                                                    defaultColDef={
+                                                        'sortable': True,
+                                                        'filter': True,
+                                                        'resizable': True,
+                                                        'minWidth': 80,
+                                                    },
+                                                    rowData=[],
+                                                    dashGridOptions={
+                                                        'pagination': True,
+                                                        'paginationPageSize': 50,
+                                                    },
+                                                    csvExportParams={
+                                                        'fileName': 'abc_products.csv',
+                                                    },
                                                 ),
                                                 h=420,
-                                                style={'overflowY': 'auto'},
+                                                style={'height': '100%'},
                                             ),
                                         ]
                                     ),
@@ -543,7 +769,7 @@ def _normalize_display_number(value: float, abs_tol: float = 1e-9) -> float:
 @dash.callback(
     Output('inventory-abc-pareto', 'figure'),
     Output('inventory-abc-category', 'figure'),
-    Output('inventory-abc-table', 'data'),
+    Output('inventory-abc-table', 'rowData'),
     Output('inventory-abc-kpi-a-count', 'children'),
     Output('inventory-abc-kpi-b-count', 'children'),
     Output('inventory-abc-kpi-c-count', 'children'),
@@ -579,33 +805,34 @@ def update_abc_analysis(n_clicks, date_from, date_until):
     b_count, b_share = _summary_value('B')
     c_count, c_share = _summary_value('C')
 
-    table_data = {
-        'head': ['SKU', 'Category', 'Brand', 'Revenue', 'Units', 'Cumulative %', 'Class'],
-        'body': []
-    }
-
     if items_df.empty:
-        table_data['body'].append(['No data available', '', '', '', '', '', ''])
+        row_data = [{
+            'product_name': 'No data available',
+            'product_category': '',
+            'product_brand': '',
+            'revenue': 0.0,
+            'quantity': 0.0,
+            'cumulative_share': 0.0,
+            'abc_class': '',
+        }]
     else:
         display_df = items_df.sort_values('revenue', ascending=False).head(50)
+        row_data = []
         for _, row in display_df.iterrows():
-            revenue = float(row.get('revenue') or 0)
-            quantity = float(row.get('quantity') or 0)
-            cumulative = float(row.get('cumulative_share') or 0)
-            table_data['body'].append([
-                _safe_label(row.get('product_name'), f"Product {row.get('product_id', '')}"),
-                _safe_label(row.get('product_category'), 'Unknown Category'),
-                _safe_label(row.get('product_brand'), 'Unknown Brand'),
-                f"Rp {revenue:,.0f}",
-                f"{quantity:,.0f}",
-                f"{cumulative:.1%}",
-                _safe_label(row.get('abc_class'), 'C'),
-            ])
+            row_data.append({
+                'product_name': _safe_label(row.get('product_name'), f"Product {row.get('product_id', '')}"),
+                'product_category': _safe_label(row.get('product_category'), 'Unknown Category'),
+                'product_brand': _safe_label(row.get('product_brand'), 'Unknown Brand'),
+                'revenue': float(row.get('revenue') or 0),
+                'quantity': float(row.get('quantity') or 0),
+                'cumulative_share': float(row.get('cumulative_share') or 0),
+                'abc_class': _safe_label(row.get('abc_class'), 'C'),
+            })
 
     return (
         pareto_fig,
         category_fig,
-        table_data,
+        row_data,
         f"{a_count:,}",
         f"{b_count:,}",
         f"{c_count:,}",
@@ -618,7 +845,7 @@ def update_abc_analysis(n_clicks, date_from, date_until):
 @dash.callback(
     Output('inventory-stock-cover', 'figure'),
     Output('inventory-stock-low', 'figure'),
-    Output('inventory-stock-table', 'data'),
+    Output('inventory-stock-table', 'rowData'),
     Output('inventory-stock-kpi-onhand', 'children'),
     Output('inventory-stock-kpi-low', 'children'),
     Output('inventory-stock-kpi-dead', 'children'),
@@ -650,46 +877,57 @@ def update_stock_levels(n_clicks, date_value):
         summary.get('low_stock_days', DEFAULT_LOW_STOCK_DAYS),
     )
 
-    table_data = {
-        'head': ['SKU', 'Category', 'Brand', 'On-hand', 'Reserved', 'Avg Daily Sold', 'Days of Cover', 'Flags'],
-        'body': []
-    }
-
+    # Prepare data for AG-Grid (rowData = list[dict])
     if items_df.empty:
-        table_data['body'].append(['No data available', '', '', '', '', '', '', ''])
+        table_df = pd.DataFrame([{
+            'product_name': 'No data available',
+            'product_category': '',
+            'product_brand': '',
+            'on_hand_qty': 0,
+            'reserved_qty': 0,
+            'avg_daily_sold': 0,
+            'days_of_cover': None,
+            'flags': '',
+        }])
     else:
-        display_df = items_df.sort_values('on_hand_qty', ascending=False).head(50)
+        display_df = items_df.sort_values('on_hand_qty', ascending=False).head(50).copy()
+        
+        # Process each row for AG-Grid
+        processed_rows = []
         for _, row in display_df.iterrows():
             on_hand = _normalize_display_number(row.get('on_hand_qty') or 0)
             reserved = _normalize_display_number(row.get('reserved_qty') or 0)
             avg_daily = _normalize_display_number(row.get('avg_daily_sold') or 0)
             days_cover = row.get('days_of_cover')
-            days_label = '—' if pd.isna(days_cover) else f"{float(days_cover):.1f}"
-
+            
             flags = []
             if bool(row.get('low_stock_flag')):
                 flags.append('Low')
             if bool(row.get('dead_stock_flag')):
                 flags.append('Dead')
             flags_label = ', '.join(flags) if flags else '—'
+            
+            processed_rows.append({
+                'product_name': _safe_label(row.get('product_name'), f"Product {row.get('product_id', '')}"),
+                'product_category': _safe_label(row.get('product_category'), 'Unknown Category'),
+                'product_brand': _safe_label(row.get('product_brand'), 'Unknown Brand'),
+                'on_hand_qty': on_hand,
+                'reserved_qty': reserved,
+                'avg_daily_sold': avg_daily,
+                'days_of_cover': days_cover,
+                'flags': flags_label,
+            })
+        
+        table_df = pd.DataFrame(processed_rows)
 
-            table_data['body'].append([
-                _safe_label(row.get('product_name'), f"Product {row.get('product_id', '')}"),
-                _safe_label(row.get('product_category'), 'Unknown Category'),
-                _safe_label(row.get('product_brand'), 'Unknown Brand'),
-                f"{on_hand:,.0f}",
-                f"{reserved:,.0f}",
-                f"{avg_daily:,.2f}",
-                days_label,
-                flags_label,
-            ])
+    row_data = table_df.to_dict('records')
 
     snapshot_label = _format_stock_levels_as_of_label(stock_result)
 
     return (
         cover_fig,
         low_fig,
-        table_data,
+        row_data,
         f"{_normalize_display_number(summary.get('total_on_hand', 0)):,.0f}",
         f"{summary.get('low_stock_count', 0):,}",
         f"{summary.get('dead_stock_count', 0):,}",
@@ -698,9 +936,18 @@ def update_stock_levels(n_clicks, date_value):
 
 
 @dash.callback(
+    Output('inventory-stock-table', 'exportDataAsCsv'),
+    Input('inventory-stock-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_stock_levels(n_clicks):
+    return True
+
+
+@dash.callback(
     Output('inventory-sell-category', 'figure'),
     Output('inventory-sell-top-bottom', 'figure'),
-    Output('inventory-sell-table', 'data'),
+    Output('inventory-sell-table', 'rowData'),
     Output('inventory-sell-kpi-sellthrough', 'children'),
     Output('inventory-sell-kpi-sold', 'children'),
     Output('inventory-sell-kpi-received', 'children'),
@@ -724,40 +971,57 @@ def update_sell_through(n_clicks, date_from, date_until):
     category_fig = build_sell_through_by_category_chart(categories_df, start_date, end_date)
     top_bottom_fig = build_sell_through_top_bottom_chart(items_df, start_date, end_date)
 
-    table_data = {
-        'head': ['SKU', 'Category', 'Brand', 'Begin On-hand', 'Units Received', 'Units Sold', 'Sell-through'],
-        'body': []
-    }
-
     if items_df.empty:
-        table_data['body'].append(['No data available', '', '', '', '', '', ''])
+        row_data = [{
+            'product_name': 'No data available',
+            'product_category': '',
+            'product_brand': '',
+            'begin_on_hand': 0.0,
+            'units_received': 0.0,
+            'units_sold': 0.0,
+            'sell_through': 0.0,
+        }]
     else:
         display_df = items_df.sort_values('units_sold', ascending=False).head(50)
+        row_data = []
         for _, row in display_df.iterrows():
-            begin_on_hand = float(row.get('begin_on_hand') or 0)
-            units_received = float(row.get('units_received') or 0)
-            units_sold = float(row.get('units_sold') or 0)
-            sell_through = float(row.get('sell_through') or 0)
-
-            table_data['body'].append([
-                _safe_label(row.get('product_name'), f"Product {row.get('product_id', '')}"),
-                _safe_label(row.get('product_category'), 'Unknown Category'),
-                _safe_label(row.get('product_brand'), 'Unknown Brand'),
-                f"{begin_on_hand:,.0f}",
-                f"{units_received:,.0f}",
-                f"{units_sold:,.0f}",
-                f"{sell_through:.1%}",
-            ])
+            row_data.append({
+                'product_name': _safe_label(row.get('product_name'), f"Product {row.get('product_id', '')}"),
+                'product_category': _safe_label(row.get('product_category'), 'Unknown Category'),
+                'product_brand': _safe_label(row.get('product_brand'), 'Unknown Brand'),
+                'begin_on_hand': float(row.get('begin_on_hand') or 0),
+                'units_received': float(row.get('units_received') or 0),
+                'units_sold': float(row.get('units_sold') or 0),
+                'sell_through': float(row.get('sell_through') or 0),
+            })
 
     snapshot_label = _format_snapshot_label(snapshot_date)
 
     return (
         category_fig,
         top_bottom_fig,
-        table_data,
+        row_data,
         f"{summary.get('sell_through', 0):.1%}",
         f"{summary.get('units_sold', 0):,.0f}",
         f"{summary.get('units_received', 0):,.0f}",
         f"{summary.get('begin_on_hand', 0):,.0f}",
         snapshot_label,
     )
+
+
+@dash.callback(
+    Output('inventory-sell-table', 'exportDataAsCsv'),
+    Input('inventory-sell-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_sell_through(n_clicks):
+    return True
+
+
+@dash.callback(
+    Output('inventory-abc-table', 'exportDataAsCsv'),
+    Input('inventory-abc-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_abc_table(n_clicks):
+    return True

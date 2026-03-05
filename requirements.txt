@@ -3,6 +3,7 @@ odoorpc==0.10.1
 gunicorn==23.0.0
 python-dotenv
 dash-mantine-components==2.4.0
+dash-ag-grid==31.2.0
 
 polars
 plotly

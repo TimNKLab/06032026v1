@@ -136,6 +136,24 @@ def force_refresh_day(self, dataset_key: str, target_date: str, refresh_dims: bo
             "aggregate_paths": agg_paths,
         }
 
+    if dataset_key == "product_cost_events":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_events", "step_name": "Cost events", "pct": 50})
+        cost_events_path = update_product_cost_events.run(target_date)
+        return {
+            "dataset": dataset_key,
+            "date": target_date,
+            "cost_events_path": cost_events_path,
+        }
+
+    if dataset_key == "product_cost_latest":
+        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_snapshot", "step_name": "Cost snapshot", "pct": 50})
+        cost_snapshot_path = update_product_cost_latest_daily.run(target_date)
+        return {
+            "dataset": dataset_key,
+            "date": target_date,
+            "cost_snapshot_path": cost_snapshot_path,
+        }
+
     raise ValueError(f"Unsupported dataset_key: {dataset_key}")
 
 # ============================================================================

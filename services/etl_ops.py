@@ -26,6 +26,8 @@ from etl.config import (
     DIM_USERS_FILE,
     DIM_COMPANIES_FILE,
     DIM_LOTS_FILE,
+    FACT_PRODUCT_COST_EVENTS_PATH,
+    FACT_PRODUCT_COST_LATEST_DAILY_PATH,
 )
 from etl_tasks import (
     daily_etl_pipeline,
@@ -118,6 +120,28 @@ DATASETS: Dict[str, DatasetConfig] = {
         fact_base=f"{STAR_SCHEMA_PATH}/agg_profit_daily",
         fact_filename="agg_profit_daily_{date}.parquet",
         task=daily_profit_pipeline,
+    ),
+    "product_cost_events": DatasetConfig(
+        key="product_cost_events",
+        label="Product Cost Events",
+        raw_base=None,
+        raw_filename=None,
+        clean_base=None,
+        clean_filename=None,
+        fact_base=FACT_PRODUCT_COST_EVENTS_PATH,
+        fact_filename="fact_product_cost_events_{date}.parquet",
+        task=None,
+    ),
+    "product_cost_latest": DatasetConfig(
+        key="product_cost_latest",
+        label="Product Cost Latest Daily",
+        raw_base=None,
+        raw_filename=None,
+        clean_base=None,
+        clean_filename=None,
+        fact_base=FACT_PRODUCT_COST_LATEST_DAILY_PATH,
+        fact_filename="fact_product_cost_latest_daily_{date}.parquet",
+        task=None,
     ),
 }
 

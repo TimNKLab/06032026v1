@@ -74,6 +74,7 @@ def _kpi_card(label, vid, vdef, sid=None, sdef=None, color='blue'):
 # ── layout ────────────────────────────────────────────────────────
 
 layout = dmc.Container([
+    dcc.Location(id='overview-location', refresh=False),
     dmc.Paper(
         dmc.Group([
             dmc.Title('Executive Dashboard', order=4),
@@ -154,8 +155,7 @@ layout = dmc.Container([
     Output('kpi-transactions',    'children'),
     Output('sales-global-query-context', 'data'),
     Output('overview-view-state',        'data'),
-    Input('app-location',    'pathname'),
-    Input('btn-apply-dates', 'n_clicks'),
+    Input('overview-location', 'pathname'),
     State('overview-period', 'value'),
     State('date-from',       'value'),
     State('date-until',      'value'),
@@ -164,7 +164,7 @@ layout = dmc.Container([
     State('overview-view-state', 'data'),
     prevent_initial_call=False,
 )
-def update_overview(pathname, n_clicks,
+def update_overview(pathname,
                     period_st, dfrom_st, duntil_st, tfrom_st, tuntil_st,
                     view_state):
 
@@ -172,15 +172,15 @@ def update_overview(pathname, n_clicks,
     trigs = {t['prop_id'].split('.')[0] for t in (dash.callback_context.triggered or [])}
 
     # ── DEBUG — remove once it works ──────────────────────────
-    print(f"[overview] trigs={trigs}  pathname={pathname}  n_clicks={n_clicks}  "
+    print(f"[overview] trigs={trigs}  pathname={pathname}  "
           f"vs={'HAS ' + str(len(view_state)) + ' keys' if view_state else 'NONE'}")
 
     # ignore if we're on a different page
     if pathname != '/':
         raise PreventUpdate
 
-    # ── APPLY pressed ─────────────────────────────────────────
-    if 'btn-apply-dates' in trigs:
+    # ── APPLY pressed (detected via pathname change or view_state) ─────────────────────────────────────────
+    if 'btn-apply-dates' in trigs or (view_state and view_state.get('has_data') and pathname == '/'):
         start  = _coerce(dfrom_st)  or date.today()
         end    = _coerce(duntil_st) or start
         period = period_st or 'daily'
@@ -247,23 +247,25 @@ def update_overview(pathname, n_clicks,
     if view_state and view_state.get('has_data'):
         print("[overview] RESTORING from view_state")
         vs = view_state
-        start  = _coerce(vs['date_from'])  or date.today()
-        end    = _coerce(vs['date_until']) or start
+        start = _coerce(vs.get('date_from'))
+        end   = _coerce(vs.get('date_until'))
         period = vs.get('period', 'daily')
-
-        # rebuild the figure from params — this is fast
         fig = _build_figure(start, end, period)
+
+        global_ctx = dict(
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+            period=period,
+            source='overview',
+        )
 
         return (
             fig,
-            vs.get('kpi_revenue',      'Rp 0'),
-            vs.get('kpi_revenue_delta', '–'),
-            vs.get('kpi_gross_profit', 'Rp 0'),
-            vs.get('kpi_gross_margin', '0.0% margin'),
-            vs.get('kpi_atv',         'Rp 0'),
-            vs.get('kpi_qty_sold',    '0 items'),
-            vs.get('kpi_transactions','0 transactions'),
-            NO, NO,
+            vs.get('kpi_revenue', 'Rp 0'),      vs.get('kpi_revenue_delta', '–'),
+            vs.get('kpi_gross_profit', 'Rp 0'), vs.get('kpi_gross_margin', '0.0% margin'),
+            vs.get('kpi_atv', 'Rp 0'),          vs.get('kpi_qty_sold', '0 items'),
+            vs.get('kpi_transactions', '0 transactions'),
+            global_ctx, vs,
         )
 
     # ── FIRST VISIT ───────────────────────────────────────────

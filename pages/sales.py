@@ -3,6 +3,7 @@ import dash
 from dash import dcc, html, Output, Input, State
 from dash.exceptions import PreventUpdate
 import dash_mantine_components as dmc
+import dash_ag_grid as dag
 from datetime import date, timedelta
 
 # Calculate MTD (Month-to-Date) as sensible default
@@ -266,24 +267,68 @@ def layout():
                                     justify='space-between',
                                     align='center'
                                 ),
+                                dmc.Group(
+                                    [
+                                        dmc.Button('Export CSV', id='sales-top-products-export', variant='light', size='xs'),
+                                    ],
+                                    justify='flex-end',
+                                ),
                                 dmc.Box(
                                     dcc.Loading(
-                                        dmc.Table(
+                                        dag.AgGrid(
                                             id='sales-top-products-table',
-                                            striped=True,
-                                            highlightOnHover=True,
-                                            withTableBorder=True,
-                                            horizontalSpacing="md",
-                                            verticalSpacing="xs",
-                                            fz='xs',
-                                            # Table data will be populated via callback
-                                            data={},  # Placeholder
+                                            columnDefs=[
+                                                {
+                                                    'field': 'product_name',
+                                                    'headerName': 'Name',
+                                                    'filter': 'agTextColumnFilter',
+                                                    'minWidth': 220,
+                                                },
+                                                {
+                                                    'field': 'category',
+                                                    'headerName': 'Category',
+                                                    'filter': 'agTextColumnFilter',
+                                                    'minWidth': 150,
+                                                },
+                                                {
+                                                    'field': 'quantity_sold',
+                                                    'headerName': 'Quantity Sold',
+                                                    'type': 'numericColumn',
+                                                    'filter': 'agNumberColumnFilter',
+                                                    'valueFormatter': {'function': 'params.value != null ? params.value.toLocaleString() : "0"'},
+                                                    'minWidth': 130,
+                                                },
+                                                {
+                                                    'field': 'total_unit_price',
+                                                    'headerName': 'Revenue',
+                                                    'type': 'numericColumn',
+                                                    'filter': 'agNumberColumnFilter',
+                                                    'valueFormatter': {
+                                                        'function': 'params.value != null ? "Rp " + params.value.toLocaleString() : "Rp 0"'
+                                                    },
+                                                    'minWidth': 130,
+                                                },
+                                            ],
+                                            defaultColDef={
+                                                'sortable': True,
+                                                'filter': True,
+                                                'resizable': True,
+                                                'minWidth': 80,
+                                            },
+                                            rowData=[],
+                                            dashGridOptions={
+                                                'pagination': True,
+                                                'paginationPageSize': 50,
+                                            },
+                                            csvExportParams={
+                                                'fileName': 'sales_top_products.csv',
+                                            },
                                         ),
                                         type='dot',
                                         color='#228be6'
                                     ),
                                     h=400,  # Fixed height
-                                    style={"overflowY": "auto"}  # Vertical scrolling
+                                    style={'height': '100%'}
                                 )
                             ]),
                             p='md',
@@ -558,7 +603,7 @@ def update_kpi_cards(global_query_context, n_clicks, n_clicks_mtd, n_clicks_qtd,
 
 
 @dash.callback(
-    Output('sales-top-products-table', 'data'),
+    Output('sales-top-products-table', 'rowData'),
     Input('sales-query-context', 'data'),
     prevent_initial_call=False,
 )
@@ -578,32 +623,40 @@ def update_top_products_table(query_context):
         print(f"[TIMING] get_top_products: {time.time() - query_start:.3f}s")
         
         if top_products_df.empty:
-            return {
-                'head': ['Name', 'Category', 'Quantity Sold', 'Revenue'],
-                'body': [['No data available', '', '', '']]
-            }
-        
-        # Format the data for dmc.Table
-        table_data = {
-            'head': ['Name', 'Category', 'Quantity Sold', 'Revenue'],
-            'body': []
-        }
-        
+            return [{
+                'product_name': 'No data available',
+                'category': '',
+                'quantity_sold': 0,
+                'total_unit_price': 0.0,
+            }]
+
+        row_data = []
         for _, row in top_products_df.iterrows():
-            table_data['body'].append([
-                str(row['product_name']),
-                str(row['category']),
-                f"{int(row['quantity_sold']):,}",
-                f"Rp {row['total_unit_price']:,.0f}"
-            ])
-        
+            row_data.append({
+                'product_name': str(row.get('product_name') or ''),
+                'category': str(row.get('category') or ''),
+                'quantity_sold': int(row.get('quantity_sold') or 0),
+                'total_unit_price': float(row.get('total_unit_price') or 0),
+            })
+
         _log_timing('update_top_products_table', start_time)
-        return table_data
+        return row_data
         
     except Exception as e:
         print(f"Error updating top products table: {e}")
         _log_timing('update_top_products_table (error)', start_time)
-        return {
-            'head': ['Name', 'Category', 'Quantity Sold', 'Revenue'],
-            'body': [['Error loading data', '', '', '']]
-        }
+        return [{
+            'product_name': 'Error loading data',
+            'category': '',
+            'quantity_sold': 0,
+            'total_unit_price': 0.0,
+        }]
+
+
+@dash.callback(
+    Output('sales-top-products-table', 'exportDataAsCsv'),
+    Input('sales-top-products-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_sales_top_products(n_clicks):
+    return True
