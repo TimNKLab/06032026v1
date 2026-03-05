@@ -3,7 +3,7 @@ from dash import dcc, Output, Input, State
 from dash.exceptions import PreventUpdate
 import dash_mantine_components as dmc
 import plotly.express as px
-from datetime import date
+from datetime import date, timedelta
 
 from services.profit_metrics import query_profit_summary, query_profit_trends
 
@@ -155,35 +155,92 @@ layout = dmc.Container([
     Output('kpi-transactions',    'children'),
     Output('sales-global-query-context', 'data'),
     Output('overview-view-state',        'data'),
+    Output('overview-period',     'value'),
+    Output('date-from',           'value'),
+    Output('date-until',          'value'),
     Input('overview-location', 'pathname'),
-    State('overview-period', 'value'),
-    State('date-from',       'value'),
-    State('date-until',      'value'),
+    Input('btn-apply-dates',  'n_clicks'),
+    Input('overview-period',  'value'),
+    Input('date-from',        'value'),
+    Input('date-until',       'value'),
+    Input('btn-weekly',       'n_clicks'),
+    Input('btn-monthly',      'n_clicks'),
+    Input('btn-quarterly',    'n_clicks'),
+    Input('btn-semesterly',   'n_clicks'),
+    Input('btn-yearly',       'n_clicks'),
     State('time-from',       'value'),
     State('time-until',      'value'),
     State('overview-view-state', 'data'),
     prevent_initial_call=False,
 )
 def update_overview(pathname,
-                    period_st, dfrom_st, duntil_st, tfrom_st, tuntil_st,
+                    apply_n,
+                    period_in,
+                    dfrom_in,
+                    duntil_in,
+                    weekly_n,
+                    monthly_n,
+                    quarterly_n,
+                    semesterly_n,
+                    yearly_n,
+                    tfrom_st, tuntil_st,
                     view_state):
 
     NO = dash.no_update
-    trigs = {t['prop_id'].split('.')[0] for t in (dash.callback_context.triggered or [])}
+    ctx = dash.callback_context
+    trig = getattr(ctx, 'triggered_id', None)
 
     # ── DEBUG — remove once it works ──────────────────────────
-    print(f"[overview] trigs={trigs}  pathname={pathname}  "
+    print(f"[overview] trig={trig}  pathname={pathname}  "
           f"vs={'HAS ' + str(len(view_state)) + ' keys' if view_state else 'NONE'}")
 
     # ignore if we're on a different page
     if pathname != '/':
         raise PreventUpdate
 
-    # ── APPLY pressed (detected via pathname change or view_state) ─────────────────────────────────────────
-    if 'btn-apply-dates' in trigs or (view_state and view_state.get('has_data') and pathname == '/'):
-        start  = _coerce(dfrom_st)  or date.today()
-        end    = _coerce(duntil_st) or start
-        period = period_st or 'daily'
+    def _preset_range(key: str) -> tuple[date, date]:
+        today = date.today()
+        if key == 'weekly':
+            return (today - timedelta(days=6), today)
+        if key == 'monthly':
+            return (today.replace(day=1), today)
+        if key == 'quarterly':
+            q = (today.month - 1) // 3
+            m0 = q * 3 + 1
+            return (date(today.year, m0, 1), today)
+        if key == 'semesterly':
+            m0 = 1 if today.month <= 6 else 7
+            return (date(today.year, m0, 1), today)
+        if key == 'yearly':
+            return (date(today.year, 1, 1), today)
+        return (today, today)
+
+    # Base values
+    start = _coerce(dfrom_in) or date.today()
+    end = _coerce(duntil_in) or start
+    period = period_in or 'daily'
+
+    # Handle preset range buttons
+    preset_clicked = {
+        'btn-weekly': 'weekly',
+        'btn-monthly': 'monthly',
+        'btn-quarterly': 'quarterly',
+        'btn-semesterly': 'semesterly',
+        'btn-yearly': 'yearly',
+    }
+    if trig in preset_clicked:
+        start, end = _preset_range(preset_clicked[trig])
+
+    # If the user changed the period segmented control, keep dates but update grouping
+    if trig == 'overview-period' and period_in:
+        period = period_in
+
+    # If user clicked Apply, just compute using the current state values
+    if trig == 'btn-apply-dates':
+        pass
+
+    # ── render (compute from selected dates + period) ─────────────────────────────────────────
+    if pathname == '/':
 
         fig = _build_figure(start, end, period)
 
@@ -241,6 +298,9 @@ def update_overview(pathname,
             vs['kpi_atv'],          vs['kpi_qty_sold'],
             vs['kpi_transactions'],
             global_ctx, vs,
+            period,
+            start,
+            end,
         )
 
     # ── NAV-BACK: restore from view_state (rebuild fig) ──────
@@ -266,6 +326,9 @@ def update_overview(pathname,
             vs.get('kpi_atv', 'Rp 0'),          vs.get('kpi_qty_sold', '0 items'),
             vs.get('kpi_transactions', '0 transactions'),
             global_ctx, vs,
+            vs.get('period', 'daily'),
+            _coerce(vs.get('date_from')) or date.today(),
+            _coerce(vs.get('date_until')) or date.today(),
         )
 
     # ── FIRST VISIT ───────────────────────────────────────────
@@ -275,4 +338,7 @@ def update_overview(pathname,
         'Rp 0', '–', 'Rp 0', '0.0% margin',
         'Rp 0', '0 items', '0 transactions',
         NO, NO,
+        'daily',
+        date.today(),
+        date.today(),
     )
