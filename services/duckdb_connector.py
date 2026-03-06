@@ -125,6 +125,17 @@ class DuckDBManager:
             else None
         )
 
+        product_barcode_col = (
+            "product_barcode" if "product_barcode" in products_cols
+            else "barcode" if "barcode" in products_cols
+            else None
+        )
+        product_sku_col = (
+            "product_sku" if "product_sku" in products_cols
+            else "default_code" if "default_code" in products_cols
+            else None
+        )
+
         category_leaf_col = (
             "product_category" if "product_category" in categories_cols
             else "category_name" if "category_name" in categories_cols
@@ -554,7 +565,9 @@ class DuckDBManager:
                 {f"COALESCE({product_name_col}, '')" if product_name_col else "''"} AS product_name,
                 {product_category_col if product_category_col else "NULL"} AS product_category,
                 {product_parent_category_col if product_parent_category_col else "NULL"} AS product_parent_category,
-                {f"COALESCE({product_brand_col}, '')" if product_brand_col else "''"} AS product_brand
+                {f"COALESCE({product_brand_col}, '')" if product_brand_col else "''"} AS product_brand,
+                {f"COALESCE({product_barcode_col}, '')" if product_barcode_col else "''"} AS product_barcode,
+                {f"COALESCE({product_sku_col}, '')" if product_sku_col else "''"} AS product_sku
             FROM read_parquet('{dim_products}', union_by_name=True)
         """)
 

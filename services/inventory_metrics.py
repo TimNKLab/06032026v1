@@ -83,6 +83,8 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
             COALESCE(p.product_name, 'Product ' || o.product_id::VARCHAR) AS product_name,
             COALESCE(p.product_category, 'Unknown Category') AS product_category,
             COALESCE(p.product_brand, 'Unknown Brand') AS product_brand,
+            COALESCE(p.product_barcode, '') AS product_barcode,
+            COALESCE(p.product_sku, '') AS product_sku,
             o.on_hand_qty,
             o.reserved_qty,
             COALESCE(s.units_sold, 0) AS units_sold
@@ -184,6 +186,7 @@ def get_stock_levels_ledger(
     if cutoff_ts_local < _LEDGER_BASELINE_TS:
         empty_items = pd.DataFrame(columns=[
             'product_id', 'product_name', 'product_category', 'product_brand',
+            'product_barcode', 'product_sku',
             'on_hand_qty', 'reserved_qty', 'units_sold', 'avg_daily_sold',
             'days_of_cover', 'low_stock_flag', 'dead_stock_flag',
         ])
@@ -232,7 +235,13 @@ def get_stock_levels_ledger(
 
     products_df = conn.execute(
         """
-        SELECT product_id, product_name, product_category, product_brand
+        SELECT
+            product_id,
+            product_name,
+            product_category,
+            product_brand,
+            product_barcode,
+            product_sku
         FROM dim_products
         """
     ).df()
@@ -241,6 +250,10 @@ def get_stock_levels_ledger(
     df['product_name'] = df['product_name'].fillna(df['product_id'].apply(lambda v: f'Product {v}'))
     df['product_category'] = df['product_category'].fillna('Unknown Category')
     df['product_brand'] = df['product_brand'].fillna('Unknown Brand')
+    if 'product_barcode' in df.columns:
+        df['product_barcode'] = df['product_barcode'].fillna('')
+    if 'product_sku' in df.columns:
+        df['product_sku'] = df['product_sku'].fillna('')
 
     df['avg_daily_sold'] = df['units_sold'] / float(lookback_days)
     df['days_of_cover'] = df['on_hand_qty'] / df['avg_daily_sold'].replace(0, pd.NA)
@@ -261,6 +274,7 @@ def get_stock_levels_ledger(
 
     df = df[[
         'product_id', 'product_name', 'product_category', 'product_brand',
+        'product_barcode', 'product_sku',
         'on_hand_qty', 'reserved_qty', 'units_sold', 'avg_daily_sold',
         'days_of_cover', 'low_stock_flag', 'dead_stock_flag',
     ]].copy()
@@ -439,6 +453,8 @@ def _query_sell_through(snapshot_date: date, start_date: date, end_date: date) -
             COALESCE(p.product_name, 'Product ' || c.product_id::VARCHAR) AS product_name,
             COALESCE(p.product_category, 'Unknown Category') AS product_category,
             COALESCE(p.product_brand, 'Unknown Brand') AS product_brand,
+            COALESCE(p.product_barcode, '') AS product_barcode,
+            COALESCE(p.product_sku, '') AS product_sku,
             c.begin_on_hand,
             c.units_received,
             c.units_incoming,
@@ -467,6 +483,7 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
     snapshot_date = _get_snapshot_date(start_date)
     empty_items = pd.DataFrame(columns=[
         "product_id", "product_name", "product_category", "product_brand",
+        "product_barcode", "product_sku",
         "begin_on_hand", "units_received", "units_incoming", "units_production_in",
         "units_adjustment_net", "units_production_out", "units_transfer_net",
         "units_sold", "sell_through",
@@ -561,12 +578,14 @@ def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
             COALESCE(p.product_name, 'Product ' || f.product_id::VARCHAR) AS product_name,
             COALESCE(p.product_category, 'Unknown Category') AS product_category,
             COALESCE(p.product_brand, 'Unknown Brand') AS product_brand,
+            COALESCE(p.product_barcode, '') AS product_barcode,
+            COALESCE(p.product_sku, '') AS product_sku,
             SUM(f.revenue) AS revenue,
             SUM(f.quantity) AS quantity
         FROM fact_sales_all f
         LEFT JOIN dim_products p ON f.product_id = p.product_id
         WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
-        GROUP BY 1, 2, 3, 4
+        GROUP BY 1, 2, 3, 4, 5, 6
         ORDER BY revenue DESC
     """
 

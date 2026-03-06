@@ -88,7 +88,7 @@ def _read_all(model, fields: Sequence[str], domain: Optional[Sequence] = None, b
 def _load_products(odoo, star_schema_path: str) -> int:
     logger.info("Fetching products...")
     Product = odoo.env["product.product"]
-    fields = ["id", "name", "categ_id", "x_studio_brand_id"]
+    fields = ["id", "name", "categ_id", "x_studio_brand_id", "barcode", "default_code"]
     products = _read_all(Product, fields, domain=[["sale_ok", "=", True]])
 
     if not products:
@@ -116,6 +116,8 @@ def _load_products(odoo, star_schema_path: str) -> int:
             "product_parent_category": parent_category,
             "product_brand": safe_extract_m2o(brand_value, get_id=False) or "Unknown",
             "product_brand_id": safe_extract_m2o(brand_value),
+            "product_barcode": prod.get("barcode"),
+            "product_sku": prod.get("default_code"),
         })
 
     df = pl.DataFrame(rows)

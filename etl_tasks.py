@@ -1536,7 +1536,6 @@ def update_profit_aggregates(target_date: str) -> Optional[Dict[str, str]]:
         return None
 
 
-# ============================================================================
 # DIMENSION REFRESH
 # ============================================================================
 
@@ -1558,7 +1557,11 @@ def refresh_dimensions_incremental(targets: Optional[List[str]] = None) -> Dict[
             if 'products' in target_list:
                 Product = odoo.env['product.product']
                 if Product is not None:
-                    fields = get_model_fields(odoo, 'product.product', ['id', 'name', 'categ_id', 'x_studio_brand_id'])
+                    fields = get_model_fields(
+                        odoo,
+                        'product.product',
+                        ['id', 'name', 'categ_id', 'x_studio_brand_id', 'barcode', 'default_code'],
+                    )
                     records = read_all_records(odoo, 'product.product', fields)
                     rows = []
                     for prod in records:
@@ -1582,6 +1585,8 @@ def refresh_dimensions_incremental(targets: Optional[List[str]] = None) -> Dict[
                             'product_parent_category': parent_category,
                             'product_brand': safe_extract_m2o(brand_val, get_id=False) or 'Unknown',
                             'product_brand_id': safe_extract_m2o(brand_val, get_id=True),
+                            'product_barcode': prod.get('barcode'),
+                            'product_sku': prod.get('default_code'),
                         })
                     if rows:
                         atomic_write_parquet(pl.DataFrame(rows), DIM_PRODUCTS_FILE)
