@@ -558,6 +558,16 @@ class DuckDBManager:
             WHERE COALESCE(move_name, '') != '/' OR move_name IS NULL
         """)
 
+        barcode_expr = "''"
+        if product_barcode_col:
+            barcode_expr = (
+                "CASE "
+                f"WHEN {product_barcode_col} IS NULL THEN '' "
+                f"WHEN LOWER(TRIM(CAST({product_barcode_col} AS VARCHAR))) = 'false' THEN '' "
+                f"ELSE TRIM(CAST({product_barcode_col} AS VARCHAR)) "
+                "END"
+            )
+
         conn.execute(f"""
             CREATE OR REPLACE VIEW dim_products AS
             SELECT
@@ -566,7 +576,8 @@ class DuckDBManager:
                 {product_category_col if product_category_col else "NULL"} AS product_category,
                 {product_parent_category_col if product_parent_category_col else "NULL"} AS product_parent_category,
                 {f"COALESCE({product_brand_col}, '')" if product_brand_col else "''"} AS product_brand,
-                {f"COALESCE({product_barcode_col}, '')" if product_barcode_col else "''"} AS product_barcode,
+                {barcode_expr} AS product_barcode,
+                {barcode_expr} AS barcode,
                 {f"COALESCE({product_sku_col}, '')" if product_sku_col else "''"} AS product_sku
             FROM read_parquet('{dim_products}', union_by_name=True)
         """)
