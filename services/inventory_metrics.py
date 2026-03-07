@@ -10,6 +10,7 @@ from typing import Dict, Optional
 import pandas as pd
 
 from services.duckdb_connector import get_duckdb_connection
+from services.duckdb_connector import ensure_duckdb_view_groups
 
 DEFAULT_ABC_THRESHOLDS = {
     "a": 0.2,
@@ -46,6 +47,7 @@ def _normalize_snapshot_date(value: Optional[object]) -> Optional[date]:
 
 
 def _get_snapshot_date(as_of_date: date) -> Optional[date]:
+    ensure_duckdb_view_groups({"inventory"})
     conn = get_duckdb_connection()
     row = conn.execute(
         """
@@ -59,6 +61,7 @@ def _get_snapshot_date(as_of_date: date) -> Optional[date]:
 
 
 def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end: date) -> pd.DataFrame:
+    ensure_duckdb_view_groups({"inventory", "sales", "dims"})
     conn = get_duckdb_connection()
     query = """
         WITH on_hand AS (
@@ -150,6 +153,7 @@ def _query_location_ledger_deltas(
     end_ts: datetime,
     location_pool: set,
 ) -> pd.DataFrame:
+    ensure_duckdb_view_groups({"inventory"})
     conn = get_duckdb_connection()
     pool_values = sorted(location_pool)
     pool_sql = ",".join(str(v) for v in pool_values)
@@ -219,6 +223,7 @@ def get_stock_levels_ledger(
     df = df[['product_id', 'on_hand_qty', 'reserved_qty']].copy()
 
     lookback_start = as_of_date - timedelta(days=lookback_days - 1)
+    ensure_duckdb_view_groups({"sales", "dims"})
     conn = get_duckdb_connection()
     sales_df = conn.execute(
         """
@@ -366,6 +371,7 @@ def get_stock_levels(
 
 
 def _query_sell_through(snapshot_date: date, start_date: date, end_date: date) -> pd.DataFrame:
+    ensure_duckdb_view_groups({"inventory", "sales", "dims"})
     conn = get_duckdb_connection()
     query = """
         WITH begin_on_hand AS (
@@ -571,6 +577,7 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
 
 
 def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
+    ensure_duckdb_view_groups({"sales", "dims"})
     conn = get_duckdb_connection()
     query = """
         SELECT

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from services.duckdb_connector import get_duckdb_connection
+from services.duckdb_connector import ensure_duckdb_view_groups
 from services.inventory_metrics import (
     get_abc_analysis,
     get_stock_levels,
@@ -1830,6 +1831,7 @@ def export_top_xlsx(
     prevent_initial_call=False,
 )
 def populate_global_filter_options(_active_tab):
+    ensure_duckdb_view_groups({"dims", "sales"})
     conn = get_duckdb_connection()
 
     categories_df = conn.execute(

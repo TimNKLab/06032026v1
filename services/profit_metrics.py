@@ -4,11 +4,13 @@ import pandas as pd
 import time
 from functools import lru_cache
 from .duckdb_connector import get_duckdb_connection
+from .duckdb_connector import ensure_duckdb_view_groups
 
 
 @lru_cache(maxsize=32)
 def query_profit_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Query profit trends - optimized for daily totals with optional drill-down."""
+    ensure_duckdb_view_groups({"overview"})
     conn = get_duckdb_connection()
 
     trunc_map = {'daily': 'day', 'weekly': 'week', 'monthly': 'month'}
@@ -62,6 +64,7 @@ def query_profit_trends(start_date: date, end_date: date, period: str = 'daily')
 @lru_cache(maxsize=32)
 def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     """Query top products by profit - uses aggregate table for performance."""
+    ensure_duckdb_view_groups({"overview", "dims"})
     conn = get_duckdb_connection()
 
     query = """
@@ -106,6 +109,7 @@ def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -
 @lru_cache(maxsize=32)
 def query_profit_summary(start_date: date, end_date: date) -> Dict:
     """Get profit summary - single query for all key metrics."""
+    ensure_duckdb_view_groups({"overview"})
     conn = get_duckdb_connection()
 
     query = """
@@ -152,6 +156,7 @@ def query_profit_summary(start_date: date, end_date: date) -> Dict:
 
 @lru_cache(maxsize=32)
 def query_profit_revenue_by_category(start_date: date, end_date: date) -> Dict[str, Dict[str, float]]:
+    ensure_duckdb_view_groups({"overview", "dims"})
     conn = get_duckdb_connection()
 
     query = """
@@ -189,6 +194,7 @@ def clear_profit_caches() -> None:
 
 def query_profit_drilldown(start_date: date, end_date: date, product_id: Optional[int] = None) -> pd.DataFrame:
     """Drill-down to line-level profit details - use sparingly for detailed analysis."""
+    ensure_duckdb_view_groups({"profit_detail"})
     conn = get_duckdb_connection()
 
     if product_id:
