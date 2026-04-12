@@ -25,6 +25,7 @@ from services.sales_charts import (
 )
 from services.sales_metrics import get_revenue_comparison, get_top_products, get_hourly_sales_pattern
 from services.profit_metrics import query_profit_summary
+from components import create_loading_modal
 
 dash.register_page(
     __name__,
@@ -40,6 +41,19 @@ def layout():
     return dmc.Container(
         [
             dcc.Store(id='sales-query-context', data=None),
+            # Loading modal for Sales data fetch operations
+            create_loading_modal(
+                modal_id='sales-loading-modal',
+                status_id='sales-loading-status',
+                error_id='sales-loading-error',
+                cancel_id='sales-cancel',
+                title="Loading Sales Data",
+                show_cancel=False,
+                show_progress=True,
+            ),
+
+            # Trigger store for two-callback pattern
+            dcc.Store(id='sales-execute-trigger', storage_type='memory', data=None),
             
             # Page Header
             dmc.Paper(
@@ -358,39 +372,65 @@ def _log_timing(name, start_time):
     elapsed = time.time() - start_time
     print(f"[TIMING] {name}: {elapsed:.3f}s")
 
+
+@dash.callback(
+    Output('sales-loading-modal', 'opened', allow_duplicate=True),
+    Output('sales-loading-status', 'children', allow_duplicate=True),
+    Output('sales-loading-error', 'style', allow_duplicate=True),
+    Output('sales-execute-trigger', 'data'),
+    Input('sales-btn-apply', 'n_clicks'),
+    Input('sales-btn-mtd', 'n_clicks'),
+    Input('sales-btn-qtd', 'n_clicks'),
+    Input('sales-btn-ytd', 'n_clicks'),
+    Input('sales-btn-last-month', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def sales_open_modal_and_trigger(_apply_n, _mtd_n, _qtd_n, _ytd_n, _last_month_n):
+    ctx = dash.callback_context
+    trig = getattr(ctx, 'triggered_id', None)
+    if not trig:
+        raise PreventUpdate
+
+    return (
+        True,
+        'Loading…',
+        {'display': 'none'},
+        {'triggered_id': trig, 'nonce': time.time()},
+    )
+
+
+# Waterfall loading: charts triggered AFTER KPIs are ready
 @dash.callback(
     Output('sales-revenue-trend', 'figure'),
-    Input('sales-query-context', 'data'),
-    prevent_initial_call=False,
+    Input('sales-kpi-total-revenue', 'children'),  # Triggered after KPIs load
+    State('sales-query-context', 'data'),
+    prevent_initial_call=True,
 )
-def update_revenue_chart(query_context):
+def update_revenue_chart(kpi_loaded, query_context):
     if not query_context:
         raise PreventUpdate
     start_time = time.time()
-    print(f"[CALLBACK] update_revenue_chart triggered")
-    # Parse dates
+    print(f"[CALLBACK] update_revenue_chart triggered (waterfall)")
     start_date = date.fromisoformat(query_context['start_date'])
     end_date = date.fromisoformat(query_context['end_date'])
     
-    # Build and return the daily revenue chart
     result = build_daily_revenue_chart(start_date, end_date)
     _log_timing('update_revenue_chart', start_time)
     return result
 
 
-# update_additional_charts callback removed; charts moved to drilldown
-
-
+# Waterfall loading: triggered AFTER revenue chart loads
 @dash.callback(
     Output('sales-by-principal', 'figure'),
-    Input('sales-query-context', 'data'),
-    prevent_initial_call=False,
+    Input('sales-revenue-trend', 'figure'),  # Triggered after revenue chart
+    State('sales-query-context', 'data'),
+    prevent_initial_call=True,
 )
-def update_sales_by_principal_chart(query_context):
+def update_sales_by_principal_chart(figure_loaded, query_context):
     if not query_context:
         raise PreventUpdate
     start_time = time.time()
-    print(f"[CALLBACK] update_sales_by_principal_chart triggered")
+    print(f"[CALLBACK] update_sales_by_principal_chart triggered (waterfall)")
     start_date = date.fromisoformat(query_context['start_date'])
     end_date = date.fromisoformat(query_context['end_date'])
     
@@ -416,26 +456,26 @@ def update_sales_by_principal_chart(query_context):
     Output('sales-btn-ytd', 'variant'),
     Output('sales-btn-last-month', 'variant'),
     Output('sales-last-updated', 'children'),
-    Input('sales-global-query-context', 'data'),
-    Input('sales-btn-apply', 'n_clicks'),
-    Input('sales-btn-mtd', 'n_clicks'),
-    Input('sales-btn-qtd', 'n_clicks'),
-    Input('sales-btn-ytd', 'n_clicks'),
-    Input('sales-btn-last-month', 'n_clicks'),
+    Output('sales-loading-modal', 'opened', allow_duplicate=True),
+    Output('sales-loading-status', 'children', allow_duplicate=True),
+    Output('sales-loading-error', 'style', allow_duplicate=True),
+    Input('sales-execute-trigger', 'data'),
+    State('sales-global-query-context', 'data'),
     State('sales-date-from', 'value'),
     State('sales-date-until', 'value'),
-    prevent_initial_call=False,
+    prevent_initial_call=True,
 )
-def update_kpi_cards(global_query_context, n_clicks, n_clicks_mtd, n_clicks_qtd, n_clicks_ytd, n_clicks_last_month, date_from, date_until):
-    # Auto-load when global context is available or when any button is clicked
-    if not any([global_query_context, n_clicks, n_clicks_mtd, n_clicks_qtd, n_clicks_ytd, n_clicks_last_month]):
+def update_kpi_cards(execute_trigger, global_query_context, date_from, date_until):
+    trig = None
+    if execute_trigger and isinstance(execute_trigger, dict):
+        trig = execute_trigger.get('triggered_id')
+    if not trig:
         raise PreventUpdate
     
     start_time = time.time()
     print(f"[CALLBACK] update_kpi_cards triggered")
     
-    # Use ctx.triggered_id to determine which button was actually clicked
-    trigger_id = dash.callback_context.triggered_id if dash.callback_context.triggered else None
+    trigger_id = trig
     print(f"[DEBUG] Trigger ID: {trigger_id}")
     
     # Determine date range based on trigger
@@ -579,7 +619,7 @@ def update_kpi_cards(global_query_context, n_clicks, n_clicks_mtd, n_clicks_qtd,
     query_context = {
         'start_date': start_date.isoformat(),
         'end_date': end_date.isoformat(),
-        'n_clicks': int(n_clicks) if n_clicks is not None else 0,
+        'n_clicks': 0,
     }
 
     return (
@@ -599,6 +639,9 @@ def update_kpi_cards(global_query_context, n_clicks, n_clicks_mtd, n_clicks_qtd,
         btn_ytd_variant,
         btn_last_month_variant,
         last_updated_text,
+        False,
+        'Complete',
+        {'display': 'none'},
     )
 
 

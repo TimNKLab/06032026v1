@@ -161,3 +161,20 @@ def daily_profit_pipeline_impl(target_date: Optional[str] = None) -> str:
     result = pipeline.apply_async()
     logger.info(f"Profit pipeline submitted for {target_date}, task_id: {result.id}")
     return result.id
+
+
+def daily_sales_aggregates_pipeline_impl(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for sales aggregates materialization."""
+    if target_date is None:
+        target_date = date.today().isoformat()
+
+    logger.info(f"Starting sales aggregates pipeline for {target_date}")
+
+    from etl_tasks import (
+        update_sales_aggregates,
+    )
+
+    pipeline = update_sales_aggregates.si(target_date)
+    result = pipeline.apply_async()
+    logger.info(f"Sales aggregates pipeline submitted for {target_date}, task_id: {result.id}")
+    return result.id

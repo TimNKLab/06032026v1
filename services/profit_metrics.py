@@ -5,12 +5,14 @@ import time
 from functools import lru_cache
 from .duckdb_connector import get_duckdb_connection
 from .duckdb_connector import ensure_duckdb_view_groups
+from .versioned_cache import versioned_cache
 
 
+@versioned_cache(ttl=3600, key_prefix="profit_trends")
 @lru_cache(maxsize=32)
 def query_profit_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
-    """Query profit trends - optimized for daily totals with optional drill-down."""
-    ensure_duckdb_view_groups({"overview"})
+    """Query profit trends - uses fast materialized view."""
+    # Use materialized view directly - no view group needed
     conn = get_duckdb_connection()
 
     trunc_map = {'daily': 'day', 'weekly': 'week', 'monthly': 'month'}
@@ -48,7 +50,7 @@ def query_profit_trends(start_date: date, end_date: date, period: str = 'daily')
             ELSE 0 
         END as gross_margin_pct
     FROM date_series ds
-    LEFT JOIN agg_profit_daily ap ON 
+    LEFT JOIN mv_profit_daily ap ON 
         ap.date >= ds.period_start AND 
         ap.date < ds.period_end
     GROUP BY ds.period_start
@@ -106,10 +108,11 @@ def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -
     return result
 
 
+@versioned_cache(ttl=3600, key_prefix="profit_summary")
 @lru_cache(maxsize=32)
 def query_profit_summary(start_date: date, end_date: date) -> Dict:
-    """Get profit summary - single query for all key metrics."""
-    ensure_duckdb_view_groups({"overview"})
+    """Get profit summary - uses fast materialized view."""
+    # Use materialized view directly - no view group needed
     conn = get_duckdb_connection()
 
     query = """
@@ -130,7 +133,7 @@ def query_profit_summary(start_date: date, end_date: date) -> Dict:
             THEN SUM(gross_profit) / SUM(revenue_tax_in) * 100 
             ELSE 0 
         END as gross_margin_pct
-    FROM agg_profit_daily
+    FROM mv_profit_daily
     WHERE date >= ? AND date < ? + INTERVAL 1 DAY
     """
     

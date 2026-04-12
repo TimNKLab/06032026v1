@@ -36,6 +36,8 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 | M5 — Cloud + monitoring | Planned | TBD |
 | M6 — Inventory KPIs | Done (code present) | 2025-02-10 |
 | M7 — UI/UX enhancement | In Progress | 2026-02-21 |
+| M8 — Sales aggregates optimization | Validated | 2026-04-08 |
+| M9 — Sales aggregates backfill (Feb 2025–Feb 2026) | Validated | 2026-04-08 |
 
 ## Validation Standard (Option C)
 - **Correctness:** ≤0.5% revenue variance vs Odoo (3-date sampling)
@@ -55,10 +57,14 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 
 ## Active Workstreams
 - **NK_20260126_design_enhancement_4a7c** - UI/UX enhancement (DMC framework)
+- **NK_20260408_ux_responsiveness_a1b2** - Dashboard UX responsiveness improvement (modal loading, explicit triggers, navigation cancellation)
 - **NK_20260121_adjustments_8d9b** - Inventory adjustments handling (in progress)
+- **NK_20260408_sales_aggregates_optimization_9d2e** - Sales aggregates ETL implementation for performance (validated, includes materialized views)
+- **NK_20260408_historical_backfill_7e3f** - Historical sales aggregates backfill Feb 2025–Feb 2026 (validated, 1,203 files created)
 
 ## Key Data Sources
 - **Transactional:** pos.order, account.move (sales/purchases), stock.move.line, stock.quant
+- **Aggregates:** sales aggregates (daily, by-product, by-principal) - 401 days backfilled Feb 2025–Feb 2026
 - **Dimensions:** product, category, brand, tax, partner
 - **Derived:** Cost events, profit aggregates, inventory snapshots
 

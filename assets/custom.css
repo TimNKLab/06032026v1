@@ -1,58 +1,360 @@
-/* Import Google Fonts */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+/* ============================================================================
+   Cohere Design System - Global Theme
+   Enterprise command deck aesthetic: confident, clean, chromatically restrained
+   ============================================================================ */
 
-/* Custom Typography Variables */
+/* ── Google Fonts: Space Grotesk (headings) + Inter (body) ────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+/* ── Design Tokens (CSS Custom Properties) ────────────────────────────────── */
 :root {
-  --font-primary: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  /* Color Palette - Cohere Enterprise */
+  --cohere-black: #000000;
+  --cohere-near-black: #212121;
+  --cohere-deep-dark: #17171c;
+  --cohere-interaction-blue: #1863dc;
+  --cohere-ring-blue: rgba(76, 110, 230, 0.5);
+  --cohere-focus-purple: #9b60aa;
+  
+  /* Surface Colors */
+  --cohere-white: #ffffff;
+  --cohere-snow: #fafafa;
+  --cohere-lightest-gray: #f2f2f2;
+  --cohere-border-cool: #d9d9dd;
+  --cohere-border-light: #e5e7eb;
+  
+  /* Text Colors */
+  --cohere-muted-slate: #93939f;
+  --cohere-text-primary: var(--cohere-black);
+  --cohere-text-secondary: var(--cohere-near-black);
+  --cohere-text-tertiary: var(--cohere-muted-slate);
+  
+  /* Typography */
+  --font-display: 'Space Grotesk', 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', Consolas, monospace;
+  
+  /* Typography Scale */
+  --text-hero: 48px;
+  --text-section: 32px;
+  --text-card-title: 24px;
+  --text-feature: 18px;
+  --text-body: 16px;
+  --text-button: 14px;
+  --text-caption: 12px;
+  --text-small: 11px;
+  
+  /* Font Weights */
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  
+  /* Line Heights */
+  --leading-tight: 1.1;
+  --leading-snug: 1.2;
+  --leading-normal: 1.3;
+  --leading-relaxed: 1.5;
+  
+  /* Letter Spacing */
+  --tracking-tight: -0.5px;
+  --tracking-snug: -0.3px;
+  --tracking-normal: 0;
+  --tracking-wide: 0.5px;
+  
+  /* Border Radius Scale */
+  --radius-sharp: 4px;
+  --radius-comfortable: 8px;
+  --radius-generous: 16px;
+  --radius-large: 20px;
+  --radius-signature: 22px;  /* The Cohere card roundness */
+  --radius-pill: 9999px;
+  
+  /* Spacing Scale (8px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+  
+  /* Shadows - Minimal (Cohere is nearly shadow-free) */
+  --shadow-none: none;
+  --shadow-subtle: 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-soft: 0 4px 12px rgba(0, 0, 0, 0.05);
+  
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
 }
 
-/* Global Typography */
-body {
-  font-family: var(--font-primary) !important;
+/* ── Global Reset & Base ─────────────────────────────────────────────────── */
+html, body {
+  font-family: var(--font-body) !important;
+  font-weight: var(--weight-normal);
+  line-height: var(--leading-relaxed);
+  color: var(--cohere-text-primary);
+  background-color: var(--cohere-white);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Mantine Component Overrides */
+/* ── Mantine Typography Overrides ────────────────────────────────────────── */
+
+/* Text component */
 .mantine-Text-root {
-  font-family: var(--font-primary) !important;
+  font-family: var(--font-body) !important;
+  font-weight: var(--weight-normal);
 }
 
+/* Title/Heading components - Space Grotesk for display authority */
 .mantine-Title-root {
-  font-family: var(--font-primary) !important;
-  font-weight: 600 !important;
+  font-family: var(--font-display) !important;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-snug);
+  line-height: var(--leading-snug);
+  color: var(--cohere-text-primary);
 }
 
+.mantine-Title-root[data-order="1"] {
+  font-size: var(--text-hero);
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--leading-tight);
+}
+
+.mantine-Title-root[data-order="2"] {
+  font-size: var(--text-section);
+}
+
+.mantine-Title-root[data-order="3"] {
+  font-size: var(--text-card-title);
+  letter-spacing: var(--tracking-normal);
+}
+
+.mantine-Title-root[data-order="4"] {
+  font-size: var(--text-feature);
+}
+
+/* ── Cards: The 22px Signature Roundness ─────────────────────────────────── */
+.mantine-Paper-root {
+  font-family: var(--font-body) !important;
+  border-radius: var(--radius-signature) !important;
+  background-color: var(--cohere-white);
+  border: 1px solid var(--cohere-lightest-gray);
+  box-shadow: var(--shadow-none);
+}
+
+.mantine-Paper-root[data-with-border="true"] {
+  border: 1px solid var(--cohere-border-cool);
+}
+
+/* ── Buttons: Ghost/Transparent Default ───────────────────────────────────── */
 .mantine-Button-root {
-  font-family: var(--font-primary) !important;
-  font-weight: 500 !important;
+  font-family: var(--font-body) !important;
+  font-weight: var(--weight-medium);
+  font-size: var(--text-button);
+  border-radius: var(--radius-comfortable);
+  transition: all var(--transition-base);
 }
 
+/* Ghost/transparent button - the Cohere primary style */
+.mantine-Button-root[data-variant="subtle"],
+.mantine-Button-root[data-variant="light"] {
+  background-color: transparent;
+  color: var(--cohere-text-primary);
+}
+
+.mantine-Button-root[data-variant="subtle"]:hover,
+.mantine-Button-root[data-variant="light"]:hover {
+  color: var(--cohere-interaction-blue);
+  opacity: 0.8;
+  background-color: rgba(24, 99, 220, 0.05);
+}
+
+/* Primary/Filled button */
+.mantine-Button-root[data-variant="filled"] {
+  background-color: var(--cohere-deep-dark);
+  color: var(--cohere-white);
+  border: none;
+}
+
+.mantine-Button-root[data-variant="filled"]:hover {
+  background-color: var(--cohere-black);
+}
+
+/* Outline button */
+.mantine-Button-root[data-variant="outline"] {
+  border: 1px solid var(--cohere-border-cool);
+  color: var(--cohere-text-primary);
+  background-color: transparent;
+}
+
+.mantine-Button-root[data-variant="outline"]:hover {
+  border-color: var(--cohere-interaction-blue);
+  color: var(--cohere-interaction-blue);
+}
+
+/* Button focus states */
+.mantine-Button-root:focus-visible {
+  outline: 2px solid var(--cohere-interaction-blue);
+  outline-offset: 2px;
+}
+
+/* ── Inputs & Forms ──────────────────────────────────────────────────────── */
 .mantine-Input-root,
 .mantine-Select-root,
-.mantine-TextInput-root {
-  font-family: var(--font-primary) !important;
+.mantine-TextInput-root,
+.mantine-DatePickerInput-root {
+  font-family: var(--font-body) !important;
 }
 
+.mantine-Input-input {
+  border-radius: var(--radius-comfortable);
+  border: 1px solid var(--cohere-border-cool);
+  font-size: var(--text-body);
+  transition: border-color var(--transition-fast);
+}
+
+.mantine-Input-input:focus {
+  border-color: var(--cohere-focus-purple);
+  outline: none;
+}
+
+.mantine-Input-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--cohere-ring-blue);
+}
+
+/* ── Navigation ───────────────────────────────────────────────────────────── */
 .mantine-NavLink-root {
-  font-family: var(--font-primary) !important;
+  font-family: var(--font-body) !important;
+  font-size: var(--text-body);
+  color: var(--cohere-text-secondary);
+  border-radius: var(--radius-comfortable);
+  transition: color var(--transition-fast);
 }
 
-/* Code/Mono text */
-code, pre {
+.mantine-NavLink-root:hover {
+  color: var(--cohere-interaction-blue);
+  background-color: transparent;
+}
+
+/* ── App Shell & Header ──────────────────────────────────────────────────── */
+.mantine-AppShell-header {
+  background-color: var(--cohere-white);
+  border-bottom: 1px solid var(--cohere-lightest-gray);
+  box-shadow: var(--shadow-none);
+}
+
+.mantine-AppShell-main {
+  background-color: var(--cohere-snow);
+}
+
+/* ── Dividers ───────────────────────────────────────────────────────────── */
+.mantine-Divider-root {
+  border-color: var(--cohere-border-cool) !important;
+}
+
+/* ── Badges & Tags ───────────────────────────────────────────────────────── */
+.mantine-Badge-root {
+  font-family: var(--font-body) !important;
+  font-size: var(--text-small);
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  border-radius: var(--radius-pill);
+}
+
+/* ── Tables (AG Grid) ───────────────────────────────────────────────────── */
+.ag-theme-alpine {
+  --ag-font-family: var(--font-body);
+  --ag-border-color: var(--cohere-lightest-gray);
+  --ag-row-border-color: var(--cohere-lightest-gray);
+  --ag-header-background-color: var(--cohere-snow);
+  --ag-odd-row-background-color: var(--cohere-white);
+  --ag-even-row-background-color: var(--cohere-snow);
+}
+
+/* ── Code & Mono Text ────────────────────────────────────────────────────── */
+code, pre, .mono {
   font-family: var(--font-mono) !important;
+  font-size: 0.9em;
 }
 
-/* Plotly Chart Typography */
+.uppercase-label {
+  font-family: var(--font-body);
+  font-size: var(--text-small);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--cohere-text-tertiary);
+}
+
+/* ── Plotly Chart Typography ─────────────────────────────────────────────── */
 .js-plotly-plot .plotly .title {
-  font-family: var(--font-primary) !important;
-  font-weight: 600 !important;
+  font-family: var(--font-display) !important;
+  font-weight: var(--weight-medium) !important;
+  color: var(--cohere-text-primary) !important;
 }
 
 .js-plotly-plot .plotly .xaxislayer-above .xtick text,
-.js-plotly-plot .plotly .ylayer .ytick text {
-  font-family: var(--font-primary) !important;
+.js-plotly-plot .plotly .ylayer .ytick text,
+.js-plotly-plot .plotly .g-xtitle,
+.js-plotly-plot .plotly .g-ytitle {
+  font-family: var(--font-body) !important;
+  font-size: 12px !important;
+  color: var(--cohere-muted-slate) !important;
 }
 
 .js-plotly-plot .plotly .legendtext {
-  font-family: var(--font-primary) !important;
+  font-family: var(--font-body) !important;
+  font-size: 12px !important;
+  color: var(--cohere-text-secondary) !important;
 }
+
+.js-plotly-plot .plotly .g-legend {
+  font-family: var(--font-body) !important;
+}
+
+/* ── KPI Card Accent Patterns ────────────────────────────────────────────── */
+.kpi-card {
+  border-top: 3px solid transparent;
+  transition: border-color var(--transition-base);
+}
+
+.kpi-card.accent-blue {
+  border-top-color: var(--cohere-interaction-blue);
+}
+
+.kpi-card.accent-gray {
+  border-top-color: var(--cohere-border-cool);
+}
+
+/* ── Scrollbar Styling ────────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--cohere-snow);
+  border-radius: var(--radius-sharp);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--cohere-border-cool);
+  border-radius: var(--radius-sharp);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--cohere-muted-slate);
+}
+
+/* ── Selection States ─────────────────────────────────────────────────────── */
+::selection {
+  background-color: rgba(24, 99, 220, 0.15);
+  color: var(--cohere-text-primary);
+}
+

@@ -4,8 +4,11 @@ from dash.exceptions import PreventUpdate
 import dash_mantine_components as dmc
 import plotly.express as px
 from datetime import date, timedelta
+import time
+from typing import Tuple
 
 from services.profit_metrics import query_profit_summary, query_profit_trends
+from components import create_loading_modal
 
 CHART_HEIGHT = 380
 
@@ -75,6 +78,21 @@ def _kpi_card(label, vid, vdef, sid=None, sdef=None, color='blue'):
 
 layout = dmc.Container([
     dcc.Location(id='overview-location', refresh=False),
+    
+    # Loading modal for data fetch operations
+    create_loading_modal(
+        modal_id='overview-loading-modal',
+        status_id='overview-loading-status',
+        error_id='overview-loading-error',
+        cancel_id='overview-cancel',
+        title="Loading Dashboard Data",
+        show_cancel=False,  # Quick synchronous operation
+        show_progress=True,
+    ),
+    
+    # Trigger store for two-callback pattern
+    dcc.Store(id='overview-execute-trigger', storage_type='memory', data=None),
+    
     dmc.Paper(
         dmc.Group([
             dmc.Title('Executive Dashboard', order=4),
@@ -141,8 +159,35 @@ layout = dmc.Container([
 
 
 # ══════════════════════════════════════════════════════════════════
-#  SINGLE callback — Apply, restore, first-visit
+#  Two-callback pattern — trigger (open modal) then execute (query)
 # ══════════════════════════════════════════════════════════════════
+
+@dash.callback(
+    Output('overview-loading-modal', 'opened', allow_duplicate=True),
+    Output('overview-loading-status', 'children', allow_duplicate=True),
+    Output('overview-loading-error', 'style', allow_duplicate=True),
+    Output('overview-execute-trigger', 'data'),
+    Input('btn-apply-dates',  'n_clicks'),
+    Input('overview-period',  'value'),
+    Input('btn-weekly',       'n_clicks'),
+    Input('btn-monthly',      'n_clicks'),
+    Input('btn-quarterly',    'n_clicks'),
+    Input('btn-semesterly',   'n_clicks'),
+    Input('btn-yearly',       'n_clicks'),
+    prevent_initial_call=True,
+)
+def overview_open_modal_and_trigger(_apply_n, _period_in, _weekly_n, _monthly_n, _quarterly_n, _semesterly_n, _yearly_n):
+    ctx = dash.callback_context
+    trig = getattr(ctx, 'triggered_id', None)
+    if not trig:
+        raise PreventUpdate
+
+    return (
+        True,
+        'Loading…',
+        {'display': 'none'},
+        {'triggered_id': trig, 'nonce': time.time()},
+    )
 
 @dash.callback(
     Output('total-overview-fig',  'figure'),
@@ -158,47 +203,39 @@ layout = dmc.Container([
     Output('overview-period',     'value'),
     Output('date-from',           'value'),
     Output('date-until',          'value'),
-    Input('overview-location', 'pathname'),
-    Input('btn-apply-dates',  'n_clicks'),
-    Input('overview-period',  'value'),
-    Input('date-from',        'value'),
-    Input('date-until',       'value'),
-    Input('btn-weekly',       'n_clicks'),
-    Input('btn-monthly',      'n_clicks'),
-    Input('btn-quarterly',    'n_clicks'),
-    Input('btn-semesterly',   'n_clicks'),
-    Input('btn-yearly',       'n_clicks'),
+    Output('overview-loading-modal', 'opened', allow_duplicate=True),      # NK_20260408: Modal control
+    Output('overview-loading-status', 'children', allow_duplicate=True),   # NK_20260408: Status text
+    Output('overview-loading-error', 'style', allow_duplicate=True),       # NK_20260408: Error visibility
+    Input('overview-execute-trigger', 'data'),
+    State('overview-period',  'value'),
+    State('date-from',        'value'),
+    State('date-until',       'value'),
     State('time-from',       'value'),
     State('time-until',      'value'),
     State('overview-view-state', 'data'),
-    prevent_initial_call=False,
+    prevent_initial_call=True,  # NK_20260408: No auto-load on page visit
 )
-def update_overview(pathname,
-                    apply_n,
+def update_overview(execute_trigger,
                     period_in,
-                    dfrom_in,
-                    duntil_in,
-                    weekly_n,
-                    monthly_n,
-                    quarterly_n,
-                    semesterly_n,
-                    yearly_n,
-                    tfrom_st, tuntil_st,
+                    dfrom_st,
+                    duntil_st,
+                    tfrom_st,
+                    tuntil_st,
                     view_state):
 
     NO = dash.no_update
     ctx = dash.callback_context
-    trig = getattr(ctx, 'triggered_id', None)
-
-    # ── DEBUG — remove once it works ──────────────────────────
-    print(f"[overview] trig={trig}  pathname={pathname}  "
-          f"vs={'HAS ' + str(len(view_state)) + ' keys' if view_state else 'NONE'}")
-
-    # ignore if we're on a different page
-    if pathname != '/':
+    trig = None
+    if execute_trigger and isinstance(execute_trigger, dict):
+        trig = execute_trigger.get('triggered_id')
+    if not trig:
         raise PreventUpdate
 
-    def _preset_range(key: str) -> tuple[date, date]:
+    # ── DEBUG — remove once it works ──────────────────────────
+    print(f"[overview] trig={trig}  "
+          f"vs={'HAS ' + str(len(view_state)) + ' keys' if view_state else 'NONE'}")
+
+    def _preset_range(key: str) -> Tuple[date, date]:
         today = date.today()
         if key == 'weekly':
             return (today - timedelta(days=6), today)
@@ -216,8 +253,8 @@ def update_overview(pathname,
         return (today, today)
 
     # Base values
-    start = _coerce(dfrom_in) or date.today()
-    end = _coerce(duntil_in) or start
+    start = _coerce(dfrom_st) or date.today()
+    end = _coerce(duntil_st) or start
     period = period_in or 'daily'
 
     # Handle preset range buttons
@@ -240,105 +277,67 @@ def update_overview(pathname,
         pass
 
     # ── render (compute from selected dates + period) ─────────────────────────────────────────
-    if pathname == '/':
+    fig = _build_figure(start, end, period)
 
-        fig = _build_figure(start, end, period)
+    global_ctx = dict(start_date=start.isoformat(), end_date=end.isoformat(),
+                      period=period, source='overview')
 
-        global_ctx = dict(start_date=start.isoformat(), end_date=end.isoformat(),
-                          period=period, source='overview')
-
-        # ── view_state: ONLY small scalars, NO figure ─────────
-        vs = dict(
-            has_data=True,
-            date_from=start.isoformat(),
-            date_until=end.isoformat(),
-            period=period,
-            time_from=tfrom_st or '07:00',
-            time_until=tuntil_st or '23:30',
-        )
-
-        try:
-            ps   = query_profit_summary(start, end)
-            rev  = ps.get('revenue', 0) or 0
-            gp   = ps.get('gross_profit', 0) or 0
-            gm   = ps.get('gross_margin_pct', 0) or 0
-            atv  = ps.get('avg_transaction_value', 0) or 0
-            qty  = ps.get('quantity', 0) or 0
-            txns = ps.get('transactions', 0) or 0
-
-            days    = (end - start).days + 1
-            p_end   = date.fromordinal(start.toordinal() - 1)
-            p_start = date.fromordinal(start.toordinal() - days)
-            p_rev   = (query_profit_summary(p_start, p_end).get('revenue', 0) or 0)
-            delta   = rev - p_rev
-            dpct    = (delta / p_rev * 100) if p_rev else None
-            dtxt    = (f"{dpct:+.1f}% vs prev (Rp {delta:,.0f})"
-                       if dpct is not None else f"Rp {delta:,.0f} vs prev")
-
-            vs.update(
-                kpi_revenue=f"Rp {rev:,.0f}",       kpi_revenue_delta=dtxt,
-                kpi_gross_profit=f"Rp {gp:,.0f}",   kpi_gross_margin=f"{gm:.1f}% margin",
-                kpi_atv=f"Rp {atv:,.0f}",
-                kpi_qty_sold=f"{qty:,.0f} items",    kpi_transactions=f"{txns:,} transactions",
-            )
-        except Exception as exc:
-            print(f"[overview] query error: {exc}")
-            vs.update(
-                kpi_revenue='Rp 0', kpi_revenue_delta='–',
-                kpi_gross_profit='Rp 0', kpi_gross_margin='0.0% margin',
-                kpi_atv='Rp 0', kpi_qty_sold='0 items', kpi_transactions='0 transactions',
-            )
-
-        print(f"[overview] APPLY → storing view_state with {len(vs)} keys")
-
-        return (
-            fig,
-            vs['kpi_revenue'],      vs['kpi_revenue_delta'],
-            vs['kpi_gross_profit'], vs['kpi_gross_margin'],
-            vs['kpi_atv'],          vs['kpi_qty_sold'],
-            vs['kpi_transactions'],
-            global_ctx, vs,
-            period,
-            start,
-            end,
-        )
-
-    # ── NAV-BACK: restore from view_state (rebuild fig) ──────
-    if view_state and view_state.get('has_data'):
-        print("[overview] RESTORING from view_state")
-        vs = view_state
-        start = _coerce(vs.get('date_from'))
-        end   = _coerce(vs.get('date_until'))
-        period = vs.get('period', 'daily')
-        fig = _build_figure(start, end, period)
-
-        global_ctx = dict(
-            start_date=start.isoformat(),
-            end_date=end.isoformat(),
-            period=period,
-            source='overview',
-        )
-
-        return (
-            fig,
-            vs.get('kpi_revenue', 'Rp 0'),      vs.get('kpi_revenue_delta', '–'),
-            vs.get('kpi_gross_profit', 'Rp 0'), vs.get('kpi_gross_margin', '0.0% margin'),
-            vs.get('kpi_atv', 'Rp 0'),          vs.get('kpi_qty_sold', '0 items'),
-            vs.get('kpi_transactions', '0 transactions'),
-            global_ctx, vs,
-            vs.get('period', 'daily'),
-            _coerce(vs.get('date_from')) or date.today(),
-            _coerce(vs.get('date_until')) or date.today(),
-        )
-
-    # ── FIRST VISIT ───────────────────────────────────────────
-    print("[overview] FIRST VISIT — empty state")
-    return (
-        _empty_fig('Click Apply to load data.'),
-        'Rp 0', '–', 'Rp 0', '0.0% margin',
-        'Rp 0', '0 items', '0 transactions',
-        NO, NO,
-        'daily',
-        date.today(),
-        date.today(),
+    # ── view_state: ONLY small scalars, NO figure ─────────
+    vs = dict(
+        has_data=True,
+        date_from=start.isoformat(),
+        date_until=end.isoformat(),
+        period=period,
+        time_from=tfrom_st or '07:00',
+        time_until=tuntil_st or '23:30',
     )
+
+    try:
+        ps   = query_profit_summary(start, end)
+        rev  = ps.get('revenue', 0) or 0
+        gp   = ps.get('gross_profit', 0) or 0
+        gm   = ps.get('gross_margin_pct', 0) or 0
+        atv  = ps.get('avg_transaction_value', 0) or 0
+        qty  = ps.get('quantity', 0) or 0
+        txns = ps.get('transactions', 0) or 0
+
+        days    = (end - start).days + 1
+        p_end   = date.fromordinal(start.toordinal() - 1)
+        p_start = date.fromordinal(start.toordinal() - days)
+        p_rev   = (query_profit_summary(p_start, p_end).get('revenue', 0) or 0)
+        delta   = rev - p_rev
+        dpct    = (delta / p_rev * 100) if p_rev else None
+        dtxt    = (f"{dpct:+.1f}% vs prev (Rp {delta:,.0f})"
+                   if dpct is not None else f"Rp {delta:,.0f} vs prev")
+
+        vs.update(
+            kpi_revenue=f"Rp {rev:,.0f}",       kpi_revenue_delta=dtxt,
+            kpi_gross_profit=f"Rp {gp:,.0f}",   kpi_gross_margin=f"{gm:.1f}% margin",
+            kpi_atv=f"Rp {atv:,.0f}",
+            kpi_qty_sold=f"{qty:,.0f} items",    kpi_transactions=f"{txns:,} transactions",
+        )
+    except Exception as exc:
+        print(f"[overview] query error: {exc}")
+        vs.update(
+            kpi_revenue='Rp 0', kpi_revenue_delta='–',
+            kpi_gross_profit='Rp 0', kpi_gross_margin='0.0% margin',
+            kpi_atv='Rp 0', kpi_qty_sold='0 items', kpi_transactions='0 transactions',
+        )
+
+    print(f"[overview] APPLY → storing view_state with {len(vs)} keys")
+
+    return (
+        fig,
+        vs['kpi_revenue'],      vs['kpi_revenue_delta'],
+        vs['kpi_gross_profit'], vs['kpi_gross_margin'],
+        vs['kpi_atv'],          vs['kpi_qty_sold'],
+        vs['kpi_transactions'],
+        global_ctx, vs,
+        period,
+        start,
+        end,
+        False,  # Close modal on success
+        'Complete',
+        {'display': 'none'},  # Hide error
+    )
+

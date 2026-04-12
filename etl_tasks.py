@@ -169,6 +169,7 @@ from etl.config import (
     DIM_UOMS_FILE, DIM_PARTNERS_FILE, DIM_USERS_FILE, DIM_COMPANIES_FILE,
     DIM_LOTS_FILE, FACT_PRODUCT_COST_EVENTS_PATH, FACT_PRODUCT_COST_LATEST_DAILY_PATH,
     FACT_SALES_LINES_PROFIT_PATH, AGG_PROFIT_DAILY_PATH, AGG_PROFIT_DAILY_BY_PRODUCT_PATH,
+    AGG_SALES_DAILY_PATH, AGG_SALES_DAILY_BY_PRODUCT_PATH, AGG_SALES_DAILY_BY_PRINCIPAL_PATH,
 )
 
 # ============================================================================
@@ -1536,6 +1537,148 @@ def update_profit_aggregates(target_date: str) -> Optional[Dict[str, str]]:
         return None
 
 
+def _build_sales_aggregates(target_date: str) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+    daily_schema = {
+        'date': pl.Date,
+        'revenue': pl.Float64,
+        'transactions': pl.Int64,
+        'items_sold': pl.Float64,
+        'lines': pl.Int64,
+    }
+    by_product_schema = {
+        'date': pl.Date,
+        'product_id': pl.Int64,
+        'revenue': pl.Float64,
+        'quantity': pl.Float64,
+        'lines': pl.Int64,
+    }
+    by_principal_schema = {
+        'date': pl.Date,
+        'principal': pl.Utf8,
+        'revenue': pl.Float64,
+        'quantity': pl.Float64,
+        'lines': pl.Int64,
+    }
+
+    pos_schema = {
+        'date': pl.Datetime,
+        'order_id': pl.Int64,
+        'line_id': pl.Int64,
+        'product_id': pl.Int64,
+        'quantity': pl.Float64,
+        'revenue': pl.Float64,
+        'order_ref': pl.Utf8,
+    }
+    invoice_schema = {
+        'date': pl.Datetime,
+        'move_id': pl.Int64,
+        'move_line_id': pl.Int64,
+        'product_id': pl.Int64,
+        'quantity': pl.Float64,
+        'price_unit': pl.Float64,
+        'move_name': pl.Utf8,
+    }
+
+    target_dt = date.fromisoformat(target_date)
+    pos_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_sales', target_date)
+    invoice_partition = _partition_path(f'{STAR_SCHEMA_PATH}/fact_invoice_sales', target_date)
+
+    pos_df = _read_parquet_or_empty(pos_partition, pos_schema)
+    invoice_df = _read_parquet_or_empty(invoice_partition, invoice_schema)
+
+    if 'order_ref' in pos_df.columns:
+        pos_df = pos_df.filter((pl.col('order_ref').is_null()) | (pl.col('order_ref') != '/'))
+    if 'move_name' in invoice_df.columns:
+        invoice_df = invoice_df.filter((pl.col('move_name').is_null()) | (pl.col('move_name') != '/'))
+
+    pos_lines = (
+        pos_df.with_columns(
+            pl.lit(target_dt).alias('date'),
+            pl.col('order_id').cast(pl.Int64, strict=False).fill_null(0).alias('txn_id'),
+            pl.col('line_id').cast(pl.Int64, strict=False).fill_null(0).alias('line_id'),
+            pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0).alias('product_id'),
+            pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0).alias('quantity'),
+            pl.col('revenue').cast(pl.Float64, strict=False).fill_null(0).alias('revenue'),
+        )
+        .select(['date', 'txn_id', 'line_id', 'product_id', 'quantity', 'revenue'])
+    )
+
+    invoice_lines = (
+        invoice_df.with_columns(
+            pl.lit(target_dt).alias('date'),
+            pl.col('move_id').cast(pl.Int64, strict=False).fill_null(0).alias('txn_id'),
+            pl.col('move_line_id').cast(pl.Int64, strict=False).fill_null(0).alias('line_id'),
+            pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0).alias('product_id'),
+            pl.col('quantity').cast(pl.Float64, strict=False).fill_null(0).alias('quantity'),
+            (pl.col('price_unit').cast(pl.Float64, strict=False).fill_null(0) * pl.col('quantity')).alias('revenue'),
+        )
+        .select(['date', 'txn_id', 'line_id', 'product_id', 'quantity', 'revenue'])
+    )
+
+    sales_lines = pl.concat([pos_lines, invoice_lines], how='vertical')
+    if sales_lines.is_empty():
+        return (
+            pl.DataFrame(schema=daily_schema),
+            pl.DataFrame(schema=by_product_schema),
+            pl.DataFrame(schema=by_principal_schema),
+        )
+
+    daily = sales_lines.group_by('date').agg([
+        pl.sum('revenue').alias('revenue'),
+        pl.col('txn_id').n_unique().alias('transactions'),
+        pl.sum('quantity').alias('items_sold'),
+        pl.len().alias('lines'),
+    ])
+
+    by_product = sales_lines.group_by(['date', 'product_id']).agg([
+        pl.sum('revenue').alias('revenue'),
+        pl.sum('quantity').alias('quantity'),
+        pl.len().alias('lines'),
+    ])
+
+    try:
+        dim_products = pl.read_parquet(DIM_PRODUCTS_FILE)
+        if 'product_id' not in dim_products.columns:
+            dim_products = pl.DataFrame(schema={'product_id': pl.Int64, 'product_brand': pl.Utf8})
+        if 'product_brand' not in dim_products.columns:
+            dim_products = dim_products.with_columns(pl.lit('').alias('product_brand'))
+        dim_products = dim_products.select([
+            pl.col('product_id').cast(pl.Int64, strict=False).fill_null(0),
+            pl.col('product_brand').cast(pl.Utf8, strict=False).fill_null(''),
+        ]).unique('product_id')
+    except Exception:
+        dim_products = pl.DataFrame(schema={'product_id': pl.Int64, 'product_brand': pl.Utf8})
+
+    enriched = sales_lines.join(dim_products, on='product_id', how='left')
+    enriched = enriched.with_columns(
+        pl.when(pl.col('product_brand').is_null() | (pl.col('product_brand').str.strip_chars().str.len_chars() == 0))
+        .then(pl.lit('Unknown'))
+        .otherwise(pl.col('product_brand'))
+        .alias('principal')
+    )
+
+    by_principal = enriched.group_by(['date', 'principal']).agg([
+        pl.sum('revenue').alias('revenue'),
+        pl.sum('quantity').alias('quantity'),
+        pl.len().alias('lines'),
+    ])
+
+    return daily, by_product, by_principal
+
+
+@app.task
+def update_sales_aggregates(target_date: str) -> Optional[Dict[str, str]]:
+    try:
+        daily_df, by_product_df, by_principal_df = _build_sales_aggregates(target_date)
+        daily_path = _write_partitioned(daily_df, AGG_SALES_DAILY_PATH, target_date, 'agg_sales_daily')
+        by_product_path = _write_partitioned(by_product_df, AGG_SALES_DAILY_BY_PRODUCT_PATH, target_date, 'agg_sales_daily_by_product')
+        by_principal_path = _write_partitioned(by_principal_df, AGG_SALES_DAILY_BY_PRINCIPAL_PATH, target_date, 'agg_sales_daily_by_principal')
+        return {'daily': daily_path, 'by_product': by_product_path, 'by_principal': by_principal_path}
+    except Exception as exc:
+        logger.error(f"Error updating sales aggregates for {target_date}: {exc}", exc_info=True)
+        return None
+
+
 # DIMENSION REFRESH
 # ============================================================================
 
@@ -1767,6 +1910,13 @@ def daily_profit_pipeline(target_date: Optional[str] = None) -> str:
 
 
 @app.task
+def daily_sales_aggregates_pipeline(target_date: Optional[str] = None) -> str:
+    """Daily pipeline for sales aggregates materialization."""
+    from etl.pipelines.daily import daily_sales_aggregates_pipeline_impl
+    return daily_sales_aggregates_pipeline_impl(target_date)
+
+
+@app.task
 def date_range_etl_pipeline(start_date: str, end_date: Optional[str] = None) -> Dict[str, Any]:
     """Process date range in parallel."""
     if end_date is None:
@@ -1780,12 +1930,6 @@ def catch_up_etl() -> Dict[str, Any]:
     """Auto-catch up missed dates."""
     from etl.pipelines.health import catch_up_etl_impl
     return catch_up_etl_impl()
-
-
-@app.task(name="catch_up_etl")
-def catch_up_etl_legacy() -> Dict[str, Any]:
-    """Backward-compatible task name alias for catch-up ETL."""
-    return catch_up_etl()
 
 
 @app.task
@@ -1811,6 +1955,10 @@ app.conf.beat_schedule = {
     'daily-invoice-purchases-etl': {
         'task': 'etl_tasks.daily_invoice_purchases_pipeline',
         'schedule': crontab(hour=2, minute=10),
+    },
+    'daily-sales-aggregates-etl': {
+        'task': 'etl_tasks.daily_sales_aggregates_pipeline',
+        'schedule': crontab(hour=2, minute=12),
     },
     'daily-inventory-moves-etl': {
         'task': 'etl_tasks.daily_inventory_moves_pipeline',
@@ -1952,6 +2100,7 @@ app.conf.task_routes = {
     'etl_tasks.update_product_cost_latest_daily': {'queue': 'loading'},
     'etl_tasks.update_sales_lines_profit': {'queue': 'loading'},
     'etl_tasks.update_profit_aggregates': {'queue': 'loading'},
+    'etl_tasks.update_sales_aggregates': {'queue': 'loading'},
     'etl_tasks.load_beginning_costs_from_csv': {'queue': 'loading'},
     'etl_tasks.refresh_dimensions_incremental': {'queue': 'dimensions'},
 }

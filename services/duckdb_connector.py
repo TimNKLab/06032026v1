@@ -8,6 +8,7 @@ from typing import Dict, Optional
 from functools import lru_cache
 import pandas as pd
 from .cache import cache
+from .versioned_cache import versioned_cache
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ class DuckDBManager:
     _lock = threading.Lock()
     _initialized = False
     _initialized_groups: set[str] = set()
+    _materialized_views: set[str] = set()  # Track which MVs are loaded
 
     def __new__(cls):
         if cls._instance is None:
@@ -30,9 +32,24 @@ class DuckDBManager:
         if self._connection is None:
             with self._lock:
                 if self._connection is None:
-                    conn = duckdb.connect(database=':memory:')
+                    # Use persistent DuckDB so materialized views survive restarts
+                    data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
+                    db_path = f"{data_lake}/cache/nkdash.duckdb"
+                    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+                    
+                    conn = duckdb.connect(database=db_path)
                     setup_start = time.time()
-                    print("[duckdb] setting up views...")
+                    print(f"[duckdb] connecting to {db_path}...")
+                    
+                    # Check if materialized views already exist (from previous run)
+                    existing_mvs = set()
+                    try:
+                        tables = conn.execute("SHOW TABLES").fetchall()
+                        existing_mvs = {t[0] for t in tables if t[0].startswith('mv_')}
+                        print(f"[duckdb] existing materialized views: {sorted(existing_mvs)}")
+                    except Exception:
+                        pass
+                    
                     preload_all = os.environ.get("PRELOAD_ALL_DUCKDB_VIEWS") in {"1", "true", "True", "yes", "YES"}
                     if preload_all:
                         self._setup_views(conn, groups={"all"})
@@ -41,6 +58,10 @@ class DuckDBManager:
                         # Default: only what Overview needs (fast), avoid Gunicorn timeouts.
                         self._setup_views(conn, groups={"overview"})
                         self._initialized_groups = {"overview"}
+                    
+                    # Track which MVs are already loaded
+                    self._materialized_views = existing_mvs
+                    
                     print(f"[duckdb] views ready in {time.time() - setup_start:.3f}s")
                     self._connection = conn
                     self._initialized = True
@@ -66,6 +87,208 @@ class DuckDBManager:
             self._initialized_groups |= needed
             print(f"[duckdb] ensured groups in {time.time() - start:.3f}s")
 
+    def ensure_materialized_views(self, views: set[str]) -> None:
+        """Ensure materialized views are loaded into memory for ultra-fast queries."""
+        if not views:
+            return
+
+        conn = self.get_connection()
+        with self._lock:
+            needed = views - self._materialized_views
+            if not needed:
+                return
+
+            start = time.time()
+            print(f"[duckdb] loading materialized views: {sorted(needed)}")
+            self._load_materialized_views(conn, needed)
+            self._materialized_views |= needed
+            print(f"[duckdb] materialized views ready in {time.time() - start:.3f}s")
+
+    def _get_mv_refresh_info(self, conn: duckdb.DuckDBPyConnection, mv_name: str, parquet_path: str) -> tuple:
+        """Get refresh info for incremental MV loading.
+        Returns: (needs_full_refresh, max_date_in_mv, new_files_count)
+        """
+        try:
+            # Check if MV exists and get max date
+            result = conn.execute(f"""
+                SELECT COUNT(*), MAX(date) 
+                FROM information_schema.tables 
+                WHERE table_name = '{mv_name}'
+            """).fetchone()
+            
+            if result[0] == 0:
+                return (True, None, 0)  # MV doesn't exist, needs full load
+            
+            max_mv_date = conn.execute(f"SELECT MAX(date) FROM {mv_name}").fetchone()[0]
+            
+            # Count new parquet files since last refresh
+            new_files = conn.execute(f"""
+                SELECT COUNT(*) FROM read_parquet_metadata('{parquet_path}/**/*.parquet')
+                WHERE filename > (SELECT MAX(filename) FROM {mv_name}_metadata) 
+                    OR NOT EXISTS (SELECT 1 FROM {mv_name}_metadata)
+            """).fetchone()[0]
+            
+            return (False, max_mv_date, new_files)
+        except Exception:
+            return (True, None, 0)  # Error, do full refresh
+
+    def _load_materialized_views(self, conn: duckdb.DuckDBPyConnection, views: set[str]) -> None:
+        """Load data from parquet views into native DuckDB tables for speed.
+        Uses incremental refresh - only loads new/changed partitions.
+        """
+        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
+        
+        # Ensure metadata tracking table exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mv_refresh_metadata (
+                view_name VARCHAR PRIMARY KEY,
+                last_refresh_date TIMESTAMP,
+                max_data_date DATE,
+                row_count BIGINT,
+                refresh_type VARCHAR  -- 'full' or 'incremental'
+            )
+        """)
+
+        # Materialized view: Daily sales aggregates (most queried)
+        if "mv_sales_daily" in views:
+            agg_sales_daily_path = f"{data_lake}/star-schema/agg_sales_daily"
+            needs_full, max_date, _ = self._get_mv_refresh_info(conn, "mv_sales_daily", agg_sales_daily_path)
+            
+            if needs_full or max_date is None:
+                conn.execute(f"""
+                    CREATE OR REPLACE TABLE mv_sales_daily AS
+                    SELECT
+                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) AS date,
+                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
+                        COALESCE(TRY_CAST(items_sold AS DOUBLE), 0) AS items_sold,
+                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    WHERE revenue IS NOT NULL OR transactions IS NOT NULL
+                """)
+                refresh_type = 'full'
+            else:
+                # Incremental: load only dates > max_date in MV
+                conn.execute(f"""
+                    INSERT INTO mv_sales_daily
+                    SELECT
+                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) AS date,
+                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
+                        COALESCE(TRY_CAST(items_sold AS DOUBLE), 0) AS items_sold,
+                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    WHERE (revenue IS NOT NULL OR transactions IS NOT NULL)
+                      AND COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) > '{max_date}'
+                """)
+                refresh_type = 'incremental'
+            
+            # Update metadata
+            conn.execute(f"""
+                INSERT OR REPLACE INTO mv_refresh_metadata 
+                SELECT 'mv_sales_daily', NOW(), MAX(date), COUNT(*), '{refresh_type}'
+                FROM mv_sales_daily
+            """)
+            print(f"[duckdb] mv_sales_daily refreshed ({refresh_type})")
+
+        # Materialized view: Sales by product
+        if "mv_sales_by_product" in views:
+            agg_by_product_path = f"{data_lake}/star-schema/agg_sales_daily_by_product"
+            needs_full, max_date, _ = self._get_mv_refresh_info(conn, "mv_sales_by_product", agg_by_product_path)
+            
+            if needs_full or max_date is None:
+                conn.execute(f"""
+                    CREATE OR REPLACE TABLE mv_sales_by_product AS
+                    SELECT
+                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) AS date,
+                        COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    WHERE revenue IS NOT NULL
+                """)
+            else:
+                # For incremental, we'd need to handle duplicates - use INSERT OR REPLACE pattern
+                conn.execute(f"""
+                    CREATE OR REPLACE TABLE mv_sales_by_product AS
+                    SELECT * FROM mv_sales_by_product WHERE date <= '{max_date}'
+                    UNION ALL
+                    SELECT
+                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) AS date,
+                        COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    WHERE revenue IS NOT NULL
+                      AND COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) > '{max_date}'
+                """)
+
+        # Materialized view: Sales by principal
+        if "mv_sales_by_principal" in views:
+            agg_by_principal_path = f"{data_lake}/star-schema/agg_sales_daily_by_principal"
+            conn.execute(f"""
+                CREATE OR REPLACE TABLE mv_sales_by_principal AS
+                SELECT
+                    COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                    )) AS date,
+                    COALESCE(principal, 'Unknown') AS principal,
+                    COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                FROM read_parquet('{agg_by_principal_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                WHERE revenue IS NOT NULL
+            """)
+
+        # Materialized view: Daily profit aggregates
+        if "mv_profit_daily" in views:
+            agg_profit_path = f"{data_lake}/star-schema/agg_profit_daily"
+            conn.execute(f"""
+                CREATE OR REPLACE TABLE mv_profit_daily AS
+                SELECT
+                    COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                    )) AS date,
+                    COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
+                    COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
+                    COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                    COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
+                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                WHERE revenue_tax_in IS NOT NULL
+            """)
+
     @staticmethod
     @lru_cache(maxsize=1)
     def _get_data_paths() -> tuple:
@@ -85,6 +308,9 @@ class DuckDBManager:
             f"{data_lake}/star-schema/fact_sales_lines_profit",
             f"{data_lake}/star-schema/agg_profit_daily",
             f"{data_lake}/star-schema/agg_profit_daily_by_product",
+            f"{data_lake}/star-schema/agg_sales_daily",
+            f"{data_lake}/star-schema/agg_sales_daily_by_product",
+            f"{data_lake}/star-schema/agg_sales_daily_by_principal",
             f"{data_lake}/star-schema/dim_products.parquet",
             f"{data_lake}/star-schema/dim_categories.parquet",
             f"{data_lake}/star-schema/dim_brands.parquet",
@@ -97,7 +323,8 @@ class DuckDBManager:
         Groups:
         - overview: only agg_profit_daily* (needed by home/Overview)
         - dims: dim_* views
-        - sales: fact_sales, fact_invoice_sales, fact_purchases, fact_sales_all
+        - sales_agg: agg_sales_daily* (FAST - for Sales page default queries)
+        - sales: fact_sales, fact_invoice_sales, fact_purchases, fact_sales_all (SLOW - for drilldowns)
         - inventory: fact_inventory_moves, fact_stock_on_hand_snapshot
         - profit_detail: cost/profit detail views (cost events, snapshots, sales_lines_profit)
         - all: everything
@@ -105,8 +332,18 @@ class DuckDBManager:
         if not groups:
             return
 
+        # Check which views already exist to avoid recreating them
+        existing_views = set()
+        try:
+            result = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_type = 'VIEW'").fetchall()
+            existing_views = {r[0] for r in result}
+            if existing_views:
+                print(f"[duckdb] existing views: {sorted(existing_views)[:20]}...")
+        except Exception:
+            pass
+
         if "all" in groups:
-            groups = {"overview", "dims", "sales", "inventory", "profit_detail"}
+            groups = {"overview", "dims", "sales_agg", "sales", "inventory", "profit_detail"}
         (
             fact_path,
             fact_invoice_path,
@@ -121,6 +358,9 @@ class DuckDBManager:
             sales_profit_path,
             agg_profit_daily_path,
             agg_profit_daily_by_product_path,
+            agg_sales_daily_path,
+            agg_sales_daily_by_product_path,
+            agg_sales_daily_by_principal_path,
             dim_products,
             dim_categories,
             dim_brands,
@@ -145,7 +385,12 @@ class DuckDBManager:
             """Create a view; if underlying parquet data is missing, fall back to an empty view.
 
             This avoids expensive recursive filesystem scans during startup on bind-mounted volumes.
+            Skips creation if view already exists (for faster restarts with persistent DB).
             """
+            # Skip if view already exists
+            if view_name in existing_views:
+                return
+
             start = time.time()
             try:
                 conn.execute(create_sql)
@@ -721,6 +966,91 @@ class DuckDBManager:
             """,
         )
 
+        # Fast sales aggregates - use "sales_agg" group for sub-second response
+        if "sales_agg" in groups:
+            _try_create_view(
+                "agg_sales_daily",
+                f"""
+                CREATE OR REPLACE VIEW agg_sales_daily AS
+                SELECT
+                    COALESCE(
+                        TRY_CAST(date AS DATE),
+                        MAKE_DATE(TRY_CAST(year AS INTEGER), TRY_CAST(month AS INTEGER), TRY_CAST(day AS INTEGER))
+                    ) AS date,
+                    COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                    COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
+                    COALESCE(TRY_CAST(items_sold AS DOUBLE), 0) AS items_sold,
+                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                """,
+                """
+                CREATE OR REPLACE VIEW agg_sales_daily AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST(0 AS DOUBLE) AS revenue,
+                    CAST(0 AS BIGINT) AS transactions,
+                    CAST(0 AS DOUBLE) AS items_sold,
+                    CAST(0 AS BIGINT) AS lines
+                WHERE FALSE
+                """,
+            )
+
+        if "sales_agg" in groups:
+            _try_create_view(
+                "agg_sales_daily_by_product",
+                f"""
+                CREATE OR REPLACE VIEW agg_sales_daily_by_product AS
+                SELECT
+                    COALESCE(
+                        TRY_CAST(date AS DATE),
+                        MAKE_DATE(TRY_CAST(year AS INTEGER), TRY_CAST(month AS INTEGER), TRY_CAST(day AS INTEGER))
+                    ) AS date,
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                FROM read_parquet('{agg_sales_daily_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                """,
+                """
+                CREATE OR REPLACE VIEW agg_sales_daily_by_product AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST(NULL AS BIGINT) AS product_id,
+                    CAST(0 AS DOUBLE) AS revenue,
+                    CAST(0 AS DOUBLE) AS quantity,
+                    CAST(0 AS BIGINT) AS lines
+                WHERE FALSE
+                """,
+            )
+
+        if "sales_agg" in groups:
+            _try_create_view(
+                "agg_sales_daily_by_principal",
+                f"""
+                CREATE OR REPLACE VIEW agg_sales_daily_by_principal AS
+                SELECT
+                    COALESCE(
+                        TRY_CAST(date AS DATE),
+                        MAKE_DATE(TRY_CAST(year AS INTEGER), TRY_CAST(month AS INTEGER), TRY_CAST(day AS INTEGER))
+                    ) AS date,
+                    COALESCE(principal, 'Unknown') AS principal,
+                    COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                FROM read_parquet('{agg_sales_daily_by_principal_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                """,
+                """
+                CREATE OR REPLACE VIEW agg_sales_daily_by_principal AS
+                SELECT
+                    CAST(NULL AS DATE) AS date,
+                    CAST('Unknown' AS VARCHAR) AS principal,
+                    CAST(0 AS DOUBLE) AS revenue,
+                    CAST(0 AS DOUBLE) AS quantity,
+                    CAST(0 AS BIGINT) AS lines
+                WHERE FALSE
+                """,
+            )
+
         if "sales" in groups:
             _try_create_view(
                 "fact_sales_all",
@@ -874,46 +1204,21 @@ def ensure_duckdb_view_groups(groups: set[str]) -> None:
     DuckDBManager().ensure_view_groups(groups)
 
 
+def ensure_materialized_views(views: set[str]) -> None:
+    """Public helper to load materialized views for ultra-fast queries."""
+    DuckDBManager().ensure_materialized_views(views)
+
+
 def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
-    ensure_duckdb_view_groups({"sales", "dims"})
+    ensure_duckdb_view_groups({"sales_agg"})
     conn = DuckDBManager().get_connection()
-    fact_path, fact_invoice_path, fact_purchases_path, fact_inventory_moves_path, fact_stock_snapshot_path, cost_events_path, cost_latest_path, beginning_costs_path, sales_profit_path, agg_profit_daily_path, agg_profit_daily_by_product_path, dim_products, dim_categories, dim_brands = DuckDBManager._get_data_paths()
-
-    def _parquet_columns(parquet_path: str) -> set:
-        try:
-            rows = conn.execute(
-                f"DESCRIBE SELECT * FROM read_parquet('{parquet_path}')"
-            ).fetchall()
-            return {r[0] for r in rows if r and r[0]}
-        except Exception:
-            return set()
-
-    brands_cols = _parquet_columns(dim_brands)
-
-    brand_name_col = (
-        "brand_name" if "brand_name" in brands_cols
-        else "product_brand" if "product_brand" in brands_cols
-        else None
-    )
-    principal_name_col = (
-        "principal_name" if "principal_name" in brands_cols
-        else None
-    )
-
-    if brand_name_col and principal_name_col:
-        principal_expr = f"COALESCE(NULLIF(TRIM(b.{principal_name_col}), ''), 'Unknown Principal')"
-        brand_join = f"LOWER(TRIM(b.{brand_name_col})) = LOWER(TRIM(p.product_brand))"
-    else:
-        principal_expr = "'Unknown Principal'"
-        brand_join = "FALSE"
 
     query = """
         SELECT 
-            COALESCE(p.product_brand, 'Unknown') as principal,
-            SUM(f.revenue) as revenue
-        FROM fact_sales_all f
-        LEFT JOIN dim_products p ON f.product_id = p.product_id
-        WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
+            principal,
+            SUM(revenue) as revenue
+        FROM agg_sales_daily_by_principal
+        WHERE date >= ? AND date < ? + INTERVAL 1 DAY
         GROUP BY principal
         ORDER BY revenue DESC
         LIMIT ?
@@ -938,10 +1243,11 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     return DuckDBManager().get_connection()
 
 
+@versioned_cache(ttl=3600, key_prefix="sales_trends")
 @lru_cache(maxsize=32)
 def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
-    """Query sales trends - optimized with single scan."""
-    ensure_duckdb_view_groups({"sales"})
+    """Query sales trends - uses pre-aggregated daily data for speed."""
+    ensure_duckdb_view_groups({"sales_agg"})
     conn = get_duckdb_connection()
 
     trunc_map = {'daily': 'day', 'weekly': 'week', 'monthly': 'month'}
@@ -962,18 +1268,18 @@ def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') 
     )
     SELECT 
         ds.period_start as date,
-        COALESCE(SUM(fs.revenue), 0) as revenue,
-        COALESCE(COUNT(DISTINCT fs.txn_id), 0) as transactions,
-        COALESCE(SUM(fs.quantity), 0) as items_sold,
+        COALESCE(SUM(a.revenue), 0) as revenue,
+        COALESCE(SUM(a.transactions), 0) as transactions,
+        COALESCE(SUM(a.items_sold), 0) as items_sold,
         CASE 
-            WHEN COUNT(DISTINCT fs.txn_id) > 0 
-            THEN SUM(fs.revenue) / COUNT(DISTINCT fs.txn_id) 
+            WHEN SUM(a.transactions) > 0 
+            THEN SUM(a.revenue) / SUM(a.transactions) 
             ELSE 0 
         END as avg_transaction_value
     FROM date_series ds
-    LEFT JOIN fact_sales_all fs ON 
-        fs.date >= ds.period_start AND 
-        fs.date < ds.period_end
+    LEFT JOIN agg_sales_daily a ON 
+        a.date >= ds.period_start AND 
+        a.date < ds.period_end
     GROUP BY ds.period_start
     ORDER BY ds.period_start
     """
@@ -1010,21 +1316,22 @@ def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     return result
 
 
+@versioned_cache(ttl=3600, key_prefix="top_products")
 @lru_cache(maxsize=32)
 def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     """Query top products - optimized: aggregate by product_id first, then join."""
-    ensure_duckdb_view_groups({"sales", "dims"})
+    ensure_duckdb_view_groups({"sales_agg", "dims"})
     conn = get_duckdb_connection()
 
     query = """
-    WITH sales_agg AS (
+    WITH product_agg AS (
         SELECT 
-            f.product_id,
-            SUM(f.quantity) as quantity_sold,
-            SUM(f.revenue) as total_unit_price
-        FROM fact_sales_all f
-        WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
-        GROUP BY f.product_id
+            product_id,
+            SUM(quantity) as quantity_sold,
+            SUM(revenue) as total_unit_price
+        FROM agg_sales_daily_by_product
+        WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+        GROUP BY product_id
         ORDER BY total_unit_price DESC
         LIMIT ?
     )
@@ -1033,7 +1340,7 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
         COALESCE(p.product_category, 'Unknown Category') as category,
         s.quantity_sold,
         s.total_unit_price
-    FROM sales_agg s
+    FROM product_agg s
     LEFT JOIN dim_products p ON s.product_id = p.product_id
     ORDER BY s.total_unit_price DESC
     """
@@ -1043,46 +1350,38 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
     return result
 
 
+@versioned_cache(ttl=3600, key_prefix="revenue_comparison")
 @lru_cache(maxsize=32)
 def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     """Compare revenue - SINGLE query for both periods using FILTER."""
-    ensure_duckdb_view_groups({"sales"})
+    ensure_duckdb_view_groups({"sales_agg"})
     conn = get_duckdb_connection()
 
     period_days = (end_date - start_date).days + 1
     prev_start = start_date - timedelta(days=period_days)
     prev_end = start_date - timedelta(days=1)
 
-    # Combined query using FILTER - scans data only once
     query = """
     SELECT 
-        -- Current period
-        SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as cur_rev,
-        COALESCE(NULLIF(COUNT(DISTINCT txn_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
-                 COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as cur_txn,
-        SUM(quantity) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as cur_items,
-        
-        -- Previous period
+        SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as curr_rev,
+        SUM(transactions) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as curr_txn,
+        SUM(items_sold) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as curr_items,
         SUM(revenue) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_rev,
-        COALESCE(NULLIF(COUNT(DISTINCT txn_id) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY), 0),
-                 COUNT(*) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY)) as prev_txn,
-        SUM(quantity) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_items
-        
-    FROM fact_sales_all
+        SUM(transactions) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_txn,
+        SUM(items_sold) FILTER (WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY) as prev_items
+    FROM agg_sales_daily
     WHERE date >= ?::DATE AND date < ?::DATE + INTERVAL 1 DAY
     """
     
     params = [
         # Current period filters
         start_date, end_date,  # cur_rev
-        start_date, end_date, start_date, end_date,  # cur_txn
+        start_date, end_date,  # cur_txn
         start_date, end_date,  # cur_items
-        
         # Previous period filters
         prev_start, prev_end,  # prev_rev
-        prev_start, prev_end, prev_start, prev_end,  # prev_txn
+        prev_start, prev_end,  # prev_txn
         prev_start, prev_end,  # prev_items
-        
         # Overall filter
         prev_start, end_date
     ]
@@ -1152,20 +1451,20 @@ def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame
 
 @lru_cache(maxsize=32)
 def query_overview_summary(start_date: date, end_date: date) -> Dict:
-    """Get overview summary - combined into fewer queries."""
-    ensure_duckdb_view_groups({"sales", "dims"})
+    """Get overview summary - uses pre-aggregated data for speed."""
+    ensure_duckdb_view_groups({"sales_agg", "dims"})
     conn = get_duckdb_connection()
 
-    # Single combined query for all aggregations
+    # Single combined query using pre-aggregated data
     query = """
     WITH base AS (
-        SELECT f.revenue, f.quantity, 
+        SELECT a.product_id, a.revenue, a.quantity,
                COALESCE(p.product_parent_category, 'Unknown') as parent_cat,
                COALESCE(p.product_category, 'Unknown') as cat,
                COALESCE(p.product_brand, 'Unknown') as brand
-        FROM fact_sales_all f
-        LEFT JOIN dim_products p ON f.product_id = p.product_id
-        WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
+        FROM agg_sales_daily_by_product a
+        LEFT JOIN dim_products p ON a.product_id = p.product_id
+        WHERE a.date >= ? AND a.date < ? + INTERVAL 1 DAY
     ),
     summary AS (SELECT SUM(revenue) as rev, SUM(quantity) as qty FROM base),
     by_cat AS (SELECT parent_cat, cat, SUM(revenue) as rev FROM base GROUP BY 1, 2),

@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "data-engineer",
+  "owner": "sickn33",
+  "repo": "antigravity-awesome-skills",
+  "path": "plugins/antigravity-awesome-skills-claude/skills/data-engineer",
+  "branch": "main",
+  "sha": "33d6d5dbbeab1d5d724d5124c8d20f0fb89cbe4a",
+  "source": "manual"
+}
