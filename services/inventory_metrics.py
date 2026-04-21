@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 import math
+import time
 from typing import Dict, Optional
 
 import pandas as pd
@@ -208,12 +209,18 @@ def get_stock_levels_ledger(
                 'low_stock_days': low_stock_days,
             },
         }
+    
+    baseline_start = time.time()
     baseline_df = _load_ledger_baseline()
+    print(f"[TIMING] _load_ledger_baseline: {time.time() - baseline_start:.3f}s")
 
     # movement_date in fact_inventory_moves is stored as UTC; convert local cutoffs (UTC+07) to UTC.
     baseline_ts_utc = _to_utc_from_jakarta(_LEDGER_BASELINE_TS)
     cutoff_ts_utc = _to_utc_from_jakarta(cutoff_ts_local)
+    
+    delta_start = time.time()
     deltas_df = _query_location_ledger_deltas(baseline_ts_utc, cutoff_ts_utc, _LEDGER_LOCATION_POOL)
+    print(f"[TIMING] _query_location_ledger_deltas: {time.time() - delta_start:.3f}s")
 
     df = baseline_df.merge(deltas_df, on='product_id', how='outer')
     df['qty'] = pd.to_numeric(df.get('qty'), errors='coerce').fillna(0.0)
@@ -225,6 +232,8 @@ def get_stock_levels_ledger(
     lookback_start = as_of_date - timedelta(days=lookback_days - 1)
     ensure_duckdb_view_groups({"sales", "dims"})
     conn = get_duckdb_connection()
+    
+    sales_start = time.time()
     sales_df = conn.execute(
         """
         SELECT product_id, SUM(quantity) AS units_sold
@@ -234,10 +243,12 @@ def get_stock_levels_ledger(
         """,
         [lookback_start, as_of_date],
     ).df()
+    print(f"[TIMING] sales query (ledger): {time.time() - sales_start:.3f}s")
 
     df = df.merge(sales_df, on='product_id', how='left')
     df['units_sold'] = pd.to_numeric(df.get('units_sold'), errors='coerce').fillna(0.0)
 
+    prod_start = time.time()
     products_df = conn.execute(
         """
         SELECT
@@ -250,6 +261,8 @@ def get_stock_levels_ledger(
         FROM dim_products
         """
     ).df()
+    print(f"[TIMING] products query: {time.time() - prod_start:.3f}s")
+    
     df = df.merge(products_df, on='product_id', how='left')
 
     df['product_name'] = df['product_name'].fillna(df['product_id'].apply(lambda v: f'Product {v}'))
@@ -486,6 +499,7 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
     if start_date > end_date:
         start_date, end_date = end_date, start_date
 
+    sell_through_start = time.time()
     snapshot_date = _get_snapshot_date(start_date)
     empty_items = pd.DataFrame(columns=[
         "product_id", "product_name", "product_category", "product_brand",
@@ -563,6 +577,8 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
     denom = total_begin + total_received
     overall_sell_through = total_sold / denom if denom > 0 else 0.0
 
+    print(f"[TIMING] get_sell_through_analysis: {time.time() - sell_through_start:.3f}s")
+    
     return {
         "snapshot_date": snapshot_date,
         "items": items_df,
@@ -579,24 +595,127 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
 def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
     ensure_duckdb_view_groups({"sales", "dims"})
     conn = get_duckdb_connection()
+    
+    query_start = time.time()
     query = """
         SELECT
-            f.product_id,
-            COALESCE(p.product_name, 'Product ' || f.product_id::VARCHAR) AS product_name,
-            COALESCE(p.product_category, 'Unknown Category') AS product_category,
-            COALESCE(p.product_brand, 'Unknown Brand') AS product_brand,
-            COALESCE(p.product_barcode, '') AS product_barcode,
-            COALESCE(p.product_sku, '') AS product_sku,
-            SUM(f.revenue) AS revenue,
-            SUM(f.quantity) AS quantity
-        FROM fact_sales_all f
-        LEFT JOIN dim_products p ON f.product_id = p.product_id
-        WHERE f.date >= ? AND f.date < ? + INTERVAL 1 DAY
-        GROUP BY 1, 2, 3, 4, 5, 6
-        ORDER BY revenue DESC
+            s.product_id,
+            SUM(s.revenue) as revenue,
+            SUM(s.quantity) as quantity,
+            p.product_name,
+            p.product_category,
+            p.product_brand
+        FROM fact_sales_all s
+        LEFT JOIN dim_products p ON s.product_id = p.product_id
+        WHERE s.date >= ? AND s.date < ? + INTERVAL 1 DAY
+        GROUP BY 1, 4, 5, 6
+        ORDER BY 2 DESC
+    """
+    
+    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    print(f"[TIMING] get_abc_analysis: {time.time() - query_start:.3f}s")
+
+
+def query_inventory_summary(
+    snapshot_date: date,
+    lookback_days: int = DEFAULT_STOCK_LOOKBACK_DAYS,
+    overstock_days: int = 90,
+    low_stock_days: int = 14,
+) -> Dict:
+    """
+    Return summary counts for executive summary cards.
+
+    Returns: {
+        'overstock_value': float,  # inventory value of overstock items
+        'overstock_sku_count': int,
+        'low_stock_count': int,     # SKUs with < low_stock_days cover
+        'dead_stock_count': int,    # SKUs with no sales in lookback period
+        'total_inventory_value': float,
+        'total_sku_count': int,
+    }
+    """
+    from services.duckdb_connector import get_duckdb_connection
+    from services.duckdb_connector import ensure_duckdb_view_groups
+
+    lookback_start = snapshot_date - timedelta(days=lookback_days - 1)
+
+    ensure_duckdb_view_groups({"inventory", "sales", "dims"})
+    conn = get_duckdb_connection()
+
+    query_start = time.time()
+    
+    query = """
+        WITH on_hand AS (
+            SELECT
+                product_id,
+                SUM(quantity) AS on_hand_qty
+            FROM fact_stock_on_hand_snapshot
+            WHERE snapshot_date = ?
+            GROUP BY 1
+        ),
+        sales AS (
+            SELECT
+                product_id,
+                SUM(quantity) AS units_sold,
+                SUM(revenue) AS revenue
+            FROM fact_sales_all
+            WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+            GROUP BY 1
+        ),
+        combined AS (
+            SELECT
+                o.product_id,
+                o.on_hand_qty,
+                COALESCE(s.units_sold, 0) AS units_sold,
+                COALESCE(s.revenue, 0) AS revenue
+            FROM on_hand o
+            LEFT JOIN sales s ON o.product_id = s.product_id
+        ),
+        with_metrics AS (
+            SELECT
+                product_id,
+                on_hand_qty,
+                units_sold,
+                revenue,
+                CASE
+                    WHEN units_sold = 0 THEN NULL
+                    ELSE on_hand_qty / (units_sold::FLOAT / ?)
+                END AS days_cover,
+                CASE
+                    WHEN units_sold = 0 THEN TRUE
+                    ELSE FALSE
+                END AS is_dead_stock,
+                CASE
+                    WHEN units_sold = 0 THEN on_hand_qty * 0  -- No revenue to estimate value
+                    ELSE on_hand_qty * (revenue / NULLIF(units_sold, 0))
+                END AS est_stock_value
+            FROM combined
+        )
+        SELECT
+            COUNT(*) AS total_sku_count,
+            SUM(est_stock_value) AS total_inventory_value,
+            SUM(CASE WHEN is_dead_stock THEN 1 ELSE 0 END) AS dead_stock_count,
+            SUM(CASE WHEN days_cover < ? AND NOT is_dead_stock THEN 1 ELSE 0 END) AS low_stock_count,
+            SUM(CASE WHEN days_cover > ? AND NOT is_dead_stock THEN 1 ELSE 0 END) AS overstock_sku_count,
+            SUM(CASE WHEN days_cover > ? AND NOT is_dead_stock THEN est_stock_value ELSE 0 END) AS overstock_value
+        FROM with_metrics
     """
 
-    return conn.execute(query, [start_date, end_date]).df()
+    result = conn.execute(
+        query,
+        [snapshot_date, lookback_start, snapshot_date, lookback_days, low_stock_days, overstock_days, overstock_days]
+    ).fetchone()
+    
+    print(f"[TIMING] query_inventory_summary: {time.time() - query_start:.3f}s")
+
+    return {
+        'total_sku_count': int(result[0] or 0),
+        'total_inventory_value': float(result[1] or 0),
+        'dead_stock_count': int(result[2] or 0),
+        'low_stock_count': int(result[3] or 0),
+        'overstock_sku_count': int(result[4] or 0),
+        'overstock_value': float(result[5] or 0),
+    }
 
 
 def get_abc_analysis(
