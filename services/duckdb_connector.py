@@ -289,6 +289,96 @@ class DuckDBManager:
                 WHERE revenue_tax_in IS NOT NULL
             """)
 
+        # Materialized view: Daily inventory snapshots
+        if "mv_inventory_daily" in views:
+            stock_snapshot_path = f"{data_lake}/star-schema/fact_stock_on_hand_snapshot"
+            conn.execute(f"""
+                CREATE OR REPLACE TABLE mv_inventory_daily AS
+                SELECT
+                    COALESCE(TRY_CAST(snapshot_date AS DATE), MAKE_DATE(
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                        CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                    )) AS snapshot_date,
+                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
+                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS on_hand_qty,
+                    COALESCE(TRY_CAST(reserved_quantity AS DOUBLE), 0) AS reserved_qty,
+                    COALESCE(TRY_CAST((quantity - reserved_quantity) AS DOUBLE), 0) AS available_qty,
+                    0 AS incoming_qty,
+                    0 AS outgoing_qty,
+                    location_id,
+                    NULL AS warehouse_id
+                FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                WHERE product_id IS NOT NULL
+            """)
+
+        # Materialized view: Product velocity (daily sales rate from sales data)
+        if "mv_product_velocity" in views:
+            conn.execute("""
+                CREATE OR REPLACE TABLE mv_product_velocity AS
+                SELECT
+                    product_id,
+                    COUNT(DISTINCT date) AS days_with_sales,
+                    SUM(quantity) AS total_sold,
+                    AVG(quantity) AS avg_daily_sold,
+                    STDDEV(quantity) AS stddev_daily_sold,
+                    MAX(date) AS last_sale_date,
+                    MIN(date) AS first_sale_date
+                FROM fact_sales_all
+                WHERE date >= CURRENT_DATE - INTERVAL '90 days'
+                  AND quantity IS NOT NULL
+                  AND quantity > 0
+                GROUP BY product_id
+            """)
+
+        # Materialized view: Inventory status with cover calculations
+        if "mv_inventory_status" in views:
+            stock_snapshot_path = f"{data_lake}/star-schema/fact_stock_on_hand_snapshot"
+            conn.execute(f"""
+                CREATE OR REPLACE TABLE mv_inventory_status AS
+                WITH latest_stock AS (
+                    SELECT
+                        product_id,
+                        quantity as on_hand_qty,
+                        (quantity - reserved_quantity) as available_qty,
+                        location_id,
+                        ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY snapshot_date DESC) as rn
+                    FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    WHERE product_id IS NOT NULL
+                ),
+                velocity AS (
+                    SELECT
+                        product_id,
+                        AVG(quantity) as avg_daily_sold
+                    FROM fact_sales_all
+                    WHERE date >= CURRENT_DATE - INTERVAL '30 days'
+                      AND quantity IS NOT NULL
+                      AND quantity > 0
+                    GROUP BY product_id
+                )
+                SELECT
+                    ls.product_id,
+                    ls.on_hand_qty,
+                    ls.available_qty,
+                    ls.location_id,
+                    COALESCE(v.avg_daily_sold, 0) as avg_daily_sold,
+                    CASE
+                        WHEN COALESCE(v.avg_daily_sold, 0) > 0 THEN ls.on_hand_qty / NULLIF(v.avg_daily_sold, 0)
+                        WHEN ls.on_hand_qty > 0 THEN 999999
+                        ELSE 0
+                    END as days_of_cover,
+                    CASE
+                        WHEN ls.on_hand_qty <= 0 THEN 'out_of_stock'
+                        WHEN COALESCE(v.avg_daily_sold, 0) = 0 AND ls.on_hand_qty > 0 THEN 'dead_stock'
+                        WHEN ls.on_hand_qty / NULLIF(v.avg_daily_sold, 0) < 14 THEN 'low_stock'
+                        WHEN ls.on_hand_qty / NULLIF(v.avg_daily_sold, 0) > 90 THEN 'overstock'
+                        ELSE 'healthy'
+                    END as stock_status
+                FROM latest_stock ls
+                LEFT JOIN velocity v ON ls.product_id = v.product_id
+                WHERE ls.rn = 1
+            """)
+
     @staticmethod
     @lru_cache(maxsize=1)
     def _get_data_paths() -> tuple:

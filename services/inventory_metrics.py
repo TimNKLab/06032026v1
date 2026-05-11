@@ -12,6 +12,7 @@ import pandas as pd
 
 from services.duckdb_connector import get_duckdb_connection
 from services.duckdb_connector import ensure_duckdb_view_groups
+from services.duckdb_connector import DuckDBManager
 
 DEFAULT_ABC_THRESHOLDS = {
     "a": 0.2,
@@ -230,7 +231,12 @@ def get_stock_levels_ledger(
     df = df[['product_id', 'on_hand_qty', 'reserved_qty']].copy()
 
     lookback_start = as_of_date - timedelta(days=lookback_days - 1)
-    ensure_duckdb_view_groups({"sales", "dims"})
+    ensure_duckdb_view_groups({"sales", "dims", "inventory"})
+    
+    # Load materialized views for faster queries
+    db_manager = DuckDBManager()
+    db_manager.ensure_materialized_views({"mv_inventory_status", "mv_inventory_daily", "mv_product_velocity"})
+    
     conn = get_duckdb_connection()
     
     sales_start = time.time()
@@ -385,6 +391,11 @@ def get_stock_levels(
 
 def _query_sell_through(snapshot_date: date, start_date: date, end_date: date) -> pd.DataFrame:
     ensure_duckdb_view_groups({"inventory", "sales", "dims"})
+    
+    # Load inventory materialized views for faster queries
+    db_manager = DuckDBManager()
+    db_manager.ensure_materialized_views({"mv_inventory_status", "mv_inventory_daily", "mv_product_velocity"})
+    
     conn = get_duckdb_connection()
     query = """
         WITH begin_on_hand AS (
@@ -593,7 +604,12 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
 
 
 def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
-    ensure_duckdb_view_groups({"sales", "dims"})
+    ensure_duckdb_view_groups({"sales", "dims", "sales_agg"})
+    
+    # Load sales materialized views for faster queries
+    db_manager = DuckDBManager()
+    db_manager.ensure_materialized_views({"mv_sales_daily", "mv_sales_by_product"})
+    
     conn = get_duckdb_connection()
     
     query_start = time.time()
@@ -614,6 +630,7 @@ def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
     
     result = conn.execute(query, [start_date, end_date]).fetchdf()
     print(f"[TIMING] get_abc_analysis: {time.time() - query_start:.3f}s")
+    return result
 
 
 def query_inventory_summary(
@@ -637,73 +654,69 @@ def query_inventory_summary(
     from services.duckdb_connector import get_duckdb_connection
     from services.duckdb_connector import ensure_duckdb_view_groups
 
+    # Defensive: Limit lookback to prevent excessive queries
+    lookback_days = min(lookback_days, 90)  # Max 90 days lookback
     lookback_start = snapshot_date - timedelta(days=lookback_days - 1)
 
     ensure_duckdb_view_groups({"inventory", "sales", "dims"})
+    
+    # Load materialized views for ultra-fast queries
+    db_manager = DuckDBManager()
+    db_manager.ensure_materialized_views({"mv_inventory_status", "mv_inventory_daily", "mv_product_velocity"})
+    
     conn = get_duckdb_connection()
 
     query_start = time.time()
     
+    # Use materialized views for faster query performance
     query = """
-        WITH on_hand AS (
-            SELECT
+        WITH latest_stock AS (
+            SELECT 
                 product_id,
-                SUM(quantity) AS on_hand_qty
-            FROM fact_stock_on_hand_snapshot
-            WHERE snapshot_date = ?
-            GROUP BY 1
+                on_hand_qty,
+                available_qty,
+                avg_daily_sold,
+                days_of_cover,
+                stock_status
+            FROM mv_inventory_status
         ),
-        sales AS (
-            SELECT
+        sales_30d AS (
+            SELECT 
                 product_id,
                 SUM(quantity) AS units_sold,
                 SUM(revenue) AS revenue
             FROM fact_sales_all
-            WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+            WHERE date >= ? AND date <= ?
             GROUP BY 1
         ),
-        combined AS (
+        with_value AS (
             SELECT
-                o.product_id,
-                o.on_hand_qty,
+                ls.product_id,
+                ls.on_hand_qty,
+                ls.days_of_cover,
+                ls.stock_status,
+                COALESCE(s.revenue, 0) AS revenue,
                 COALESCE(s.units_sold, 0) AS units_sold,
-                COALESCE(s.revenue, 0) AS revenue
-            FROM on_hand o
-            LEFT JOIN sales s ON o.product_id = s.product_id
-        ),
-        with_metrics AS (
-            SELECT
-                product_id,
-                on_hand_qty,
-                units_sold,
-                revenue,
                 CASE
-                    WHEN units_sold = 0 THEN NULL
-                    ELSE on_hand_qty / (units_sold::FLOAT / ?)
-                END AS days_cover,
-                CASE
-                    WHEN units_sold = 0 THEN TRUE
-                    ELSE FALSE
-                END AS is_dead_stock,
-                CASE
-                    WHEN units_sold = 0 THEN on_hand_qty * 0  -- No revenue to estimate value
-                    ELSE on_hand_qty * (revenue / NULLIF(units_sold, 0))
+                    WHEN COALESCE(s.units_sold, 0) = 0 THEN 0
+                    ELSE ls.on_hand_qty * (s.revenue / NULLIF(s.units_sold, 0))
                 END AS est_stock_value
-            FROM combined
+            FROM latest_stock ls
+            LEFT JOIN sales_30d s ON ls.product_id = s.product_id
         )
         SELECT
             COUNT(*) AS total_sku_count,
             SUM(est_stock_value) AS total_inventory_value,
-            SUM(CASE WHEN is_dead_stock THEN 1 ELSE 0 END) AS dead_stock_count,
-            SUM(CASE WHEN days_cover < ? AND NOT is_dead_stock THEN 1 ELSE 0 END) AS low_stock_count,
-            SUM(CASE WHEN days_cover > ? AND NOT is_dead_stock THEN 1 ELSE 0 END) AS overstock_sku_count,
-            SUM(CASE WHEN days_cover > ? AND NOT is_dead_stock THEN est_stock_value ELSE 0 END) AS overstock_value
-        FROM with_metrics
+            SUM(CASE WHEN stock_status = 'dead_stock' THEN 1 ELSE 0 END) AS dead_stock_count,
+            SUM(CASE WHEN stock_status = 'low_stock' THEN 1 ELSE 0 END) AS low_stock_count,
+            SUM(CASE WHEN stock_status = 'overstock' THEN 1 ELSE 0 END) AS overstock_sku_count,
+            SUM(CASE WHEN stock_status = 'overstock' THEN est_stock_value ELSE 0 END) AS overstock_value
+        FROM with_value
     """
 
     result = conn.execute(
         query,
-        [snapshot_date, lookback_start, snapshot_date, lookback_days, low_stock_days, overstock_days, overstock_days]
+        [lookback_start, snapshot_date]
     ).fetchone()
     
     print(f"[TIMING] query_inventory_summary: {time.time() - query_start:.3f}s")
@@ -716,6 +729,55 @@ def query_inventory_summary(
         'overstock_sku_count': int(result[4] or 0),
         'overstock_value': float(result[5] or 0),
     }
+
+
+def get_inventory_costs(as_of_date: date) -> pd.DataFrame:
+    """Fetch latest known unit cost per product as of the given date.
+
+    First tries purchase history from fact_product_cost_latest_daily.
+    Falls back to beginning costs from CSV for products never purchased.
+
+    Returns DataFrame with columns: product_id, cost_unit_tax_in
+    """
+    ensure_duckdb_view_groups({"profit_detail"})
+    conn = get_duckdb_connection()
+
+    # Query 1: Get costs from purchase history
+    purchase_query = """
+        SELECT
+            product_id,
+            cost_unit_tax_in
+        FROM fact_product_cost_latest_daily
+        WHERE date <= ?
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY date DESC) = 1
+    """
+    purchase_costs = conn.execute(purchase_query, [as_of_date]).fetchdf()
+
+    # Query 2: Get beginning costs for products without purchase history
+    # Only use beginning costs if as_of_date >= effective_date (2025-02-10)
+    beginning_query = """
+        SELECT
+            b.product_id,
+            b.cost_unit_tax_in
+        FROM fact_product_beginning_costs b
+        LEFT JOIN (
+            SELECT DISTINCT product_id
+            FROM fact_product_cost_latest_daily
+            WHERE date <= ?
+        ) p ON b.product_id = p.product_id
+        WHERE p.product_id IS NULL
+          AND b.is_active = TRUE
+          AND b.effective_date <= ?
+    """
+    beginning_costs = conn.execute(beginning_query, [as_of_date, as_of_date]).fetchdf()
+
+    # Combine both sources
+    if purchase_costs.empty:
+        return beginning_costs
+    if beginning_costs.empty:
+        return purchase_costs
+
+    return pd.concat([purchase_costs, beginning_costs], ignore_index=True)
 
 
 def get_abc_analysis(

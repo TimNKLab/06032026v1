@@ -84,7 +84,10 @@ def _precreate_views():
             "mv_sales_daily",
             "mv_sales_by_product", 
             "mv_sales_by_principal",
-            "mv_profit_daily"
+            "mv_profit_daily",
+            "mv_inventory_status",
+            "mv_inventory_daily",
+            "mv_product_velocity"
         })
         elapsed = time_module.time() - start
         print(f"[STARTUP] Materialized views ready in {elapsed:.1f}s")

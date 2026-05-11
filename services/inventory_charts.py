@@ -1,4 +1,5 @@
 from datetime import date
+import time
 
 import pandas as pd
 import plotly.express as px
@@ -43,6 +44,7 @@ def build_abc_pareto_chart(
     end_date: date,
     limit: int = 30,
 ) -> go.Figure:
+    chart_start = time.time()
     if items is None or items.empty:
         fig = go.Figure()
         fig.add_annotation(
@@ -59,6 +61,7 @@ def build_abc_pareto_chart(
             template="plotly_white",
             height=400,
         )
+        print(f"[TIMING] build_abc_pareto_chart: {time.time() - chart_start:.3f}s")
         return fig
 
     df = items.copy()
@@ -123,6 +126,7 @@ def build_abc_pareto_chart(
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
 
+    print(f"[TIMING] build_abc_pareto_chart: {time.time() - chart_start:.3f}s")
     return fig
 
 
@@ -133,6 +137,7 @@ def build_stock_cover_distribution_chart(
     low_stock_days: int,
     bins: int = 20,
 ) -> go.Figure:
+    chart_start = time.time()
     if items is None or items.empty:
         return _build_empty_figure(
             "No stock snapshot data available for the selected date.",
@@ -175,6 +180,7 @@ def build_stock_cover_distribution_chart(
         annotation_position="top",
     )
 
+    print(f"[TIMING] build_stock_cover_distribution_chart: {time.time() - chart_start:.3f}s")
     return fig
 
 
@@ -184,6 +190,7 @@ def build_low_stock_chart(
     low_stock_days: int,
     limit: int = 10,
 ) -> go.Figure:
+    chart_start = time.time()
     if items is None or items.empty:
         return _build_empty_figure(
             "No stock snapshot data available for the selected date.",
@@ -229,6 +236,7 @@ def build_low_stock_chart(
         hovertemplate="SKU: %{y}<br>Days of cover: %{x:.1f}<extra></extra>"
     )
 
+    print(f"[TIMING] build_low_stock_chart: {time.time() - chart_start:.3f}s")
     return fig
 
 
@@ -238,6 +246,7 @@ def build_sell_through_by_category_chart(
     end_date: date,
     limit: int = 12,
 ) -> go.Figure:
+    chart_start = time.time()
     if categories is None or categories.empty:
         return _build_empty_figure(
             "No sell-through data available for the selected period.",
@@ -275,6 +284,7 @@ def build_sell_through_by_category_chart(
         hovertemplate="Category: %{x}<br>Sell-through: %{y:.1%}<extra></extra>"
     )
 
+    print(f"[TIMING] build_sell_through_by_category_chart: {time.time() - chart_start:.3f}s")
     return fig
 
 
@@ -284,6 +294,7 @@ def build_sell_through_top_bottom_chart(
     end_date: date,
     limit: int = 8,
 ) -> go.Figure:
+    chart_start = time.time()
     if items is None or items.empty:
         return _build_empty_figure(
             "No sell-through data available for the selected period.",
@@ -340,6 +351,7 @@ def build_sell_through_top_bottom_chart(
         hovertemplate="SKU: %{y}<br>Sell-through: %{x:.1%}<extra></extra>"
     )
 
+    print(f"[TIMING] build_sell_through_top_bottom_chart: {time.time() - chart_start:.3f}s")
     return fig
 
 
@@ -349,6 +361,7 @@ def build_abc_category_distribution_chart(
     end_date: date,
     limit: int = 15,
 ) -> go.Figure:
+    chart_start = time.time()
     if categories is None or categories.empty:
         fig = go.Figure()
         fig.add_annotation(
@@ -412,4 +425,5 @@ def build_abc_category_distribution_chart(
         hovertemplate="Category: %{x}<br>Revenue: Rp %{y:,.0f}<br>Class: %{legendgroup}<extra></extra>"
     )
 
+    print(f"[TIMING] build_abc_category_distribution_chart: {time.time() - chart_start:.3f}s")
     return fig

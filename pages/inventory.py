@@ -7,6 +7,7 @@ import io
 import logging
 import numpy as np
 import pandas as pd
+import time
 
 from services.duckdb_connector import get_duckdb_connection
 from services.duckdb_connector import ensure_duckdb_view_groups
@@ -15,6 +16,8 @@ from services.inventory_metrics import (
     get_stock_levels,
     get_stock_levels_ledger,
     get_sell_through_analysis,
+    get_inventory_costs,
+    query_inventory_summary,
     DEFAULT_STOCK_LOOKBACK_DAYS,
     DEFAULT_LOW_STOCK_DAYS,
     STOCK_LEDGER_BASELINE_DATE,
@@ -652,12 +655,57 @@ def layout():
                                 ),
                                 snapshot_id='exec-snapshot-label',
                             ),
+                            # ── Executive Summary Cards (3-second rule) ──────
                             dmc.Grid([
-                                _simple_kpi_card('Need Attention', 'exec-kpi-attention', 3),
-                                _simple_kpi_card('Revenue at Risk', 'exec-kpi-revenue-risk', 3),
-                                _simple_kpi_card('Capital Locked', 'exec-kpi-capital-locked', 3),
-                                _simple_kpi_card('Healthy SKUs', 'exec-kpi-healthy', 3),
-                            ], gutter='xs'),
+                                dmc.GridCol(
+                                    dmc.Paper(
+                                        dmc.Stack([
+                                            dmc.Group([
+                                                dmc.Text('OVERSTOCK', size='xs', c='dimmed', fw=500),
+                                                dmc.Badge(id='exec-card-overstock-badge', color='red', variant='light', size='xs'),
+                                            ], justify='space-between'),
+                                            dmc.Text(id='exec-card-overstock-value', children='Rp —', size='xl', fw=700, c='red'),
+                                            dmc.Text(id='exec-card-overstock-subtitle', children='— SKUs >90 days', size='xs', c='dimmed'),
+                                        ], gap='xs'),
+                                        p='md', radius='sm', withBorder=True,
+                                        style={'cursor': 'pointer', 'borderLeft': '4px solid #e03131'},
+                                        id='exec-card-overstock',
+                                    ),
+                                    span=4,
+                                ),
+                                dmc.GridCol(
+                                    dmc.Paper(
+                                        dmc.Stack([
+                                            dmc.Group([
+                                                dmc.Text('LOW STOCK', size='xs', c='dimmed', fw=500),
+                                                dmc.Badge(id='exec-card-lowstock-badge', color='orange', variant='light', size='xs'),
+                                            ], justify='space-between'),
+                                            dmc.Text(id='exec-card-lowstock-value', children='—', size='xl', fw=700, c='orange'),
+                                            dmc.Text('SKUs need reorder (<14d)', size='xs', c='dimmed'),
+                                        ], gap='xs'),
+                                        p='md', radius='sm', withBorder=True,
+                                        style={'cursor': 'pointer', 'borderLeft': '4px solid #fd7e14'},
+                                        id='exec-card-lowstock',
+                                    ),
+                                    span=4,
+                                ),
+                                dmc.GridCol(
+                                    dmc.Paper(
+                                        dmc.Stack([
+                                            dmc.Group([
+                                                dmc.Text('DEAD STOCK', size='xs', c='dimmed', fw=500),
+                                                dmc.Badge(id='exec-card-deadstock-badge', color='gray', variant='light', size='xs'),
+                                            ], justify='space-between'),
+                                            dmc.Text(id='exec-card-deadstock-value', children='—', size='xl', fw=700, c='gray'),
+                                            dmc.Text('No sales 30 days', size='xs', c='dimmed'),
+                                        ], gap='xs'),
+                                        p='md', radius='sm', withBorder=True,
+                                        style={'cursor': 'pointer', 'borderLeft': '4px solid #868e96'},
+                                        id='exec-card-deadstock',
+                                    ),
+                                    span=4,
+                                ),
+                            ], gutter='md', mb='lg'),
                             _action_table(
                                 'Reorder Now',
                                 f'A/B items < {REORDER_ALERT_DAYS}d cover · order to {REORDER_TARGET_DAYS}d',
@@ -1068,10 +1116,7 @@ def apply_global_filters(
 # ── Data callbacks ────────────────────────────────────────────────────
 
 @dash.callback(
-    Output('exec-kpi-attention', 'children'),
-    Output('exec-kpi-revenue-risk', 'children'),
-    Output('exec-kpi-capital-locked', 'children'),
-    Output('exec-kpi-healthy', 'children'),
+    # Tables
     Output('exec-reorder-table', 'rowData'),
     Output('exec-reorder-count', 'children'),
     Output('exec-markdown-table', 'rowData'),
@@ -1079,6 +1124,14 @@ def apply_global_filters(
     Output('exec-top-table', 'rowData'),
     Output('exec-top-count', 'children'),
     Output('exec-snapshot-label', 'children'),
+    # Executive Summary Cards (3-second rule)
+    Output('exec-card-overstock-value', 'children'),
+    Output('exec-card-overstock-subtitle', 'children'),
+    Output('exec-card-overstock-badge', 'children'),
+    Output('exec-card-lowstock-value', 'children'),
+    Output('exec-card-lowstock-badge', 'children'),
+    Output('exec-card-deadstock-value', 'children'),
+    Output('exec-card-deadstock-badge', 'children'),
     Input('exec-apply', 'n_clicks'),
     Input('inventory-tabs', 'value'),
     State('exec-date-from', 'value'),
@@ -1093,29 +1146,63 @@ def update_exec_summary(
     n_clicks, active_tab, date_from, date_until,
     categories, brands, distributors, sku_search,
 ):
-    if (dash.callback_context.triggered_id == 'inventory-tabs'
+    triggered_id = dash.callback_context.triggered_id
+    print(f"[DEBUG] update_exec_summary ENTERED: triggered_id={triggered_id}, active_tab={active_tab}, n_clicks={n_clicks}")
+    
+    callback_start = time.time()
+    
+    if (triggered_id == 'inventory-tabs'
             and active_tab != 'actions'):
+        print(f"[DEBUG] update_exec_summary PreventUpdate: tab switch to {active_tab}")
         raise dash.exceptions.PreventUpdate
 
     empty = (
-        '—', '—', '—', '—',
         _empty_row(REORDER_COLUMNS), '0 items',
         _empty_row(MARKDOWN_COLUMNS), '0 items',
         _empty_row(TOP_PERFORMERS_COLUMNS), '0 items',
         'Snapshot: —',
+        'Rp —', '— SKUs', '—',  # Overstock: value, subtitle, badge
+        '—', '—',  # Low stock: value, badge
+        '—', '—',  # Dead stock: value, badge
     )
 
     try:
         start_date, end_date = _resolve_date_range(date_from, date_until)
+        print(f"[DEBUG] Date range resolved: {start_date} to {end_date}")
+        
+        # Defensive: Check if date range is reasonable to prevent excessive queries
+        date_range_days = (end_date - start_date).days
+        if date_range_days > 365:
+            print(f"[WARNING] Date range too large ({date_range_days} days), limiting to 365 days")
+            start_date = end_date - timedelta(days=365)
 
+        print(f"[DEBUG] Calling get_stock_levels_ledger...")
         stock_result = get_stock_levels_ledger(end_date)
         stock_df = stock_result['items'].copy()
+        print(f"[DEBUG] Stock ledger loaded: {len(stock_df)} rows")
 
+        # Defensive: Limit DataFrame size to prevent memory issues
+        MAX_ROWS = 50000
+        if len(stock_df) > MAX_ROWS:
+            print(f"[WARNING] Stock data too large ({len(stock_df)} rows), sampling top {MAX_ROWS}")
+            stock_df = stock_df.nlargest(MAX_ROWS, 'on_hand_qty')
+
+        print(f"[DEBUG] Calling get_abc_analysis...")
         abc_result = get_abc_analysis(start_date, end_date)
         abc_df = abc_result['items'].copy()
+        print(f"[DEBUG] ABC analysis loaded: {len(abc_df)} rows")
 
         if stock_df.empty:
+            print(f"[DEBUG] STOCK DATA EMPTY - returning empty result")
             return empty
+        
+        print(f"[DEBUG] Data loaded: stock={len(stock_df)} rows, abc={len(abc_df)} rows")
+
+        if abc_df.empty:
+            print(f"[DEBUG] ABC DATA EMPTY - using default values")
+            abc_df = pd.DataFrame(
+                columns=['product_id', 'abc_class', 'revenue', 'quantity'],
+            )
 
         abc_cols = ['product_id', 'abc_class', 'revenue', 'quantity']
         abc_cols = [c for c in abc_cols if c in abc_df.columns]
@@ -1150,9 +1237,7 @@ def update_exec_summary(
         if merged.empty:
             return empty
 
-        safe_qty = merged['quantity'].where(merged['quantity'] > 0)
-        unit_price = merged['revenue'] / safe_qty
-        merged['est_stock_value'] = (unit_price * merged['on_hand_qty']).fillna(0)
+        print(f"[DEBUG] Merged: rows={len(merged)}, low={merged['low_stock_flag'].sum()}, dead={merged['dead_stock_flag'].sum()}, value_at_cost={merged['est_stock_value'].sum():,.0f}")
 
         merged['reorder_qty'] = np.ceil(
             (REORDER_TARGET_DAYS * merged['avg_daily_sold'] - merged['on_hand_qty'])
@@ -1182,6 +1267,8 @@ def update_exec_summary(
             & has_stock
         )
 
+        print(f"[DEBUG] Filter counts - reorder={reorder_mask.sum()}, markdown={markdown_mask.sum()}, top={top_mask.sum()}")
+
         reorder_df = merged[reorder_mask].sort_values(
             ['days_of_cover', 'revenue'], ascending=[True, False],
         )
@@ -1210,11 +1297,20 @@ def update_exec_summary(
             f"{end_date.strftime('%d %b %Y')}"
         )
 
+        # Executive summary calculations from merged data (fresh for selected date)
+        # instead of stale materialized view
+        summary_data = {
+            'overstock_value': float(merged.loc[merged['days_of_cover'] > OVERSTOCK_DAYS, 'est_stock_value'].sum()) if not merged.empty else 0.0,
+            'overstock_sku_count': int((merged['days_of_cover'] > OVERSTOCK_DAYS).sum()) if not merged.empty else 0,
+            'low_stock_count': int(merged['low_stock_flag'].sum()) if not merged.empty else 0,
+            'dead_stock_count': int(merged['dead_stock_flag'].sum()) if not merged.empty else 0,
+            'total_inventory_value': float(merged['est_stock_value'].sum()) if not merged.empty else 0.0,
+            'total_sku_count': len(merged) if not merged.empty else 0,
+        }
+        print(f"[DEBUG] Summary: overstock={summary_data['overstock_sku_count']}, low={summary_data['low_stock_count']}, dead={summary_data['dead_stock_count']}, value={_format_currency_short(summary_data['overstock_value'])}")
+        
+        print(f"[TIMING] update_exec_summary callback total: {time.time() - callback_start:.3f}s")
         return (
-            f'{attention_count:,}',
-            _format_currency_short(revenue_at_risk),
-            _format_currency_short(capital_locked),
-            f'{healthy_count:,}',
             reorder_rows,
             f'{len(reorder_df):,} items',
             markdown_rows,
@@ -1222,16 +1318,26 @@ def update_exec_summary(
             top_rows,
             f'{len(top_df):,} items',
             snapshot_label,
+            _format_currency_short(summary_data['overstock_value']),
+            f"{summary_data['overstock_sku_count']:,} SKUs >{OVERSTOCK_DAYS}d (at cost)",
+            f"{summary_data['overstock_sku_count']}",
+            f"{summary_data['low_stock_count']}",
+            f"{summary_data['low_stock_count']}",
+            f"{summary_data['dead_stock_count']}",
+            f"{summary_data['dead_stock_count']}",
         )
 
     except Exception as exc:
         logger.exception('Executive summary callback failed')
+        print(f"[TIMING] update_exec_summary FAILED: {time.time() - callback_start:.3f}s")
         return (
-            '—', '—', '—', '—',
             _empty_row(REORDER_COLUMNS), '—',
             _empty_row(MARKDOWN_COLUMNS), '—',
             _empty_row(TOP_PERFORMERS_COLUMNS), '—',
             f'Error: {exc}',
+            'Rp —', '— SKUs', '—',
+            '—', '—',
+            '—', '—',
         )
 
 
@@ -1255,6 +1361,8 @@ def update_exec_summary(
 def update_stock_levels(
     n_clicks, active_tab, date_value, categories, brands, distributors, sku_search,
 ):
+    callback_start = time.time()
+    
     if (dash.callback_context.triggered_id == 'inventory-tabs'
             and active_tab != 'stock-levels'):
         raise dash.exceptions.PreventUpdate
@@ -1316,6 +1424,7 @@ def update_stock_levels(
             sorted_df = items_df.sort_values('on_hand_qty', ascending=False)
             row_data = [_build_stock_row(r) for _, r in sorted_df.iterrows()]
 
+        print(f"[TIMING] update_stock_levels callback total: {time.time() - callback_start:.3f}s")
         return (
             cover_fig,
             low_fig,
@@ -1328,6 +1437,7 @@ def update_stock_levels(
 
     except Exception as exc:
         logger.exception('Stock levels callback failed')
+        print(f"[TIMING] update_stock_levels FAILED: {time.time() - callback_start:.3f}s")
         return (
             _empty_figure(), _empty_figure(),
             _empty_row(STOCK_COLUMNS),
@@ -1358,6 +1468,8 @@ def update_stock_levels(
 def update_sell_through(
     n_clicks, active_tab, date_from, date_until, categories, brands, distributors, sku_search,
 ):
+    callback_start = time.time()
+    
     if (dash.callback_context.triggered_id == 'inventory-tabs'
             and active_tab != 'sell-through'):
         raise dash.exceptions.PreventUpdate
@@ -1435,6 +1547,7 @@ def update_sell_through(
             sorted_df = items_df.sort_values('units_sold', ascending=False)
             row_data = [_build_sell_row(r) for _, r in sorted_df.iterrows()]
 
+        print(f"[TIMING] update_sell_through callback total: {time.time() - callback_start:.3f}s")
         return (
             category_fig,
             top_bottom_fig,
@@ -1448,6 +1561,7 @@ def update_sell_through(
 
     except Exception as exc:
         logger.exception('Sell-through callback failed')
+        print(f"[TIMING] update_sell_through FAILED: {time.time() - callback_start:.3f}s")
         return (
             _empty_figure(), _empty_figure(),
             _empty_row(SELL_THROUGH_COLUMNS),
@@ -1479,6 +1593,8 @@ def update_sell_through(
 def update_abc_analysis(
     n_clicks, active_tab, date_from, date_until, categories, brands, distributors, sku_search,
 ):
+    callback_start = time.time()
+    
     if (dash.callback_context.triggered_id == 'inventory-tabs'
             and active_tab != 'abc-analysis'):
         raise dash.exceptions.PreventUpdate
@@ -1548,23 +1664,23 @@ def update_abc_analysis(
             sorted_df = items_df.sort_values('revenue', ascending=False)
             row_data = [_build_abc_row(r) for _, r in sorted_df.iterrows()]
 
+        print(f"[TIMING] update_abc_analysis callback total: {time.time() - callback_start:.3f}s")
         return (
             pareto_fig,
             category_fig,
             row_data,
             f'{a_count:,}', f'{b_count:,}', f'{c_count:,}',
-            f'Revenue share: {a_share:.1%}',
-            f'Revenue share: {b_share:.1%}',
-            f'Revenue share: {c_share:.1%}',
+            f'{a_share:.1%}', f'{b_share:.1%}', f'{c_share:.1%}',
         )
 
     except Exception as exc:
         logger.exception('ABC analysis callback failed')
+        print(f"[TIMING] update_abc_analysis FAILED: {time.time() - callback_start:.3f}s")
         empty = _empty_row(ABC_COLUMNS)
         return (
             _empty_figure(), _empty_figure(), empty,
             '—', '—', '—',
-            'Revenue share: —', 'Revenue share: —', 'Revenue share: —',
+            '—', '—', '—',
         )
 
 
@@ -1644,6 +1760,9 @@ def _get_exec_merged_df(start_date: date, end_date: date) -> pd.DataFrame:
     abc_result = get_abc_analysis(start_date, end_date)
     abc_df = abc_result['items'].copy()
 
+    # NEW: Fetch cost data as of end_date
+    cost_df = get_inventory_costs(end_date)
+
     abc_cols = ['product_id', 'abc_class', 'revenue', 'quantity']
     abc_cols = [c for c in abc_cols if c in abc_df.columns]
     abc_subset = abc_df[abc_cols].copy() if not abc_df.empty else pd.DataFrame(
@@ -1652,6 +1771,17 @@ def _get_exec_merged_df(start_date: date, end_date: date) -> pd.DataFrame:
 
     merged = stock_df.merge(abc_subset, on='product_id', how='left')
     merged['abc_class'] = merged.get('abc_class', pd.Series('C')).fillna('C')
+
+    # NEW: Merge cost data
+    if not cost_df.empty:
+        merged = merged.merge(cost_df[['product_id', 'cost_unit_tax_in']],
+                              on='product_id', how='left')
+        merged['cost_unit_tax_in'] = pd.to_numeric(
+            merged.get('cost_unit_tax_in', 0), errors='coerce'
+        ).fillna(0)
+    else:
+        merged['cost_unit_tax_in'] = 0.0
+
     merged['revenue'] = pd.to_numeric(
         merged.get('revenue', 0), errors='coerce',
     ).fillna(0)
@@ -1673,9 +1803,12 @@ def _get_exec_merged_df(start_date: date, end_date: date) -> pd.DataFrame:
         .fillna(False).astype(bool)
     )
 
-    safe_qty = merged['quantity'].where(merged['quantity'] > 0)
-    unit_price = merged['revenue'] / safe_qty
-    merged['est_stock_value'] = (unit_price * merged['on_hand_qty']).fillna(0)
+    # CRITICAL CHANGE: Use cost-based valuation instead of revenue-based
+    # OLD: safe_qty = merged['quantity'].where(merged['quantity'] > 0)
+    # OLD: unit_price = merged['revenue'] / safe_qty
+    # OLD: merged['est_stock_value'] = (unit_price * merged['on_hand_qty']).fillna(0)
+    # NEW: Use cost_unit_tax_in directly
+    merged['est_stock_value'] = (merged['cost_unit_tax_in'] * merged['on_hand_qty']).fillna(0)
 
     merged['reorder_qty'] = np.ceil(
         (REORDER_TARGET_DAYS * merged['avg_daily_sold'] - merged['on_hand_qty'])
