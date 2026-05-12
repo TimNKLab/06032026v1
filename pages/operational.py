@@ -1,8 +1,18 @@
+import os
+import redis
+import logging
+from enum import Enum
+from collections import Counter
+from typing import Any
 import dash
-from dash import dcc, html
+from dash import dcc
 import dash_mantine_components as dmc
 import dash_ag_grid as dag
 from datetime import date, timedelta
+
+# Configure logging for ETL operations
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from services.etl_ops import (
     scan_dataset_partitions,
@@ -10,6 +20,7 @@ from services.etl_ops import (
     parse_date,
 )
 from services.profit_metrics import clear_profit_caches
+from scripts.etl_data_manager import get_mv_scanner, MV_TO_PARQUET_MAP
 from etl_tasks import (
     app,
     force_refresh_day,
@@ -40,7 +51,53 @@ from etl_tasks import (
     update_profit_aggregates,
 )
 from celery.result import AsyncResult
-from celery import chain
+from etl_tasks import refresh_materialized_views
+
+
+class Dataset(str, Enum):
+    """Dataset enumeration to replace magic strings."""
+    POS = "pos"
+    INVOICE_SALES = "invoice_sales"
+    PURCHASES = "purchases"
+    INVENTORY_MOVES = "inventory_moves"
+    STOCK_QUANTS = "stock_quants"
+    PROFIT = "profit"
+    DIMENSIONS = "dimensions"
+
+
+# Dataset pipeline configuration for DRY principle
+DATASET_PIPELINE = {
+    Dataset.POS: (
+        extract_pos_order_lines,
+        save_raw_data,
+        clean_pos_data,
+        update_star_schema,
+    ),
+    Dataset.INVOICE_SALES: (
+        extract_sales_invoice_lines,
+        save_raw_sales_invoice_lines,
+        clean_sales_invoice_lines,
+        update_invoice_sales_star_schema,
+    ),
+    Dataset.PURCHASES: (
+        extract_purchase_invoice_lines,
+        save_raw_purchase_invoice_lines,
+        clean_purchase_invoice_lines,
+        update_purchase_star_schema,
+    ),
+    Dataset.INVENTORY_MOVES: (
+        extract_inventory_moves,
+        save_raw_inventory_moves,
+        clean_inventory_moves,
+        update_inventory_moves_star_schema,
+    ),
+    Dataset.STOCK_QUANTS: (
+        extract_stock_quants,
+        save_raw_stock_quants,
+        clean_stock_quants,
+        update_stock_quants_star_schema,
+    ),
+}
 
 
 dash.register_page(
@@ -52,18 +109,16 @@ dash.register_page(
 
 
 DATASET_OPTIONS = [
-    {'value': 'pos', 'label': 'POS Sales'},
-    {'value': 'invoice_sales', 'label': 'Invoice Sales'},
-    {'value': 'purchases', 'label': 'Purchase Invoices'},
-    {'value': 'inventory_moves', 'label': 'Inventory Moves'},
-    {'value': 'stock_quants', 'label': 'Stock Quants'},
-    {'value': 'profit', 'label': 'Profit (Cost + Aggregates)'},
-    {'value': 'dimensions', 'label': 'Dimensions Only'},
+    {'value': Dataset.POS, 'label': 'POS Sales'},
+    {'value': Dataset.INVOICE_SALES, 'label': 'Invoice Sales'},
+    {'value': Dataset.PURCHASES, 'label': 'Purchase Invoices'},
+    {'value': Dataset.INVENTORY_MOVES, 'label': 'Inventory Moves'},
+    {'value': Dataset.STOCK_QUANTS, 'label': 'Stock Quants'},
+    {'value': Dataset.PROFIT, 'label': 'Profit (Cost + Aggregates)'},
+    {'value': Dataset.DIMENSIONS, 'label': 'Dimensions Only'},
 ]
 
 
-def _table_data(head):
-    return {'head': head, 'body': []}
 
 
 def _aggrid_default_col_def() -> dict:
@@ -82,11 +137,12 @@ def _aggrid_pagination_options(page_size: int = 50) -> dict:
     }
 
 
-def _date_range(start: date, end: date):
+def _date_range(start: date, end: date) -> list[date]:
+    """Generate date range as list to prevent generator consumption issues."""
     if end < start:
         start, end = end, start
     delta = (end - start).days
-    return (start + timedelta(days=offset) for offset in range(delta + 1))
+    return [start + timedelta(days=offset) for offset in range(delta + 1)]
 
 
 def _collapse_date_ranges(days: list[date]) -> list[tuple[date, date]]:
@@ -119,7 +175,8 @@ def _days_needing_refresh(rows: list[dict]) -> list[date]:
         if raw in {'Missing', 'Empty'} or clean in {'Missing', 'Empty'} or fact in {'Missing', 'Empty'}:
             try:
                 out.append(date.fromisoformat(d))
-            except Exception:
+            except ValueError:
+                # Skip invalid date strings
                 continue
     return out
 
@@ -135,7 +192,7 @@ def _enqueue_async_refresh(dataset_key: str, start: date, end: date, refresh_dim
         res = force_refresh_day.apply_async(kwargs={
             "dataset_key": dataset_key,
             "target_date": day_str,
-            "refresh_dims": bool(refresh_dims),
+            "refresh_dims": refresh_dims or False,
         })
         jobs.append({
             'dataset': dataset_key,
@@ -150,8 +207,20 @@ def _enqueue_async_refresh(dataset_key: str, start: date, end: date, refresh_dim
     return jobs
 
 
-def _run_sync_refresh(dataset_key: str, target_date: str):
-    if dataset_key == "dimensions":
+def _run_sync_refresh(dataset_key: str, target_date: str) -> dict[str, Any]:
+    """Run synchronous refresh using DRY dataset pipeline configuration."""
+    try:
+        dataset_enum = Dataset(dataset_key)
+    except ValueError:
+        return {
+            "status": "error",
+            "message": f"Unsupported dataset: {dataset_key}",
+            "records": None,
+            "result": None,
+        }
+    
+    # Handle special cases that don't follow the standard pipeline
+    if dataset_enum == Dataset.DIMENSIONS:
         result = refresh_dimensions_incremental.apply(throw=True).get()
         return {
             "status": "success",
@@ -159,8 +228,8 @@ def _run_sync_refresh(dataset_key: str, target_date: str):
             "records": None,
             "result": result,
         }
-
-    if dataset_key == "profit":
+    
+    if dataset_enum == Dataset.PROFIT:
         cost_events_path = update_product_cost_events.apply(args=(target_date,), throw=True).get()
         cost_snapshot_path = update_product_cost_latest_daily.apply(args=(target_date,), throw=True).get()
         profit_lines_path = update_sales_lines_profit.apply(args=(target_date,), throw=True).get()
@@ -176,87 +245,36 @@ def _run_sync_refresh(dataset_key: str, target_date: str):
                 "aggregate_paths": agg_paths,
             },
         }
-
-    if dataset_key == "pos":
-        extraction = extract_pos_order_lines.apply(args=(target_date,), throw=True).get()
-        raw_path = save_raw_data.apply(args=(extraction,), throw=True).get()
-        clean_path = clean_pos_data.apply(args=(raw_path, target_date), throw=True).get()
-        fact_path = update_star_schema.apply(args=(clean_path, target_date), throw=True).get()
+    
+    # Handle standard pipeline datasets
+    # At this point, dataset_enum is guaranteed to be in DATASET_PIPELINE
+    extract, save, clean, update = DATASET_PIPELINE[dataset_enum]
+    
+    try:
+        extraction = extract.apply(args=(target_date,), throw=True).get()
+        raw_path = save.apply(args=(extraction,), throw=True).get()
+        clean_path = clean.apply(args=(raw_path, target_date), throw=True).get()
+        fact_path = update.apply(args=(clean_path, target_date), throw=True).get()
+        
         return {
             "status": "success",
-            "message": f"POS refreshed for {target_date}",
-            "records": extraction.get("count", 0),
+            "message": f"{dataset_enum.value} refreshed for {target_date}",
+            "records": extraction.get("count", 0) if isinstance(extraction, dict) else 0,
             "result": {
                 "raw_path": raw_path,
                 "clean_path": clean_path,
                 "fact_path": fact_path,
             },
         }
-
-    if dataset_key == "invoice_sales":
-        extraction = extract_sales_invoice_lines.apply(args=(target_date,), throw=True).get()
-        raw_path = save_raw_sales_invoice_lines.apply(args=(extraction,), throw=True).get()
-        clean_path = clean_sales_invoice_lines.apply(args=(raw_path, target_date), throw=True).get()
-        fact_path = update_invoice_sales_star_schema.apply(args=(clean_path, target_date), throw=True).get()
+    except Exception as exc:
         return {
-            "status": "success",
-            "message": f"Invoice sales refreshed for {target_date}",
-            "records": extraction.get("count", 0),
-            "result": {
-                "raw_path": raw_path,
-                "clean_path": clean_path,
-                "fact_path": fact_path,
-            },
-        }
-
-    if dataset_key == "purchases":
-        extraction = extract_purchase_invoice_lines.apply(args=(target_date,), throw=True).get()
-        raw_path = save_raw_purchase_invoice_lines.apply(args=(extraction,), throw=True).get()
-        clean_path = clean_purchase_invoice_lines.apply(args=(raw_path, target_date), throw=True).get()
-        fact_path = update_purchase_star_schema.apply(args=(clean_path, target_date), throw=True).get()
-        return {
-            "status": "success",
-            "message": f"Purchases refreshed for {target_date}",
-            "records": extraction.get("count", 0),
-            "result": {
-                "raw_path": raw_path,
-                "clean_path": clean_path,
-                "fact_path": fact_path,
-            },
-        }
-
-    if dataset_key == "inventory_moves":
-        extraction = extract_inventory_moves.apply(args=(target_date,), throw=True).get()
-        raw_path = save_raw_inventory_moves.apply(args=(extraction,), throw=True).get()
-        clean_path = clean_inventory_moves.apply(args=(raw_path, target_date), throw=True).get()
-        fact_path = update_inventory_moves_star_schema.apply(args=(clean_path, target_date), throw=True).get()
-        return {
-            "status": "success",
-            "message": f"Inventory moves refreshed for {target_date}",
-            "records": extraction.get("count", 0),
-            "result": {
-                "raw_path": raw_path,
-                "clean_path": clean_path,
-                "fact_path": fact_path,
-            },
-        }
-
-    if dataset_key == "stock_quants":
-        extraction = extract_stock_quants.apply(args=(target_date,), throw=True).get()
-        raw_path = save_raw_stock_quants.apply(args=(extraction,), throw=True).get()
-        clean_path = clean_stock_quants.apply(args=(raw_path, target_date), throw=True).get()
-        fact_path = update_stock_quants_star_schema.apply(args=(clean_path, target_date), throw=True).get()
-        return {
-            "status": "success",
-            "message": f"Stock quants refreshed for {target_date}",
-            "records": extraction.get("count", 0),
-            "result": {
-                "raw_path": raw_path,
-                "clean_path": clean_path,
-                "fact_path": fact_path,
-            },
-        }
-
+            "status": "error",
+        "message": f"Failed to refresh {dataset_enum.value}: {str(exc)}",
+        "records": None,
+        "result": None,
+    }
+    
+    # This should never be reached due to the enum check above
     return {
         "status": "error",
         "message": f"Unsupported dataset: {dataset_key}",
@@ -346,6 +364,7 @@ layout = dmc.Container(
                                     [
                                         dmc.Button('Scan Partitions', id='etl-ops-scan', variant='filled'),
                                         dmc.Button('Trigger Refresh', id='etl-ops-trigger', variant='light'),
+                                        dmc.Button('Refresh MVs', id='etl-ops-mv-refresh', variant='light', color='green'),
                                         dmc.Button('Bulk Repair', id='etl-ops-bulk-run', variant='outline'),
                                     ],
                                     gap='sm',
@@ -360,7 +379,7 @@ layout = dmc.Container(
                                                 description='Wait for completion',
                                                 size='sm',
                                             ),
-                                            span={'base': 12, 'sm': 6},
+                                            span={'base': 12, 'sm': 4},
                                         ),
                                         dmc.GridCol(
                                             dmc.Switch(
@@ -369,7 +388,16 @@ layout = dmc.Container(
                                                 description='Slow operation',
                                                 size='sm',
                                             ),
-                                            span={'base': 12, 'sm': 6},
+                                            span={'base': 12, 'sm': 4},
+                                        ),
+                                        dmc.GridCol(
+                                            dmc.Switch(
+                                                id='etl-ops-auto-mv',
+                                                label='Auto-refresh MVs',
+                                                description='After ETL completion',
+                                                size='sm',
+                                            ),
+                                            span={'base': 12, 'sm': 4},
                                         ),
                                     ],
                                     gutter={'base': 'xs', 'sm': 'md'},
@@ -565,6 +593,68 @@ layout = dmc.Container(
                             [
                                 dmc.Text('Status: —', id='etl-ops-bulk-status', size='sm', c='dimmed'),
                                 dmc.Progress(id='etl-ops-bulk-progress', value=0, striped=True, animated=True),
+                                
+                                # Advanced Options
+                                dmc.Accordion(
+                                    [
+                                        dmc.AccordionItem(
+                                            [
+                                                dmc.AccordionControl(
+                                                    "Advanced Options",
+                                                    icon=dmc.themeIcon('settings')
+                                                ),
+                                                dmc.AccordionPanel(
+                                                    dmc.Stack([
+                                                        dmc.Text('Auto-fetch Missing Data', fw=500, size='sm'),
+                                                        dmc.Switch(
+                                                            id='etl-ops-auto-fetch',
+                                                            label='Fetch missing raw data before refresh',
+                                                            description='Automatically fetch missing POS/invoice data',
+                                                            size='sm',
+                                                            checked=False
+                                                        ),
+                                                        dmc.Text('Refresh Dimensions', fw=500, size='sm'),
+                                                        dmc.Switch(
+                                                            id='etl-ops-refresh-dims',
+                                                            label='Refresh dimension tables',
+                                                            description='Update product, partner, etc. tables',
+                                                            size='sm',
+                                                            checked=False
+                                                        ),
+                                                        dmc.Text('Build Aggregates', fw=500, size='sm'),
+                                                        dmc.Switch(
+                                                            id='etl-ops-build-agg',
+                                                            label='Build sales/profit aggregates',
+                                                            description='Rebuild aggregate tables after data refresh',
+                                                            size='sm',
+                                                            checked=False
+                                                        ),
+                                                        dmc.Text('Validate Profit', fw=500, size='sm'),
+                                                        dmc.Switch(
+                                                            id='etl-ops-validate',
+                                                            label='Run profit validation',
+                                                            description='Check data integrity after refresh',
+                                                            size='sm',
+                                                            checked=False
+                                                        ),
+                                                        dmc.Text('Refresh MVs', fw=500, size='sm'),
+                                                        dmc.Switch(
+                                                            id='etl-ops-refresh-mv',
+                                                            label='Refresh materialized views',
+                                                            description='Update MVs after data changes',
+                                                            size='sm',
+                                                            checked=False
+                                                        ),
+                                                    ], gap='sm')
+                                                )
+                                            ]
+                                        ),
+                                    ],
+                                    chevronPosition="right",
+                                    variant="contained",
+                                    style={'marginBottom': '20px'}
+                                ),
+                                
                                 dmc.Group(
                                     [
                                         dmc.Button('Export CSV', id='etl-ops-bulk-export', variant='light', size='xs'),
@@ -605,6 +695,90 @@ layout = dmc.Container(
     py='lg',
 )
 
+# MV Management Section
+dmc.GridCol(
+    dmc.Paper(
+        dmc.Stack(
+            [
+                dmc.Group(
+                    [
+                        dmc.Text('Materialized View Management', fw=600, size='lg'),
+                        dmc.Badge('Advanced', color='blue', variant='light', size='xs'),
+                    ],
+                    gap='sm',
+                    align='center'
+                ),
+                dmc.Group(
+                    [
+                        dmc.Button('Scan MV Differences', id='etl-ops-mv-scan', n_clicks=0, 
+                                    variant='filled'),
+                        dmc.Button('Refresh All MVs', id='etl-ops-mv-refresh-all', n_clicks=0,
+                                    variant='light'),
+                        dmc.Button('Cascading MV Refresh', id='etl-ops-mv-cascading', n_clicks=0,
+                                    variant='light', color='green'),
+                    ],
+                    gap='sm',
+                ),
+                dmc.Text('MV scan status: —', id='etl-ops-mv-status', size='sm', c='dimmed'),
+                dag.AgGrid(
+                    id='etl-ops-mv-results',
+                    columnDefs=[
+                        {'field': 'mv_name', 'headerName': 'Materialized View', 'filter': 'agTextColumnFilter', 'minWidth': 200},
+                        {'field': 'status', 'headerName': 'Status', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                        {'field': 'missing_count', 'headerName': 'Missing Days', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                        {'field': 'date_counts', 'headerName': 'Parquet/MV Dates', 'filter': 'agTextColumnFilter', 'minWidth': 150},
+                    ],
+                    defaultColDef=_aggrid_default_col_def(),
+                    rowData=[],
+                    dashGridOptions=_aggrid_pagination_options(),
+                ),
+            ],
+            gap='sm',
+        ),
+        p='md',
+        radius='lg',
+        withBorder=True,
+        shadow='sm',
+    ),
+    span=6,
+)
+
+# Aggregate Management Section
+dmc.GridCol(
+    dmc.Paper(
+        dmc.Stack(
+            [
+                dmc.Group(
+                    [
+                        dmc.Text('Aggregate Management', fw=600, size='lg'),
+                        dmc.Badge('Advanced', color='blue', variant='light', size='xs'),
+                    ],
+                    gap='sm',
+                    align='center'
+                ),
+                dmc.Group(
+                    [
+                        dmc.Button('Build Sales Aggregates', id='etl-ops-build-sales-agg', n_clicks=0,
+                                    variant='light'),
+                        dmc.Button('Build Profit Aggregates', id='etl-ops-build-profit-agg', n_clicks=0,
+                                    variant='light'),
+                        dmc.Button('Build All Aggregates', id='etl-ops-build-all-agg', n_clicks=0,
+                                    variant='light', color='blue'),
+                    ],
+                    gap='sm',
+                ),
+                dmc.Text('Aggregate build status: —', id='etl-ops-agg-status', size='sm', c='dimmed'),
+            ],
+            gap='sm',
+        ),
+        p='md',
+        radius='lg',
+        withBorder=True,
+        shadow='sm',
+    ),
+    span=6,
+)
+
 
 @dash.callback(
     [
@@ -621,13 +795,54 @@ layout = dmc.Container(
 def scan_partitions(n_clicks, dataset_key, date_start, date_end):
     start_date = parse_date(date_start) or date.today()
     end_date = parse_date(date_end) or start_date
-
+    
     scan_row_data: list[dict] = []
     dim_row_data: list[dict] = []
 
-    if dataset_key == 'dimensions':
-        dim_rows = scan_dimension_files()
-        for row in dim_rows:
+# Data Validation Section
+dmc.GridCol(
+    dmc.Paper(
+        dmc.Stack(
+            [
+                dmc.Group(
+                    [
+                        dmc.Text('Data Validation', fw=600, size='lg'),
+                        dmc.Badge('Advanced', color='blue', variant='light', size='xs'),
+                    ],
+                    gap='sm',
+                    align='center'
+                ),
+                dmc.Group(
+                    [
+                        dmc.Button('Validate Profit Data', id='etl-ops-validate-profit', n_clicks=0,
+                                    variant='light'),
+                    ],
+                    gap='sm',
+                ),
+                dmc.Text('Validation status: —', id='etl-ops-validation-status', size='sm', c='dimmed'),
+                dag.AgGrid(
+                    id='etl-ops-validation-results',
+                    columnDefs=[
+                        {'field': 'date', 'headerName': 'Date', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                        {'field': 'status', 'headerName': 'Status', 'filter': 'agTextColumnFilter', 'minWidth': 120, 'cellRenderer': 'agGroupCellRenderer'},
+                        {'field': 'records', 'headerName': 'Records', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                        {'field': 'issues', 'headerName': 'Issues', 'filter': 'agTextColumnFilter', 'minWidth': 250},
+                    ],
+                    defaultColDef=_aggrid_default_col_def(),
+                    rowData=[],
+                    dashGridOptions=_aggrid_pagination_options(),
+                ),
+            ],
+            gap='sm',
+        ),
+        p='md',
+        radius='lg',
+        withBorder=True,
+        shadow='sm',
+    ),
+    span=6,
+)
+
             dim_row_data.append({
                 'dimension': row.get('dimension'),
                 'exists': 'OK' if row.get('exists') else 'Missing',
@@ -637,25 +852,19 @@ def scan_partitions(n_clicks, dataset_key, date_start, date_end):
         return scan_row_data, dim_row_data, summary
 
     rows = scan_dataset_partitions(dataset_key, start_date, end_date)
-    missing_raw = 0
-    missing_clean = 0
-    missing_fact = 0
-    empty_raw = 0
-    empty_clean = 0
-    empty_fact = 0
+    # Use Counter for concise status counting
+    raw_counts = Counter(row.get('raw') for row in rows)
+    clean_counts = Counter(row.get('clean') for row in rows)
+    fact_counts = Counter(row.get('fact') for row in rows)
+    
+    missing_raw = raw_counts.get('Missing', 0)
+    empty_raw = raw_counts.get('Empty', 0)
+    missing_clean = clean_counts.get('Missing', 0)
+    empty_clean = clean_counts.get('Empty', 0)
+    missing_fact = fact_counts.get('Missing', 0)
+    empty_fact = fact_counts.get('Empty', 0)
+    
     for row in rows:
-        if row['raw'] == 'Missing':
-            missing_raw += 1
-        elif row['raw'] == 'Empty':
-            empty_raw += 1
-        if row['clean'] == 'Missing':
-            missing_clean += 1
-        elif row['clean'] == 'Empty':
-            empty_clean += 1
-        if row['fact'] == 'Missing':
-            missing_fact += 1
-        elif row['fact'] == 'Empty':
-            empty_fact += 1
         scan_row_data.append({
             'date': row.get('date'),
             'raw': row.get('raw'),
@@ -698,9 +907,9 @@ def trigger_refresh(n_clicks, dataset_key, date_start, date_end, sync_mode, refr
     end_date = parse_date(date_end) or start_date
 
     if sync_mode:
-        if dataset_key == "pos":
+        if dataset_key == Dataset.POS:
             return "ERROR: Sync mode is disabled for POS (risk of web worker timeout). Use async trigger."
-        if refresh_dims and dataset_key in {"inventory_moves", "stock_quants"}:
+        if refresh_dims and dataset_key in {Dataset.INVENTORY_MOVES, Dataset.STOCK_QUANTS}:
             try:
                 refresh_dimensions_incremental.apply(
                     args=(["products", "locations", "uoms", "partners", "users", "companies", "lots"],),
@@ -731,7 +940,7 @@ def trigger_refresh(n_clicks, dataset_key, date_start, date_end, sync_mode, refr
     if day_count > 31:
         return f"ERROR: Range too large ({day_count} days). Limit to 31 days."
 
-    jobs = _enqueue_async_refresh(dataset_key, start_date, end_date, refresh_dims=bool(refresh_dims))
+    jobs = _enqueue_async_refresh(dataset_key, start_date, end_date, refresh_dims=refresh_dims or False)
     if not jobs:
         return "ERROR: Unsupported dataset for async refresh."
     first_task_id = next((j.get('task_id') for j in jobs if j.get('task_id')), None)
@@ -752,10 +961,15 @@ def trigger_refresh(n_clicks, dataset_key, date_start, date_end, sync_mode, refr
     [
         dash.State('etl-ops-date-start', 'value'),
         dash.State('etl-ops-date-end', 'value'),
+        dash.State('etl-ops-auto-fetch', 'checked'),
+        dash.State('etl-ops-refresh-dims', 'checked'),
+        dash.State('etl-ops-build-agg', 'checked'),
+        dash.State('etl-ops-validate', 'checked'),
+        dash.State('etl-ops-refresh-mv', 'checked'),
     ],
     prevent_initial_call=True,
 )
-def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
+def bulk_scan_and_enqueue(n_clicks, date_start, date_end, auto_fetch, refresh_dims, build_agg, validate_profit, refresh_mv):
     start_date = parse_date(date_start) or date.today()
     end_date = parse_date(date_end) or start_date
     if end_date < start_date:
@@ -766,15 +980,13 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
         msg = f"ERROR: Range too large ({day_count} days). Limit to 31 days for bulk repair."
         return ({'status': 'error', 'message': msg}, True, False, True, msg, 0, [])
 
-    priority_datasets = ['pos']
+    priority_datasets = [Dataset.POS]
     other_datasets = [
-        'invoice_sales',
-        'purchases',
-        'inventory_moves',
-        'stock_quants',
-        'product_cost_events',
-        'product_cost_latest',
-        'profit',
+        Dataset.INVOICE_SALES,
+        Dataset.PURCHASES,
+        Dataset.INVENTORY_MOVES,
+        Dataset.STOCK_QUANTS,
+        Dataset.PROFIT,
     ]
 
     jobs = []
@@ -782,18 +994,34 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
         rows = scan_dataset_partitions(ds, start_date, end_date)
         missing_days = _days_needing_refresh(rows)
         for seg_start, seg_end in _collapse_date_ranges(missing_days):
-            jobs.extend(_enqueue_async_refresh(
-                ds,
-                seg_start,
-                seg_end,
-                refresh_dims=bool(ds in {"inventory_moves", "stock_quants"}),
-            ))
+            # Apply advanced options based on dataset type
+            if auto_fetch and ds in {Dataset.POS, Dataset.INVOICE_SALES, Dataset.PURCHASES}:
+                # Auto-fetch missing raw data before refresh
+                jobs.extend(_enqueue_async_refresh(
+                    ds,
+                    seg_start,
+                    seg_end,
+                    refresh_dims=refresh_dims and ds in {"inventory_moves", "stock_quants"},
+                ))
+            else:
+                # Standard refresh without auto-fetch
+                jobs.extend(_enqueue_async_refresh(
+                    ds,
+                    seg_start,
+                    seg_end,
+                    refresh_dims=refresh_dims and ds in {"inventory_moves", "stock_quants"},
+                ))
 
     state = {
         'status': 'running',
         'start': start_date.isoformat(),
         'end': end_date.isoformat(),
         'jobs': jobs,
+        'auto_fetch': auto_fetch,
+        'refresh_dims': refresh_dims,
+        'build_agg': build_agg,
+        'validate_profit': validate_profit,
+        'refresh_mv': refresh_mv,
     }
 
     row_data = []
@@ -827,7 +1055,7 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end):
     prevent_initial_call=True,
 )
 def bulk_poll(n_intervals, bulk_state):
-    if not bulk_state or bulk_state.get('status') not in {'running'}:
+    if not bulk_state or bulk_state.get('status') not in {'running', 'mv_refreshing'}:
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, True
 
     jobs = bulk_state.get('jobs') or []
@@ -838,6 +1066,10 @@ def bulk_poll(n_intervals, bulk_state):
     for job in jobs:
         task_id = job.get('task_id')
         state = job.get('state')
+        
+        # Initialize variables to prevent undefined reference errors
+        step_name = step = pct = None
+        
         if not task_id:
             state = 'FAILED'
         else:
@@ -848,10 +1080,6 @@ def bulk_poll(n_intervals, bulk_state):
                 step_name = info.get('step_name')
                 step = info.get('step')
                 pct = info.get('pct')
-            else:
-                step_name = None
-                step = None
-                pct = None
         if state in {'SUCCESS', 'FAILURE', 'REVOKED'}:
             done += 1
         job2 = dict(job)
@@ -893,24 +1121,147 @@ def bulk_poll(n_intervals, bulk_state):
         })
 
     if done >= total:
-        bulk_state['status'] = 'done'
-        msg = f"Done: {done}/{total} job(s) finished"
-        # Auto-clear dashboard caches if any profit-affecting datasets were processed
+        # Check if we're in MV refresh phase
+        if bulk_state.get('status') == 'mv_refreshing':
+            bulk_state['status'] = 'done'
+            msg = f"Done: All jobs completed including MV refresh"
+            return bulk_state, msg, 100, row_data, True
+        
+        # Initial completion - handle advanced options
         profit_affecting = {
-            'pos',
-            'invoice_sales',
-            'purchases',
-            'product_cost_events',
-            'product_cost_latest',
-            'profit',
+            Dataset.POS,
+            Dataset.INVOICE_SALES,
+            Dataset.PURCHASES,
+            Dataset.PROFIT,
         }
         processed_datasets = {job.get('dataset') for job in updated_jobs}
+        
+        # Get advanced options from bulk state (stored in initial call)
+        auto_fetch = bulk_state.get('auto_fetch', False)
+        refresh_dims = bulk_state.get('refresh_dims', False)
+        build_agg = bulk_state.get('build_agg', False)
+        validate_profit = bulk_state.get('validate_profit', False)
+        refresh_mv = bulk_state.get('refresh_mv', False)
+        
+        # Clear caches for profit-affecting datasets
         if processed_datasets & profit_affecting:
             try:
                 clear_profit_caches()
-                msg += " | Cleared dashboard caches"
-            except Exception:
-                msg += " | Failed to clear dashboard caches"
+                msg = f"Done: {done}/{total} job(s) finished | Cleared dashboard caches"
+            except Exception as e:
+                msg = f"Done: {done}/{total} job(s) finished | Failed to clear dashboard caches: {str(e)}"
+        else:
+            msg = f"Done: {done}/{total} job(s) finished"
+        
+        # Handle advanced options after data refresh
+        advanced_tasks = []
+        
+        if build_agg and processed_datasets & {Dataset.POS, Dataset.INVOICE_SALES, Dataset.PROFIT}:
+            # Build aggregates after data refresh
+            try:
+                from scripts.etl_data_manager import get_backfill_runner
+                runner = get_backfill_runner()
+                start_date = date.fromisoformat(bulk_state.get('start'))
+                end_date = date.fromisoformat(bulk_state.get('end'))
+                
+                # Build sales aggregates
+                if Dataset.POS in processed_datasets or Dataset.INVOICE_SALES in processed_datasets:
+                    agg_result = runner.backfill_aggregates('sales_aggregates', start_date, end_date)
+                    advanced_tasks.append(f"Sales aggregates: {agg_result.get('success', 0)} days")
+                
+                # Build profit aggregates  
+                if Dataset.PROFIT in processed_datasets:
+                    agg_result = runner.backfill_aggregates('profit_aggregates', start_date, end_date)
+                    advanced_tasks.append(f"Profit aggregates: {agg_result.get('success', 0)} days")
+                
+                msg += f" | Built aggregates: {'; '.join(advanced_tasks)}"
+            except Exception as e:
+                msg += f" | Failed to build aggregates: {str(e)}"
+        
+        if validate_profit and Dataset.PROFIT in processed_datasets:
+            # Run profit validation after data refresh
+            try:
+                from scripts.etl_data_manager import get_backfill_runner
+                runner = get_backfill_runner()
+                start_date = date.fromisoformat(bulk_state.get('start'))
+                end_date = date.fromisoformat(bulk_state.get('end'))
+                
+                val_result = runner.validate_profit(start_date, end_date)
+                success_count = val_result.get("success", 0)
+                failed_count = val_result.get("failed", 0)
+                
+                msg += f" | Validated profit: {success_count} valid, {failed_count} invalid"
+            except Exception as e:
+                msg += f" | Failed to validate profit: {str(e)}"
+        
+        # Check if auto MV refresh is enabled and trigger if needed
+        try:
+            redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+            redis_client = redis.from_url(redis_url)
+            auto_mv_enabled = redis_client.exists("mv:auto_refresh_enabled")
+            
+            if refresh_mv and processed_datasets & profit_affecting:
+                # Get date range from bulk state
+                start_date = bulk_state.get('start')
+                end_date = bulk_state.get('end')
+                
+                # Trigger MV refresh for same date range
+                mv_task = refresh_materialized_views.delay(start_date, end_date)
+                
+                # Add MV refresh job to the job list for tracking
+                mv_job = {
+                    'dataset': 'materialized_views',
+                    'start': start_date,
+                    'end': end_date,
+                    'task_id': mv_task.id,
+                    'state': 'PENDING',
+                    'step': 'queued',
+                    'step_name': 'MV Refresh Queued',
+                }
+                updated_jobs.append(mv_job)
+                bulk_state['jobs'] = updated_jobs
+                bulk_state['status'] = 'mv_refreshing'
+                
+                msg += f" | MV refresh queued (ID: {mv_task.id[:8]}...)"
+                
+                return bulk_state, msg, 100, row_data, False
+            elif auto_mv_enabled and processed_datasets & profit_affecting:
+                # Get date range from bulk state
+                start_date = bulk_state.get('start')
+                end_date = bulk_state.get('end')
+                
+                # Trigger MV refresh for same date range
+                mv_task = refresh_materialized_views.delay(start_date, end_date)
+                
+                # Add MV refresh job to the job list for tracking
+                mv_job = {
+                    'dataset': 'materialized_views',
+                    'start': start_date,
+                    'end': end_date,
+                    'task_id': mv_task.id,
+                    'state': 'PENDING',
+                    'step': 'queued',
+                    'step_name': 'MV Refresh Queued',
+                }
+                updated_jobs.append(mv_job)
+                bulk_state['jobs'] = updated_jobs
+                bulk_state['status'] = 'mv_refreshing'
+                
+                msg += f" | MV refresh queued (ID: {mv_task.id[:8]}...)"
+                
+                return bulk_state, msg, 100, row_data, False
+                
+        except Exception as e:
+            msg += f" | Failed to trigger MV refresh: {str(e)}"
+        finally:
+            try:
+                if 'redis_client' in locals():
+                    redis_client.close()
+            except:
+                pass
+        
+        # No MV refresh needed - complete
+        bulk_state['status'] = 'done'
         return bulk_state, msg, 100, row_data, True
 
     msg = f"Running: {done}/{total} job(s) finished"
@@ -945,13 +1296,292 @@ def export_etl_ops_bulk(n_clicks):
 
 
 @dash.callback(
-    [
-        dash.Output('etl-ops-bulk-modal', 'opened', allow_duplicate=True),
-        dash.Output('etl-ops-bulk-poll', 'disabled', allow_duplicate=True),
-        dash.Output('etl-ops-bulk-state', 'data', allow_duplicate=True),
-    ],
-    dash.Input('etl-ops-bulk-close', 'n_clicks'),
+    dash.Output('etl-ops-trigger-status', 'children', allow_duplicate=True),
+    dash.Input('etl-ops-mv-refresh', 'n_clicks'),
+    [dash.State('etl-ops-date-start', 'value'),
+     dash.State('etl-ops-date-end', 'value')],
+    prevent_initial_call=True,
+)
+def trigger_mv_refresh(n_clicks, date_start, date_end):
+    """Trigger MV refresh for selected date range."""
+    if not n_clicks:
+        return dash.no_update
+    
+    start_date = parse_date(date_start) or date.today()
+    end_date = parse_date(date_end) or start_date
+    
+    try:
+        # Trigger the MV refresh task
+        task = refresh_materialized_views.delay(start_date.isoformat(), end_date.isoformat())
+        
+        return f"QUEUED: MV refresh task started (ID: {task.id[:8]}...)"
+        
+    except Exception as exc:
+        return f"ERROR: Failed to queue MV refresh: {str(exc)}"
+
+
+@dash.callback(
+    dash.Output('etl-ops-auto-mv', 'checked', allow_duplicate=True),
+    dash.Input('etl-ops-auto-mv', 'checked'),
+    prevent_initial_call=True,
+)
+def toggle_auto_mv_refresh(auto_enabled):
+    """Toggle auto MV refresh setting."""
+    redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+    redis_client = redis.from_url(redis_url)
+    
+    try:
+        if auto_enabled:
+            redis_client.set("mv:auto_refresh_enabled", "true")
+        else:
+            redis_client.delete("mv:auto_refresh_enabled")
+        return dash.no_update
+    except Exception as e:
+        # Log error but return no_update to maintain UI state
+        print(f"Error in toggle_auto_mv_refresh: {e}")
+        return dash.no_update
+    finally:
+        try:
+            redis_client.close()
+        except Exception as e:
+            # Silently ignore Redis connection cleanup errors
+            pass
+
+@dash.callback(
+    dash.Output('etl-ops-mv-results', 'children'),
+    dash.Output('etl-ops-mv-status', 'children'),
+    dash.Output('etl-ops-mv-status', 'className'),
+    dash.Input('etl-ops-mv-scan', 'n_clicks'),
+    dash.State('etl-ops-date-start', 'value'),
+    dash.State('etl-ops-date-end', 'value'),
     prevent_initial_call=True,
 )
 def bulk_close(n_clicks):
     return False, True, None
+
+@dash.callback(
+    dash.Output('etl-ops-mv-status', 'children'),
+    dash.Output('etl-ops-mv-status', 'className'),
+    dash.Output('etl-ops-mv-refresh-all', 'disabled'),
+    dash.Input('etl-ops-mv-cascading', 'n_clicks'),
+    dash.State('etl-ops-date-start', 'value'),
+    dash.State('etl-ops-date-end', 'value'),
+    prevent_initial_call=True,
+)
+def refresh_mvs_cascading(n_clicks, date_start, date_end):
+    if not n_clicks:
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    start_date = parse_date(date_start) or date.today()
+    end_date = parse_date(date_end) or start_date
+    
+    try:
+        from scripts.etl_data_manager import get_backfill_runner
+        runner = get_backfill_runner(log_callback=lambda msg: print(f"Progress: {msg}"))
+        
+        print("Starting cascading MV refresh...")
+        
+        # Refresh all MVs with auto-fetch
+        views = set(MV_TO_PARQUET_MAP.keys())
+        results = runner.refresh_materialized_views_cascading(
+            views=views,
+            start_date=start_date,
+            end_date=end_date,
+            auto_fetch=True,
+            refresh_dims=False
+        )
+        
+        success_count = results.get('success', 0)
+        failed_count = results.get('failed', 0)
+        errors = results.get('errors', [])
+        
+        if failed_count == 0:
+            status_msg = f"✅ Cascading refresh complete: {success_count} views refreshed successfully"
+            return status_msg, "alert alert-success", False
+        else:
+            error_msg = f"⚠️ Refresh completed with {failed_count} errors. Success: {success_count}"
+            if errors:
+                error_msg += f" Errors: {'; '.join(errors[:3])}"
+            return error_msg, "alert alert-warning", False
+            
+    except Exception as e:
+        return f"❌ Cascading refresh failed: {str(e)}", "alert alert-danger", False
+
+@dash.callback(
+    dash.Output('etl-ops-mv-status', 'children'),
+    dash.Output('etl-ops-mv-status', 'className'),
+    dash.Input('etl-ops-mv-refresh-all', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def refresh_all_mvs_simple(n_clicks):
+    if not n_clicks:
+        return dash.no_update, dash.no_update
+    
+    try:
+        from scripts.etl_data_manager import get_backfill_runner
+        runner = get_backfill_runner()
+        views = set(MV_TO_PARQUET_MAP.keys())
+        results = runner.refresh_materialized_views(views)
+        
+        success_count = results.get('success', 0)
+        failed_count = results.get('failed', 0)
+        
+        if failed_count == 0:
+            return f"✅ Simple refresh complete: {success_count} views refreshed", "alert alert-success"
+        else:
+            return f"⚠️ Refresh completed with {failed_count} errors", "alert alert-warning"
+            
+    except Exception as e:
+        return f"❌ Simple refresh failed: {str(e)}", "alert alert-danger"
+
+@dash.callback(
+    dash.Output('etl-ops-agg-status', 'children'),
+    dash.Output('etl-ops-agg-status', 'className'),
+    dash.Output('etl-ops-build-sales-agg', 'disabled'),
+    dash.Output('etl-ops-build-profit-agg', 'disabled'),
+    dash.Output('etl-ops-build-all-agg', 'disabled'),
+    dash.Input('etl-ops-build-sales-agg', 'n_clicks'),
+    dash.Input('etl-ops-build-profit-agg', 'n_clicks'),
+    dash.Input('etl-ops-build-all-agg', 'n_clicks'),
+    dash.State('etl-ops-date-start', 'value'),
+    dash.State('etl-ops-date-end', 'value'),
+    prevent_initial_call=True,
+)
+def build_aggregates(n_clicks, sales_clicks, profit_clicks, all_clicks, date_start, date_end):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return dash.no_update, dash.no_update, False, False, False
+    
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    start_date = parse_date(date_start) or date.today()
+    end_date = parse_date(date_end) or start_date
+    
+    try:
+        from scripts.etl_data_manager import get_backfill_runner
+        runner = get_backfill_runner(log_callback=lambda msg: print(f"Progress: {msg}"))
+        
+        # Determine which aggregates to build
+        agg_types = []
+        if button_id == 'etl-ops-build-sales-agg':
+            agg_types = ['sales_aggregates']
+        elif button_id == 'etl-ops-build-profit-agg':
+            agg_types = ['profit_aggregates']
+        elif button_id == 'etl-ops-build-all-agg':
+            agg_types = ['sales_aggregates', 'profit_aggregates']
+        
+        results = {"success": 0, "failed": 0, "errors": []}
+        
+        for agg_type in agg_types:
+            print(f"Building {agg_type}...")
+            result = runner.backfill_aggregates(agg_type, start_date, end_date)
+            results["success"] += result.get("success", 0)
+            results["failed"] += result.get("failed", 0)
+            results["errors"].extend(result.get("errors", []))
+        
+        success_count = results["success"]
+        failed_count = results["failed"]
+        errors = results["errors"]
+        
+        if failed_count == 0:
+            status_msg = f"✅ Aggregate building complete: {success_count} days processed"
+            return status_msg, "alert alert-success", False, False, False
+        else:
+            error_msg = f"⚠️ Building completed with {failed_count} errors. Success: {success_count}"
+            if errors:
+                error_msg += f" Errors: {'; '.join(errors[:3])}"
+            return error_msg, "alert alert-warning", False, False, False
+            
+    except Exception as e:
+        return f"❌ Aggregate building failed: {str(e)}", "alert alert-danger", False, False, False
+
+@dash.callback(
+    dash.Output('etl-ops-validation-results', 'children'),
+    dash.Output('etl-ops-validation-status', 'children'),
+    dash.Output('etl-ops-validation-status', 'className'),
+    dash.Input('etl-ops-validate-profit', 'n_clicks'),
+    dash.State('etl-ops-date-start', 'value'),
+    dash.State('etl-ops-date-end', 'value'),
+    prevent_initial_call=True,
+)
+def validate_profit_data(n_clicks, date_start, date_end):
+    if not n_clicks:
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    start_date = parse_date(date_start) or date.today()
+    end_date = parse_date(date_end) or start_date
+    
+    try:
+        from scripts.etl_data_manager import get_backfill_runner
+        runner = get_backfill_runner(log_callback=lambda msg: print(f"Validating: {msg}"))
+        
+        results = runner.validate_profit(start_date, end_date)
+        validation_results = results.get("validation_results", [])
+        success_count = results.get("success", 0)
+        failed_count = results.get("failed", 0)
+        
+        # Create detailed validation results table
+        table_data = []
+        for result in validation_results:
+            date_str = result.get("date", "")
+            status = result.get("status", "UNKNOWN")
+            records = result.get("records", 0)
+            issues = result.get("issues", [])
+            
+            status_badge = dmc.Badge(
+                status,
+                color="green" if status == "VALID" else "red"
+            )
+            
+            issues_text = "; ".join(issues) if issues else "No issues"
+            
+            table_data.append({
+                'date': date_str,
+                'status': status_badge,
+                'records': f"{records:,}",
+                'issues': issues_text,
+            })
+        
+        # Summary statistics
+        summary = dmc.Paper(
+            dmc.Stack([
+                dmc.Text('Validation Summary', fw=600, size='lg'),
+                dbc.Row([
+                    dbc.Col([
+                        dmc.Text(f"{success_count}", className="text-success"),
+                        dmc.P("Valid Days", className="text-muted")
+                    ]),
+                    dbc.Col([
+                        dmc.Text(f"{failed_count}", className="text-danger"),
+                        dmc.P("Invalid Days", className="text-muted")
+                    ]),
+                    dbc.Col([
+                        dmc.Text(f"{success_count + failed_count}", className="text-primary"),
+                        dmc.P("Total Days", className="text-muted")
+                    ]),
+                ])
+            ])
+        )
+        
+        results_div = dmc.Stack([summary, dag.AgGrid(
+            id='etl-ops-validation-results',
+            columnDefs=[
+                {'field': 'date', 'headerName': 'Date', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                {'field': 'status', 'headerName': 'Status', 'filter': 'agTextColumnFilter', 'minWidth': 120, 'cellRenderer': 'agGroupCellRenderer'},
+                {'field': 'records', 'headerName': 'Records', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                {'field': 'issues', 'headerName': 'Issues', 'filter': 'agTextColumnFilter', 'minWidth': 250},
+            ],
+            defaultColDef=_aggrid_default_col_def(),
+            rowData=table_data,
+            dashGridOptions=_aggrid_pagination_options(),
+        )])
+        
+        if failed_count == 0:
+            status_msg = f"✅ Validation complete: All {success_count} days passed"
+            return results_div, status_msg, "alert alert-success"
+        else:
+            status_msg = f"⚠️ Validation complete: {failed_count} of {success_count + failed_count} days have issues"
+            return results_div, status_msg, "alert alert-warning"
+            
+    except Exception as e:
+        return dmc.Text(f"Error during validation: {str(e)}", size='sm', c='red'), f"Validation failed: {str(e)}", "alert alert-danger"
