@@ -732,6 +732,13 @@ dmc.GridCol(
                     rowData=[],
                     dashGridOptions=_aggrid_pagination_options(),
                 ),
+                dmc.Group(
+                    [
+                        dmc.Button('Export CSV', id='etl-ops-mv-export', variant='light', size='xs'),
+                    ],
+                    justify='flex-end',
+                    mt='sm'
+                ),
             ],
             gap='sm',
         ),
@@ -768,6 +775,13 @@ dmc.GridCol(
                     gap='sm',
                 ),
                 dmc.Text('Aggregate build status: —', id='etl-ops-agg-status', size='sm', c='dimmed'),
+                dmc.Group(
+                    [
+                        dmc.Button('Export CSV', id='etl-ops-agg-export', variant='light', size='xs'),
+                    ],
+                    justify='flex-end',
+                    mt='sm'
+                ),
             ],
             gap='sm',
         ),
@@ -832,6 +846,13 @@ dmc.GridCol(
                     rowData=[],
                     dashGridOptions=_aggrid_pagination_options(),
                 ),
+                dmc.Group(
+                    [
+                        dmc.Button('Export CSV', id='etl-ops-validation-export', variant='light', size='xs'),
+                    ],
+                    justify='flex-end',
+                    mt='sm'
+                ),
             ],
             gap='sm',
         ),
@@ -843,6 +864,9 @@ dmc.GridCol(
     span=6,
 )
 
+    if dataset_key == Dataset.DIMENSIONS:
+        dim_rows = scan_dimension_files()
+        for row in dim_rows:
             dim_row_data.append({
                 'dimension': row.get('dimension'),
                 'exists': 'OK' if row.get('exists') else 'Missing',
@@ -1294,6 +1318,30 @@ def export_etl_ops_dim(n_clicks):
 def export_etl_ops_bulk(n_clicks):
     return True
 
+@dash.callback(
+    dash.Output('etl-ops-mv-results', 'exportDataAsCsv'),
+    dash.Input('etl-ops-mv-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_etl_ops_mv(n_clicks):
+    return True
+
+@dash.callback(
+    dash.Output('etl-ops-validation-results', 'exportDataAsCsv'),
+    dash.Input('etl-ops-validation-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_etl_ops_validation(n_clicks):
+    return True
+
+@dash.callback(
+    dash.Output('etl-ops-agg-results', 'exportDataAsCsv'),
+    dash.Input('etl-ops-agg-export', 'n_clicks'),
+    prevent_initial_call=True,
+)
+def export_etl_ops_aggregates(n_clicks):
+    return True
+
 
 @dash.callback(
     dash.Output('etl-ops-trigger-status', 'children', allow_duplicate=True),
@@ -1511,14 +1559,18 @@ def validate_profit_data(n_clicks, date_start, date_end):
     start_date = parse_date(date_start) or date.today()
     end_date = parse_date(date_end) or start_date
     
+    logger.info(f"Starting profit validation for {start_date} to {end_date}")
+    
     try:
         from scripts.etl_data_manager import get_backfill_runner
-        runner = get_backfill_runner(log_callback=lambda msg: print(f"Validating: {msg}"))
+        runner = get_backfill_runner(log_callback=lambda msg: logger.info(f"Validation: {msg}"))
         
         results = runner.validate_profit(start_date, end_date)
         validation_results = results.get("validation_results", [])
         success_count = results.get("success", 0)
         failed_count = results.get("failed", 0)
+        
+        logger.info(f"Validation completed: {success_count} valid, {failed_count} invalid")
         
         # Create detailed validation results table
         table_data = []
@@ -1528,9 +1580,11 @@ def validate_profit_data(n_clicks, date_start, date_end):
             records = result.get("records", 0)
             issues = result.get("issues", [])
             
+            # Enhanced status badge with color coding
+            status_color = "green" if status == "VALID" else "orange" if status == "WARNING" else "red"
             status_badge = dmc.Badge(
                 status,
-                color="green" if status == "VALID" else "red"
+                color=status_color
             )
             
             issues_text = "; ".join(issues) if issues else "No issues"
@@ -1542,22 +1596,40 @@ def validate_profit_data(n_clicks, date_start, date_end):
                 'issues': issues_text,
             })
         
-        # Summary statistics
+        # Enhanced summary statistics with progress indicators
+        total_days = success_count + failed_count
+        valid_percentage = (success_count / total_days * 100) if total_days > 0 else 0
+        
         summary = dmc.Paper(
             dmc.Stack([
-                dmc.Text('Validation Summary', fw=600, size='lg'),
+                dmc.Group([
+                    dmc.Text('Validation Summary', fw=600, size='lg'),
+                    dmc.Badge(f"{total_days} days", color="blue", variant="light", size="sm")
+                ], justify="space-between"),
+                dmc.Progress(
+                    value=valid_percentage,
+                    size="md",
+                    striped=True,
+                    color="green" if failed_count == 0 else "orange"
+                ),
                 dbc.Row([
                     dbc.Col([
-                        dmc.Text(f"{success_count}", className="text-success"),
-                        dmc.P("Valid Days", className="text-muted")
+                        dmc.Group([
+                            dmc.Text(f"{success_count}", className="text-success", size="lg"),
+                            dmc.P("Valid", className="text-muted")
+                        ])
                     ]),
                     dbc.Col([
-                        dmc.Text(f"{failed_count}", className="text-danger"),
-                        dmc.P("Invalid Days", className="text-muted")
+                        dmc.Group([
+                            dmc.Text(f"{failed_count}", className="text-danger", size="lg"),
+                            dmc.P("Invalid", className="text-muted")
+                        ])
                     ]),
                     dbc.Col([
-                        dmc.Text(f"{success_count + failed_count}", className="text-primary"),
-                        dmc.P("Total Days", className="text-muted")
+                        dmc.Group([
+                            dmc.Text(f"{valid_percentage:.1f}%", className="text-primary", size="lg"),
+                            dmc.P("Success Rate", className="text-muted")
+                        ])
                     ]),
                 ])
             ])
@@ -1576,12 +1648,20 @@ def validate_profit_data(n_clicks, date_start, date_end):
             dashGridOptions=_aggrid_pagination_options(),
         )])
         
+        # Enhanced status messages with visual indicators
         if failed_count == 0:
             status_msg = f"✅ Validation complete: All {success_count} days passed"
-            return results_div, status_msg, "alert alert-success"
-        else:
-            status_msg = f"⚠️ Validation complete: {failed_count} of {success_count + failed_count} days have issues"
-            return results_div, status_msg, "alert alert-warning"
+            status_class = "alert alert-success"
+        elif failed_count / total_days <= 0.1:  # Less than 10% failure rate
+            status_msg = f"⚠️ Validation complete: {failed_count} of {total_days} days have minor issues"
+            status_class = "alert alert-warning"
+        else:  # High failure rate
+            status_msg = f"❌ Validation complete: {failed_count} of {total_days} days have significant issues"
+            status_class = "alert alert-danger"
+            
+        logger.info(f"Validation status: {status_msg}")
+        return results_div, status_msg, status_class
             
     except Exception as e:
+        logger.error(f"Profit validation failed: {str(e)}", exc_info=True)
         return dmc.Text(f"Error during validation: {str(e)}", size='sm', c='red'), f"Validation failed: {str(e)}", "alert alert-danger"
