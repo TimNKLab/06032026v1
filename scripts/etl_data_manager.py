@@ -16,8 +16,6 @@ Supported datasets:
     Aggs:  Sales Aggregates (daily, by product, by principal), Profit Aggregates
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Set, Tuple, Callable
 import threading
@@ -30,6 +28,23 @@ import glob
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Lazy imports for GUI (tkinter not available in Docker)
+tk = None
+ttk = None
+messagebox = None
+scrolledtext = None
+
+def _ensure_tk():
+    """Lazy load tkinter only when GUI is needed."""
+    global tk, ttk, messagebox, scrolledtext
+    if tk is None:
+        import tkinter as tk_module
+        from tkinter import ttk as ttk_module, messagebox as msg_module, scrolledtext as scroll_module
+        tk = tk_module
+        ttk = ttk_module
+        messagebox = msg_module
+        scrolledtext = scroll_module
 
 from etl import config as etl_config
 from services.etl_ops import scan_dataset_partitions, scan_dimension_files, parse_date
@@ -990,7 +1005,8 @@ class BackfillRunner:
 class ETLDataManagerApp:
     """Tkinter GUI for ETL Data Manager."""
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root):
+        _ensure_tk()  # Lazy load tkinter
         self.root = root
         self.root.title("ETL Data Manager")
         self.root.geometry("900x700")
@@ -1936,8 +1952,29 @@ class ETLDataManagerApp:
             self.status_var.set("Stopping...")
 
 
+def get_mv_scanner():
+    """Get MVScanner instance for use in other modules."""
+    return MVScanner()
+
+def get_data_scanner():
+    """Get DataScanner instance for use in other modules."""
+    return DataScanner()
+
+def get_backfill_runner(log_callback=None):
+    """Get BackfillRunner instance for use in other modules."""
+    return BackfillRunner(log_callback=log_callback)
+
+# Export key functions for direct import
+__all__ = [
+    'DataScanner', 'MVScanner', 'BackfillRunner',
+    'get_mv_scanner', 'get_data_scanner', 'get_backfill_runner',
+    'MV_TO_PARQUET_MAP', 'DATASET_GROUPS'
+]
+
+
 def main():
     """Main entry point."""
+    _ensure_tk()  # Lazy load tkinter before GUI
     root = tk.Tk()
     app = ETLDataManagerApp(root)
     root.mainloop()
