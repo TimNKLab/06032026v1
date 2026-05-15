@@ -289,6 +289,8 @@ layout = dmc.Container(
         dmc.Text('Scan missing partitions and trigger manual refresh jobs.', c='dimmed', mb='lg'),
         dcc.Store(id='etl-ops-bulk-state', storage_type='memory'),
         dcc.Interval(id='etl-ops-bulk-poll', interval=2000, disabled=True),
+        dcc.Store(id='etl-ops-mv-refresh-state', storage_type='memory'),
+        dcc.Interval(id='etl-ops-mv-refresh-poll', interval=2000, disabled=True),
         
         # Bento Grid Layout
         dmc.Grid(
@@ -598,10 +600,10 @@ layout = dmc.Container(
                                 dmc.Accordion(
                                     [
                                         dmc.AccordionItem(
-                                            [
+                                            value="advanced-options",
+                                            children=[
                                                 dmc.AccordionControl(
                                                     "Advanced Options",
-                                                    icon=dmc.themeIcon('settings')
                                                 ),
                                                 dmc.AccordionPanel(
                                                     dmc.Stack([
@@ -813,57 +815,6 @@ def scan_partitions(n_clicks, dataset_key, date_start, date_end):
     scan_row_data: list[dict] = []
     dim_row_data: list[dict] = []
 
-# Data Validation Section
-dmc.GridCol(
-    dmc.Paper(
-        dmc.Stack(
-            [
-                dmc.Group(
-                    [
-                        dmc.Text('Data Validation', fw=600, size='lg'),
-                        dmc.Badge('Advanced', color='blue', variant='light', size='xs'),
-                    ],
-                    gap='sm',
-                    align='center'
-                ),
-                dmc.Group(
-                    [
-                        dmc.Button('Validate Profit Data', id='etl-ops-validate-profit', n_clicks=0,
-                                    variant='light'),
-                    ],
-                    gap='sm',
-                ),
-                dmc.Text('Validation status: —', id='etl-ops-validation-status', size='sm', c='dimmed'),
-                dag.AgGrid(
-                    id='etl-ops-validation-results',
-                    columnDefs=[
-                        {'field': 'date', 'headerName': 'Date', 'filter': 'agTextColumnFilter', 'minWidth': 120},
-                        {'field': 'status', 'headerName': 'Status', 'filter': 'agTextColumnFilter', 'minWidth': 120, 'cellRenderer': 'agGroupCellRenderer'},
-                        {'field': 'records', 'headerName': 'Records', 'filter': 'agTextColumnFilter', 'minWidth': 120},
-                        {'field': 'issues', 'headerName': 'Issues', 'filter': 'agTextColumnFilter', 'minWidth': 250},
-                    ],
-                    defaultColDef=_aggrid_default_col_def(),
-                    rowData=[],
-                    dashGridOptions=_aggrid_pagination_options(),
-                ),
-                dmc.Group(
-                    [
-                        dmc.Button('Export CSV', id='etl-ops-validation-export', variant='light', size='xs'),
-                    ],
-                    justify='flex-end',
-                    mt='sm'
-                ),
-            ],
-            gap='sm',
-        ),
-        p='md',
-        radius='lg',
-        withBorder=True,
-        shadow='sm',
-    ),
-    span=6,
-)
-
     if dataset_key == Dataset.DIMENSIONS:
         dim_rows = scan_dimension_files()
         for row in dim_rows:
@@ -914,6 +865,58 @@ dmc.GridCol(
         f"Missing fact: {missing_fact}, empty fact: {empty_fact}"
     )
     return scan_row_data, dim_row_data, summary
+
+
+# Data Validation Section
+dmc.GridCol(
+    dmc.Paper(
+        dmc.Stack(
+            [
+                dmc.Group(
+                    [
+                        dmc.Text('Data Validation', fw=600, size='lg'),
+                        dmc.Badge('Advanced', color='blue', variant='light', size='xs'),
+                    ],
+                    gap='sm',
+                    align='center'
+                ),
+                dmc.Group(
+                    [
+                        dmc.Button('Validate Profit Data', id='etl-ops-validate-profit', n_clicks=0,
+                                    variant='light'),
+                    ],
+                    gap='sm',
+                ),
+                dmc.Text('Validation status: —', id='etl-ops-validation-status', size='sm', c='dimmed'),
+                dag.AgGrid(
+                    id='etl-ops-validation-results',
+                    columnDefs=[
+                        {'field': 'date', 'headerName': 'Date', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                        {'field': 'status', 'headerName': 'Status', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                        {'field': 'records', 'headerName': 'Records', 'filter': 'agTextColumnFilter', 'minWidth': 120},
+                        {'field': 'issues', 'headerName': 'Issues', 'filter': 'agTextColumnFilter', 'minWidth': 250},
+                    ],
+                    defaultColDef=_aggrid_default_col_def(),
+                    rowData=[],
+                    dashGridOptions=_aggrid_pagination_options(),
+                ),
+                dmc.Group(
+                    [
+                        dmc.Button('Export CSV', id='etl-ops-validation-export', variant='light', size='xs'),
+                    ],
+                    justify='flex-end',
+                    mt='sm'
+                ),
+            ],
+            gap='sm',
+        ),
+        p='md',
+        radius='lg',
+        withBorder=True,
+        shadow='sm',
+    ),
+    span=6,
+)
 
 
 @dash.callback(
@@ -1344,31 +1347,6 @@ def export_etl_ops_aggregates(n_clicks):
 
 
 @dash.callback(
-    dash.Output('etl-ops-trigger-status', 'children', allow_duplicate=True),
-    dash.Input('etl-ops-mv-refresh', 'n_clicks'),
-    [dash.State('etl-ops-date-start', 'value'),
-     dash.State('etl-ops-date-end', 'value')],
-    prevent_initial_call=True,
-)
-def trigger_mv_refresh(n_clicks, date_start, date_end):
-    """Trigger MV refresh for selected date range."""
-    if not n_clicks:
-        return dash.no_update
-    
-    start_date = parse_date(date_start) or date.today()
-    end_date = parse_date(date_end) or start_date
-    
-    try:
-        # Trigger the MV refresh task
-        task = refresh_materialized_views.delay(start_date.isoformat(), end_date.isoformat())
-        
-        return f"QUEUED: MV refresh task started (ID: {task.id[:8]}...)"
-        
-    except Exception as exc:
-        return f"ERROR: Failed to queue MV refresh: {str(exc)}"
-
-
-@dash.callback(
     dash.Output('etl-ops-auto-mv', 'checked', allow_duplicate=True),
     dash.Input('etl-ops-auto-mv', 'checked'),
     prevent_initial_call=True,
@@ -1395,26 +1373,125 @@ def toggle_auto_mv_refresh(auto_enabled):
             # Silently ignore Redis connection cleanup errors
             pass
 
+
 @dash.callback(
-    dash.Output('etl-ops-mv-results', 'children'),
-    dash.Output('etl-ops-mv-status', 'children'),
-    dash.Output('etl-ops-mv-status', 'className'),
-    dash.Input('etl-ops-mv-scan', 'n_clicks'),
-    dash.State('etl-ops-date-start', 'value'),
-    dash.State('etl-ops-date-end', 'value'),
+    [
+        dash.Output('etl-ops-mv-refresh-state', 'data', allow_duplicate=True),
+        dash.Output('etl-ops-trigger-status', 'children', allow_duplicate=True),
+        dash.Output('etl-ops-mv-refresh-poll', 'disabled', allow_duplicate=True),
+    ],
+    dash.Input('etl-ops-mv-refresh', 'n_clicks'),
+    [dash.State('etl-ops-date-start', 'value'),
+     dash.State('etl-ops-date-end', 'value')],
+    prevent_initial_call=True,
+)
+def trigger_mv_refresh(n_clicks, date_start, date_end):
+    """Trigger MV refresh for selected date range."""
+    if not n_clicks:
+        return [dash.no_update, dash.no_update, True]
+    
+    start_date = parse_date(date_start) or date.today()
+    end_date = parse_date(date_end) or start_date
+    
+    try:
+        # Trigger the MV refresh task
+        task = refresh_materialized_views.delay(start_date.isoformat(), end_date.isoformat())
+        
+        # Store task state for polling
+        state = {
+            'status': 'running',
+            'task_id': task.id,
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+        }
+        
+        return [state, f"RUNNING: MV refresh task {task.id[:8]}...", False]
+        
+    except Exception as exc:
+        return [dash.no_update, f"ERROR: Failed to queue MV refresh: {str(exc)}", True]
+
+
+@dash.callback(
+    [
+        dash.Output('etl-ops-mv-refresh-state', 'data', allow_duplicate=True),
+        dash.Output('etl-ops-trigger-status', 'children', allow_duplicate=True),
+        dash.Output('etl-ops-mv-refresh-poll', 'disabled', allow_duplicate=True),
+    ],
+    dash.Input('etl-ops-mv-refresh-poll', 'n_intervals'),
+    dash.State('etl-ops-mv-refresh-state', 'data'),
+    prevent_initial_call=True,
+)
+def mv_refresh_poll(n_intervals, mv_state):
+    """Poll MV refresh task status."""
+    if not mv_state or mv_state.get('status') not in {'running', 'queued'}:
+        return [dash.no_update, dash.no_update, True]
+    
+    task_id = mv_state.get('task_id')
+    if not task_id:
+        return [dash.no_update, "ERROR: No task ID", True]
+    
+    try:
+        res = AsyncResult(task_id, app=app)
+        state = res.state
+        
+        if state == 'SUCCESS':
+            result = res.result if hasattr(res, 'result') else {}
+            msg = f"SUCCESS: MV refresh completed for {mv_state.get('start_date')} to {mv_state.get('end_date')}"
+            return [dash.no_update, msg, True]
+        
+        elif state == 'QUEUED':
+            info = res.info if hasattr(res, 'info') else {}
+            elapsed = info.get('elapsed', 0) if isinstance(info, dict) else 0
+            msg = f"QUEUED: Waiting for ETL completion... ({elapsed}s)"
+            return [mv_state, msg, False]
+        
+        elif state == 'WAITING':
+            info = res.info if hasattr(res, 'info') else {}
+            elapsed = info.get('elapsed', 0) if isinstance(info, dict) else 0
+            msg = f"WAITING: Waiting for DuckDB lock... ({elapsed}s)"
+            return [mv_state, msg, False]
+        
+        elif state == 'WAITING_FOR_LOCK':
+            info = res.info if hasattr(res, 'info') else {}
+            elapsed = info.get('elapsed', 0) if isinstance(info, dict) else 0
+            msg = f"WAITING_FOR_LOCK: Acquiring DuckDB lock... ({elapsed}s)"
+            return [mv_state, msg, False]
+        
+        elif state == 'RUNNING':
+            info = res.info if hasattr(res, 'info') else {}
+            message = info.get('message', 'Refreshing...') if isinstance(info, dict) else 'Refreshing...'
+            return [mv_state, f"RUNNING: {message}", False]
+        
+        elif state in ('FAILURE', 'REVOKED'):
+            error = res.info if hasattr(res, 'info') else 'Unknown error'
+            msg = f"FAILED: {str(error)[:100]}"
+            return [dash.no_update, msg, True]
+        
+        else:
+            # PENDING or unknown state
+            return [mv_state, f"PENDING: Task {state}", False]
+    
+    except Exception as exc:
+        return [dash.no_update, f"ERROR: {str(exc)}", True]
+
+
+@dash.callback(
+    dash.Output('etl-ops-bulk-modal', 'opened', allow_duplicate=True),
+    dash.Input('etl-ops-bulk-close', 'n_clicks'),
     prevent_initial_call=True,
 )
 def bulk_close(n_clicks):
-    return False, True, None
+    return False
 
 @dash.callback(
-    dash.Output('etl-ops-mv-status', 'children'),
-    dash.Output('etl-ops-mv-status', 'className'),
+    dash.Output('etl-ops-mv-status', 'children', allow_duplicate=True),
+    dash.Output('etl-ops-mv-status', 'className', allow_duplicate=True),
     dash.Output('etl-ops-mv-refresh-all', 'disabled'),
     dash.Input('etl-ops-mv-cascading', 'n_clicks'),
     dash.State('etl-ops-date-start', 'value'),
     dash.State('etl-ops-date-end', 'value'),
     prevent_initial_call=True,
+    allow_duplicate=True,
 )
 def refresh_mvs_cascading(n_clicks, date_start, date_end):
     if not n_clicks:
@@ -1456,10 +1533,11 @@ def refresh_mvs_cascading(n_clicks, date_start, date_end):
         return f"❌ Cascading refresh failed: {str(e)}", "alert alert-danger", False
 
 @dash.callback(
-    dash.Output('etl-ops-mv-status', 'children'),
-    dash.Output('etl-ops-mv-status', 'className'),
+    dash.Output('etl-ops-mv-status', 'children', allow_duplicate=True),
+    dash.Output('etl-ops-mv-status', 'className', allow_duplicate=True),
     dash.Input('etl-ops-mv-refresh-all', 'n_clicks'),
     prevent_initial_call=True,
+    allow_duplicate=True,
 )
 def refresh_all_mvs_simple(n_clicks):
     if not n_clicks:

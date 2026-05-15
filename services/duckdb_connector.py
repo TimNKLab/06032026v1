@@ -12,6 +12,9 @@ from .versioned_cache import versioned_cache
 
 logger = logging.getLogger(__name__)
 
+# Module-level column cache for _parquet_columns
+_column_cache: Dict[str, set] = {}
+
 
 class DuckDBManager:
     _instance: Optional['DuckDBManager'] = None
@@ -20,6 +23,8 @@ class DuckDBManager:
     _initialized = False
     _initialized_groups: set[str] = set()
     _materialized_views: set[str] = set()  # Track which MVs are loaded
+    _last_mv_refresh_ts: float = 0.0  # Timestamp of last MV reload known to this process
+    _needs_mv_reload: bool = False  # Flag to trigger MV reload in background
 
     def __new__(cls):
         if cls._instance is None:
@@ -28,18 +33,61 @@ class DuckDBManager:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
+    def _check_mv_refresh_signal(self) -> None:
+        """Check Redis for MV refresh signal from celery-worker. Reload if stale."""
+        # Skip in celery workers - they use in-memory DuckDB, not file-backed
+        if os.environ.get('CELERY_WORKER_RUNNING') == '1':
+            return
+        try:
+            import redis as redis_lib
+            redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+            r = redis_lib.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
+            val = r.get("mv:last_refresh_ts")
+            r.close()
+            if val is None:
+                return
+            remote_ts = float(val)
+            if remote_ts > self._last_mv_refresh_ts:
+                print(f"[duckdb] MV refresh signal detected (ts={remote_ts:.0f}), reloading connection...")
+                with self._lock:
+                    if remote_ts > self._last_mv_refresh_ts:
+                        # Close and reopen connection to pick up new MV data from file
+                        if self._connection is not None:
+                            try:
+                                self._connection.close()
+                            except Exception:
+                                pass
+                            self._connection = None
+                            self._initialized = False
+                            self._initialized_groups.clear()
+                            self._materialized_views.clear()
+                        self._last_mv_refresh_ts = remote_ts
+                        # Mark that MVs need reload - will be handled by ensure_materialized_views
+                        self._needs_mv_reload = True
+        except Exception:
+            pass  # Redis unavailable — skip silently
+
     def get_connection(self) -> duckdb.DuckDBPyConnection:
+        # Check if MVs were refreshed externally (e.g., by celery-worker)
+        self._check_mv_refresh_signal()
+
         if self._connection is None:
             with self._lock:
                 if self._connection is None:
-                    # Use persistent DuckDB so materialized views survive restarts
                     data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
                     db_path = f"{data_lake}/cache/nkdash.duckdb"
                     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-                    
-                    conn = duckdb.connect(database=db_path)
+
+                    # Celery workers must NOT hold the file lock — dash-app owns it exclusively.
+                    # Workers use in-memory DuckDB; they read parquet directly via read_parquet().
+                    in_celery = os.environ.get('CELERY_WORKER_RUNNING') == '1'
                     setup_start = time.time()
-                    print(f"[duckdb] connecting to {db_path}...")
+                    if in_celery:
+                        conn = duckdb.connect(database=':memory:')
+                        print(f"[duckdb] celery worker: using in-memory DuckDB (file owned by dash-app)")
+                    else:
+                        conn = duckdb.connect(database=db_path)
+                        print(f"[duckdb] connecting to {db_path}...")
                     
                     # Check if materialized views already exist (from previous run)
                     existing_mvs = set()
@@ -65,7 +113,40 @@ class DuckDBManager:
                     print(f"[duckdb] views ready in {time.time() - setup_start:.3f}s")
                     self._connection = conn
                     self._initialized = True
+                    # Reload MVs in background if signal detected (after connection is fully ready)
+                    if getattr(self, '_needs_mv_reload', False):
+                        threading.Thread(target=self._reload_mvs_background, daemon=True).start()
         return self._connection
+
+    def _reload_mvs_background(self) -> None:
+        """Reload materialized views in background thread - called after connection is ready."""
+        try:
+            print("[duckdb] background: reloading materialized views...")
+            # Use a fresh connection to avoid corruption issues
+            data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
+            db_path = f"{data_lake}/cache/nkdash.duckdb"
+            conn = duckdb.connect(database=db_path)
+            
+            # Map MV names to their source aggregate views (correct names)
+            mv_to_agg = {
+                "mv_sales_daily": "agg_sales_daily",
+                "mv_sales_by_product": "agg_sales_daily_by_product",
+                "mv_sales_by_principal": "agg_sales_daily_by_principal",
+                "mv_profit_daily": "agg_profit_daily",
+            }
+            
+            for mv_name, agg_view in mv_to_agg.items():
+                try:
+                    # Drop and recreate MV from correct aggregate view
+                    conn.execute(f"DROP TABLE IF EXISTS {mv_name}")
+                    conn.execute(f"CREATE TABLE {mv_name} AS SELECT * FROM {agg_view}")
+                    print(f"[duckdb] background: {mv_name} reloaded")
+                except Exception as e:
+                    print(f"[duckdb] background: failed to reload {mv_name}: {e}")
+            
+            print("[duckdb] background: MV reload complete")
+        except Exception as e:
+            print(f"[duckdb] background: MV reload failed: {e}")
 
     def close_connection(self) -> None:
         """Close the DuckDB connection to release file locks."""
@@ -175,11 +256,12 @@ class DuckDBManager:
         # Ensure metadata tracking table exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mv_refresh_metadata (
-                view_name VARCHAR PRIMARY KEY,
+                view_name VARCHAR,
                 last_refresh_date TIMESTAMP,
                 max_data_date DATE,
                 row_count BIGINT,
-                refresh_type VARCHAR  -- 'full' or 'incremental'
+                refresh_type VARCHAR,  -- 'full' or 'incremental'
+                PRIMARY KEY (view_name)
             )
         """)
 
@@ -192,16 +274,12 @@ class DuckDBManager:
                 conn.execute(f"""
                     CREATE OR REPLACE TABLE mv_sales_daily AS
                     SELECT
-                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) AS date,
+                        TRY_CAST(date AS DATE) AS date,
                         COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
                         COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
                         COALESCE(TRY_CAST(items_sold AS DOUBLE), 0) AS items_sold,
                         COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                     WHERE revenue IS NOT NULL OR transactions IS NOT NULL
                 """)
                 refresh_type = 'full'
@@ -210,22 +288,14 @@ class DuckDBManager:
                 conn.execute(f"""
                     INSERT INTO mv_sales_daily
                     SELECT
-                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) AS date,
+                        TRY_CAST(date AS DATE) AS date,
                         COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
                         COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
                         COALESCE(TRY_CAST(items_sold AS DOUBLE), 0) AS items_sold,
                         COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                     WHERE (revenue IS NOT NULL OR transactions IS NOT NULL)
-                      AND COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) > '{max_date}'
+                      AND TRY_CAST(date AS DATE) > '{max_date}'
                 """)
                 refresh_type = 'incremental'
             
@@ -246,16 +316,12 @@ class DuckDBManager:
                 conn.execute(f"""
                     CREATE OR REPLACE TABLE mv_sales_by_product AS
                     SELECT
-                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) AS date,
+                        TRY_CAST(date AS DATE) AS date,
                         COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
                         COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
                         COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                         COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                     WHERE revenue IS NOT NULL
                 """)
             else:
@@ -265,22 +331,14 @@ class DuckDBManager:
                     SELECT * FROM mv_sales_by_product WHERE date <= '{max_date}'
                     UNION ALL
                     SELECT
-                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) AS date,
+                        TRY_CAST(date AS DATE) AS date,
                         COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
                         COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
                         COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                         COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                     WHERE revenue IS NOT NULL
-                      AND COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) > '{max_date}'
+                      AND TRY_CAST(date AS DATE) > '{max_date}'
                 """)
 
         # Materialized view: Sales by principal
@@ -289,16 +347,12 @@ class DuckDBManager:
             conn.execute(f"""
                 CREATE OR REPLACE TABLE mv_sales_by_principal AS
                 SELECT
-                    COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                    )) AS date,
+                    TRY_CAST(date AS DATE) AS date,
                     COALESCE(principal, 'Unknown') AS principal,
                     COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
                     COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                     COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                FROM read_parquet('{agg_by_principal_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                FROM read_parquet('{agg_by_principal_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                 WHERE revenue IS NOT NULL
             """)
 
@@ -311,18 +365,14 @@ class DuckDBManager:
                 conn.execute(f"""
                     CREATE OR REPLACE TABLE mv_profit_daily AS
                     SELECT
-                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) AS date,
+                        TRY_CAST(date AS DATE) AS date,
                         COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
                         COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
                         COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
                         COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                         COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
                         COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                     WHERE revenue_tax_in IS NOT NULL
                 """)
                 refresh_type = 'full'
@@ -331,24 +381,16 @@ class DuckDBManager:
                 conn.execute(f"""
                     INSERT INTO mv_profit_daily
                     SELECT
-                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) AS date,
+                        TRY_CAST(date AS DATE) AS date,
                         COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
                         COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
                         COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
                         COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
                         COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
                         COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                     WHERE revenue_tax_in IS NOT NULL
-                      AND COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                        )) > '{max_date}'
+                      AND TRY_CAST(date AS DATE) > '{max_date}'
                 """)
                 refresh_type = 'incremental'
 
@@ -366,11 +408,7 @@ class DuckDBManager:
             conn.execute(f"""
                 CREATE OR REPLACE TABLE mv_inventory_daily AS
                 SELECT
-                    COALESCE(TRY_CAST(snapshot_date AS DATE), MAKE_DATE(
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                    )) AS snapshot_date,
+                    TRY_CAST(snapshot_date AS DATE) AS snapshot_date,
                     COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
                     COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS on_hand_qty,
                     COALESCE(TRY_CAST(reserved_quantity AS DOUBLE), 0) AS reserved_qty,
@@ -379,7 +417,7 @@ class DuckDBManager:
                     0 AS outgoing_qty,
                     location_id,
                     NULL AS warehouse_id
-                FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                 WHERE product_id IS NOT NULL
             """)
 
@@ -414,7 +452,7 @@ class DuckDBManager:
                         (quantity - reserved_quantity) as available_qty,
                         location_id,
                         ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY snapshot_date DESC) as rn
-                    FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
                     WHERE product_id IS NOT NULL
                 ),
                 velocity AS (
@@ -529,6 +567,11 @@ class DuckDBManager:
         ) = self._get_data_paths()
 
         def _parquet_columns(parquet_path: str) -> set:
+            """Get parquet columns with caching to avoid repeated DESCRIBE queries."""
+            # Check cache first
+            if parquet_path in _column_cache:
+                return _column_cache[parquet_path]
+            
             start = time.time()
             try:
                 rows = conn.execute(
@@ -537,6 +580,8 @@ class DuckDBManager:
                 # DESCRIBE returns rows like: (column_name, column_type, null, key, default, extra)
                 cols = {r[0] for r in rows if r and r[0]}
                 print(f"[duckdb] describe {os.path.basename(parquet_path)} in {time.time() - start:.3f}s")
+                # Cache the result
+                _column_cache[parquet_path] = cols
                 return cols
             except Exception:
                 print(f"[duckdb] describe failed for {parquet_path} after {time.time() - start:.3f}s")
@@ -1375,6 +1420,8 @@ def ensure_materialized_views(views: set[str], force_reload: bool = False) -> No
     DuckDBManager().ensure_materialized_views(views, force_reload=force_reload)
 
 
+@versioned_cache(ttl=3600, key_prefix="sales_by_principal")
+@lru_cache(maxsize=32)
 def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     ensure_duckdb_view_groups({"sales_agg"})
     conn = DuckDBManager().get_connection()
@@ -1392,7 +1439,7 @@ def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) 
 
     query_start = time.time()
     try:
-        result = conn.execute(query, [start_date, end_date, int(limit)]).fetchdf()
+        result = _execute_with_timeout(conn, query, [start_date, end_date, int(limit)])
         print(f"[TIMING] query_sales_by_principal: {time.time() - query_start:.3f}s")
         print(f"[DEBUG] Returned columns: {list(result.columns)}")
         print(f"[DEBUG] Number of columns: {len(result.columns)}")
@@ -1450,11 +1497,13 @@ def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') 
     ORDER BY ds.period_start
     """
     query_start = time.time()
-    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    result = _execute_with_timeout(conn, query, [start_date, end_date])
     print(f"[TIMING] query_sales_trends: {time.time() - query_start:.3f}s")
     return result
 
 
+@versioned_cache(ttl=3600, key_prefix="hourly_pattern")
+@lru_cache(maxsize=32)
 def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     """Query hourly sales - pre-generates all hours in SQL."""
     ensure_duckdb_view_groups({"sales"})
@@ -1477,7 +1526,7 @@ def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     ORDER BY h.hour
     """
     query_start = time.time()
-    result = conn.execute(query, [target_date, target_date]).fetchdf()
+    result = _execute_with_timeout(conn, query, [target_date, target_date])
     print(f"[TIMING] query_hourly_sales_pattern: {time.time() - query_start:.3f}s")
     return result
 
@@ -1593,6 +1642,8 @@ def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     }
 
 
+@versioned_cache(ttl=3600, key_prefix="hourly_heatmap")
+@lru_cache(maxsize=32)
 def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame:
     """Query hourly heatmap data."""
     ensure_duckdb_view_groups({"sales"})
@@ -1610,7 +1661,7 @@ def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame
     ORDER BY 1, 2
     """
     query_start = time.time()
-    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    result = _execute_with_timeout(conn, query, [start_date, end_date])
     print(f"[TIMING] query_hourly_sales_heatmap: {time.time() - query_start:.3f}s")
     return result
 
@@ -1676,7 +1727,35 @@ def clear_sales_caches() -> None:
     query_revenue_comparison.cache_clear()
     query_top_products.cache_clear()
     query_overview_summary.cache_clear()
-    try:
-        query_hourly_sales_heatmap.cache_clear()
-    except AttributeError:
-        pass
+    query_hourly_sales_heatmap.cache_clear()
+    query_hourly_sales_pattern.cache_clear()
+    query_sales_by_principal.cache_clear()
+    # Clear the column cache too
+    _column_cache.clear()
+
+
+def _execute_with_timeout(conn, query: str, params: list = None, timeout_ms: int = 10000) -> pd.DataFrame:
+    """Execute query with configurable timeout.
+    
+    Args:
+        conn: DuckDB connection
+        query: SQL query to execute
+        params: Query parameters (optional)
+        timeout_ms: Timeout in milliseconds (default 10000 = 10s)
+    
+    Returns:
+        pandas DataFrame with results
+    
+    Raises:
+        Exception: If query times out or fails
+    """
+    # Set statement timeout
+    conn.execute(f"SET statement_timeout={timeout_ms}")
+    
+    # Execute query
+    if params:
+        result = conn.execute(query, params).fetchdf()
+    else:
+        result = conn.execute(query).fetchdf()
+    
+    return result

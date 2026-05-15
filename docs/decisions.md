@@ -70,6 +70,22 @@ This is an append-only log of significant decisions made during NKDash developme
 
 ---
 
+## 2026-05
+
+### Materialized View Refresh Architecture
+**Date:** 2026-05-14  
+**Context:** MVs stuck at Feb 2026 despite daily ETL completing; profit pipeline failed due to missing `fact_product_costs_unified` table  
+**Decision:** Implemented end-to-end MV refresh workflow: (1) Daily profit pipeline builds `fact_product_costs_unified` and profit aggregates, (2) `refresh_materialized_views` task writes parquet aggregates, (3) Redis signal triggers dash-app to reload MVs on next startup, (4) Added `/api/mv-diagnostics` endpoint for debugging. Schedule: profit pipeline 02:20, MV refresh 02:30. Fixed by ensuring profit pipeline runs before MV refresh.  
+**Impact:** Enables real-time profit analytics; requires strict ETL ordering; dash-app restart needed after MV refresh to load new data.
+
+### DuckDB File Locking Workaround
+**Date:** 2026-05-14  
+**Context:** DuckDB file locks are exclusive even in read-only mode when another process holds write lock  
+**Decision:** All MV queries must run via dash-app (single DuckDB writer). Created `/api/mv-diagnostics` endpoint to expose MV date ranges for debugging.  
+**Impact:** Prevents concurrent access conflicts; centralizes DuckDB access through dash-app.
+
+---
+
 ## Decision Categories
 
 ### Architecture Decisions

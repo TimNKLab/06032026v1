@@ -70,9 +70,8 @@ try:
     import force_refresh_stock_quants
     import force_refresh_purchase_data
     FORCE_REFRESH_AVAILABLE = True
-except ImportError as e:
+except ImportError:
     FORCE_REFRESH_AVAILABLE = False
-    print(f"Warning: Could not import force refresh modules: {e}")
 
 # Docker ETL configuration (to avoid Windows/DuckDB permission issues)
 DOCKER_ETL_ENABLED = os.environ.get("ETL_DATA_MANAGER_USE_DOCKER") in {"1", "true", "True", "yes", "YES"}
@@ -873,21 +872,43 @@ class BackfillRunner:
                 agg_results = self.backfill_aggregates("profit_aggregates", start_date, end_date)
                 results["aggregates_built"].append({"type": "profit", **agg_results})
 
-            # Step 3: Load into DuckDB MVs
-            self.log("  Loading data into DuckDB materialized views...")
+            # Step 3: Signal dash-app to reload MVs from parquet.
+            # If running in dash-app process (CELERY_WORKER_RUNNING != 1), reload directly.
+            # If running in celery-worker, just set the Redis signal — dash-app will reload on next query.
+            self.log("  Signalling MV reload...")
 
-            from services.duckdb_connector import DuckDBManager
-            manager = DuckDBManager()
+            in_celery = os.environ.get('CELERY_WORKER_RUNNING') == '1'
 
-            try:
-                manager.ensure_materialized_views(views)
+            if not in_celery:
+                # Running in dash-app — reload directly
+                from services.duckdb_connector import DuckDBManager
+                manager = DuckDBManager()
+                try:
+                    manager.ensure_materialized_views(views, force_reload=True)
+                    results["views_built"] = list(views)
+                    results["success"] = len(views)
+                    self.log(f"  Successfully reloaded {len(views)} view(s) in-process")
+                except Exception as e:
+                    results["failed"] = len(views)
+                    results["errors"].append(f"DuckDB error: {e}")
+                    self.log(f"  Failed to reload views: {e}")
+            else:
+                # Running in celery-worker — parquet is written, signal dash-app
                 results["views_built"] = list(views)
                 results["success"] = len(views)
-                self.log(f"  Successfully built {len(views)} view(s)")
-            except Exception as e:
-                results["failed"] = len(views)
-                results["errors"].append(f"DuckDB error: {e}")
-                self.log(f"  Failed to build views: {e}")
+                self.log(f"  Parquet aggregates written. Signalling dash-app to reload MVs.")
+
+            # Set Redis signal so dash-app reloads its DuckDB connection
+            try:
+                import redis as redis_lib
+                import time as _time
+                redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+                r = redis_lib.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2)
+                r.set("mv:last_refresh_ts", str(_time.time()))
+                r.close()
+                self.log("  Redis signal set: mv:last_refresh_ts")
+            except Exception as sig_exc:
+                self.log(f"  Warning: could not set Redis signal: {sig_exc}")
 
         except Exception as e:
             results["errors"].append(str(e))

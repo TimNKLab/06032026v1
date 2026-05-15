@@ -30,6 +30,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# ============================================================================
+# VIEW GROUP LOADING
+# ============================================================================
+
+def _ensure_profit_detail_views():
+    """Ensure profit_detail view group is loaded for DuckDB queries.
+    
+    Celery workers use in-memory DuckDB and don't load views on startup.
+    Profit ETL tasks query fact_product_costs_unified view directly.
+    This function ensures the view group is loaded before queries.
+    """
+    try:
+        from services.duckdb_connector import ensure_duckdb_view_groups
+        ensure_duckdb_view_groups({"profit_detail"})
+        logger.debug("profit_detail view group loaded")
+    except Exception as e:
+        logger.error(f"Failed to load profit_detail view group: {e}", exc_info=True)
+        raise
+
 # ============================================================================
 # ETL LOCK COORDINATION
 # ============================================================================
@@ -1377,6 +1397,9 @@ def _build_product_cost_latest_daily(target_date: str) -> pl.DataFrame:
 
 
 def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
+    """Build sales line profit data using DuckDB queries."""
+    _ensure_profit_detail_views()  # Ensure view group is loaded before querying
+    
     from etl.config import FACT_PRODUCT_COSTS_UNIFIED_PATH
     
     sales_schema = {
@@ -1513,6 +1536,9 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
 
 
 def _build_profit_aggregates(profit_df: pl.DataFrame) -> Tuple[pl.DataFrame, pl.DataFrame]:
+    """Build daily and by-product profit aggregates."""
+    _ensure_profit_detail_views()  # Ensure view group is loaded before aggregating
+    
     daily_schema = {
         'date': pl.Date,
         'revenue_tax_in': pl.Float64,
@@ -2145,9 +2171,7 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
     """Refresh all materialized views for date range with proper locking."""
     import redis
     import uuid
-    import subprocess
     import json
-    from services.docker_compose_runner import run_compose_exec_with_output
     
     logger.info(f"Starting MV refresh for {start_date} to {end_date}")
     
@@ -2226,39 +2250,37 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
             
             logger.info(f"DuckDB lock acquired for request {request_id}")
             
-            # Execute CLI refresh via Docker
+            # Execute MV refresh directly in-process (we're already inside Docker)
             self.update_state(
                 state='RUNNING',
                 meta={'request_id': request_id, 'message': 'Refreshing materialized views...'}
             )
-            
-            cli_args = [
-                "python", "scripts/etl_data_manager_cli.py",
-                "refresh-mvs-cascading",
-                "--views", "mv_sales_daily,mv_profit_daily,mv_sales_by_product,mv_profit_daily_by_product",
-                "--start", start_date,
-                "--end", end_date,
-                "--auto-fetch"
-            ]
-            
-            def log_callback(line: str):
-                logger.info(f"MV CLI: {line.strip()}")
-                # Update progress if line contains useful info
-                if "refreshed" in line.lower() or "building" in line.lower():
-                    self.update_state(
-                        state='RUNNING',
-                        meta={'request_id': request_id, 'message': line.strip(), 'elapsed': int(time.time() - start_time)}
-                    )
-            
-            exit_code = run_compose_exec_with_output(
-                service="celery-worker",
-                args=cli_args,
-                cwd="/app",
-                line_callback=log_callback
+
+            from scripts.etl_data_manager import BackfillRunner
+            from scripts.etl_data_manager import MV_TO_PARQUET_MAP
+            from datetime import date as _date
+
+            def _log(msg):
+                logger.info(f"MV refresh: {msg}")
+                self.update_state(
+                    state='RUNNING',
+                    meta={'request_id': request_id, 'message': msg}
+                )
+
+            runner = BackfillRunner(log_callback=_log)
+            views = set(MV_TO_PARQUET_MAP.keys())
+
+            results = runner.refresh_materialized_views_cascading(
+                views=views,
+                start_date=_date.fromisoformat(start_date),
+                end_date=_date.fromisoformat(end_date),
+                auto_fetch=False,  # ETL already ran; just load parquet → MV
+                refresh_dims=False,
             )
-            
-            if exit_code != 0:
-                raise Exception(f"CLI refresh failed with exit code {exit_code}")
+
+            if results.get('failed', 0) > 0:
+                errors = results.get('errors', [])
+                raise Exception(f"MV refresh had {results['failed']} failure(s): {'; '.join(errors[:3])}")
             
             # Force reload MVs in the dashboard's DuckDB connection
             # This ensures the dash-app process picks up the new MVs
@@ -2285,6 +2307,13 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
                 logger.info("Cleared profit and sales query caches after MV refresh")
             except Exception as cache_exc:
                 logger.warning(f"Could not clear query caches: {cache_exc}")
+
+            # Signal dash-app to reload DuckDB connection (picks up new MV data from file)
+            try:
+                redis_client.set("mv:last_refresh_ts", str(time.time()))
+                logger.info("Set mv:last_refresh_ts signal for dash-app")
+            except Exception as sig_exc:
+                logger.warning(f"Could not set MV refresh signal: {sig_exc}")
             
             logger.info(f"MV refresh completed successfully for request {request_id}")
             
@@ -2325,46 +2354,26 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
 
 @app.task
 def refresh_materialized_views_scheduled():
-    """Scheduled MV refresh after ETL completion."""
+    """Scheduled MV refresh after ETL completion (runs at 02:30 daily)."""
     from datetime import date, timedelta
-    
-    # Check if auto-refresh is enabled
-    redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
-    redis_client = redis.from_url(redis_url)
-    
+
+    yesterday = date.today() - timedelta(days=1)
+    start_date = yesterday.isoformat()
+    end_date = yesterday.isoformat()
+
+    logger.info(f"Starting scheduled MV refresh for {start_date}")
+
     try:
-        auto_refresh_enabled = redis_client.get("mv:auto_refresh_enabled")
-        if not auto_refresh_enabled or auto_refresh_enabled.decode() != 'true':
-            logger.info("Auto MV refresh disabled, skipping scheduled refresh")
-            return
-        
-        # Get yesterday's date for refresh
-        yesterday = date.today() - timedelta(days=1)
-        start_date = yesterday.isoformat()
-        end_date = yesterday.isoformat()
-        
-        logger.info(f"Starting scheduled MV refresh for {start_date}")
-        
-        # Trigger MV refresh
         result = refresh_materialized_views.delay(start_date, end_date)
-        
         logger.info(f"Scheduled MV refresh task queued: {result.id}")
-        
         return {
             'status': 'queued',
             'task_id': result.id,
             'date': start_date
         }
-        
     except Exception as exc:
         logger.error(f"Scheduled MV refresh failed: {exc}", exc_info=True)
         raise
-    
-    finally:
-        try:
-            redis_client.close()
-        except:
-            pass
 
 
 app.conf.task_routes = {

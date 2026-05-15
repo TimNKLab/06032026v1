@@ -25,7 +25,11 @@ MV_TO_PATH = {
 
 def check():
     manager = DuckDBManager()
-    conn = manager.get_connection()
+    # Use read_only to avoid conflicting with dash-app's write lock
+    data_lake = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    db_path = f"{data_lake}/cache/nkdash.duckdb"
+    import duckdb as _duckdb
+    conn = _duckdb.connect(database=db_path, read_only=True)
 
     print("=" * 60)
     print("MV DATE RANGE DIAGNOSTIC")
@@ -91,7 +95,7 @@ def check():
         print(f"  metadata error: {e}")
 
     print("\n--- _materialized_views tracking set ---")
-    print(f"  {sorted(manager._materialized_views)}")
+    print("  (read_only mode — tracking set not available)")
 
 
 if __name__ == "__main__":

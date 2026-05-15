@@ -59,7 +59,72 @@ def header_nav_links():
 # Expose Flask server for Gunicorn
 server = app.server
 
+# API endpoint for MV diagnostics (register BEFORE Dash layout)
+from flask import jsonify
+
+@server.route('/api/mv-diagnostics')
+def mv_diagnostics():
+    """Expose MV date ranges for diagnostic purposes."""
+    try:
+        from services.duckdb_connector import DuckDBManager
+        manager = DuckDBManager()
+        conn = manager.get_connection()
+        
+        result = {}
+        for mv_name in ['mv_profit_daily', 'mv_sales_daily', 'mv_sales_by_product', 'mv_sales_by_principal']:
+            try:
+                row = conn.execute(f"SELECT COUNT(*), MIN(date), MAX(date) FROM {mv_name}").fetchone()
+                result[mv_name] = {
+                    'rows': row[0],
+                    'min_date': str(row[1]) if row[1] else None,
+                    'max_date': str(row[2]) if row[2] else None,
+                }
+            except Exception as e:
+                result[mv_name] = {'error': str(e)}
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 init_cache(server)
+
+# Health check endpoint for Docker healthcheck
+@server.route('/health')
+def health_check():
+    """Health check endpoint - verifies DuckDB MVs are loaded and queryable."""
+    try:
+        from services.duckdb_connector import DuckDBManager
+        manager = DuckDBManager()
+        conn = manager.get_connection()
+        
+        # Count materialized views (mv_* tables)
+        mv_count_result = conn.execute("""
+            SELECT COUNT(*) 
+            FROM information_schema.tables 
+            WHERE table_name LIKE 'mv_%'
+        """).fetchone()
+        mv_count = mv_count_result[0] if mv_count_result else 0
+        
+        # Check if minimum MVs are loaded (expect at least 4: sales_daily, sales_by_product, sales_by_principal, profit_daily)
+        if mv_count < 4:
+            return jsonify({
+                'status': 'initializing',
+                'mvs_loaded': mv_count
+            }), 503
+        
+        # Smoke test: verify mv_sales_daily is queryable
+        conn.execute("SELECT 1 FROM mv_sales_daily LIMIT 1").fetchone()
+        
+        return jsonify({
+            'status': 'healthy',
+            'mvs_loaded': mv_count
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 503
 
 # Pre-create DuckDB views and materialized views in background thread
 import threading
@@ -73,7 +138,8 @@ def _precreate_views():
         print("[STARTUP] Pre-creating DuckDB views...")
         start = time_module.time()
         # Create fast aggregate views first (for Sales page)
-        ensure_duckdb_view_groups({"sales_agg", "overview", "dims"})
+        # Include profit_detail for fact_product_costs_unified view used by profit ETL
+        ensure_duckdb_view_groups({"sales_agg", "overview", "dims", "profit_detail"})
         elapsed = time_module.time() - start
         print(f"[STARTUP] DuckDB views ready in {elapsed:.1f}s")
         
@@ -303,8 +369,6 @@ app.validation_layout = _build_validation_layout()
 def toggle_mobile_drawer(opened):
     return opened
 
-
-server = app.server
 
 if __name__ == '__main__':
     app.run(debug=True)

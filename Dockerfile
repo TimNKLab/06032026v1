@@ -25,6 +25,9 @@ FROM python:3.9-slim
 
 WORKDIR /app
 
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 # Copy installed packages and binaries from build stage
 COPY --from=build-stage /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
 COPY --from=build-stage /usr/local/bin /usr/local/bin

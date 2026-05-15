@@ -61,6 +61,21 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 - **NK_20260121_adjustments_8d9b** - Inventory adjustments handling (in progress)
 - **NK_20260408_sales_aggregates_optimization_9d2e** - Sales aggregates ETL implementation for performance (validated, includes materialized views)
 - **NK_20260408_historical_backfill_7e3f** - Historical sales aggregates backfill Feb 2025–Feb 2026 (validated, 1,203 files created)
+- **NK_20260514_mv_refresh_stuck_0001** - MV refresh stuck issue (in progress)
+
+## Team Log
+
+### 2026-05-14: NK_20260514_mv_refresh_stuck_0001 - MV refresh stuck and view name fix
+- **Changes:**
+  - Added MV refresh status polling in `pages/operational.py` (task state tracking, 2-second polling)
+  - Fixed MV reload view names in `services/duckdb_connector.py` (`_reload_mvs_background`)
+  - View names corrected: `agg_sales_by_product` → `agg_sales_daily_by_product`, `agg_sales_by_principal` → `agg_sales_daily_by_principal`
+- **Validation:** 
+  - MV refresh button now shows real-time status (QUEUED/WAITING/RUNNING/SUCCESS/FAILURE)
+  - View names match actual aggregate table names in DuckDB
+- **Notes:** 
+  - Root cause: `_reload_mvs_background()` used incorrect view names (missing `_daily` suffix)
+  - Fix ensures MV reload uses correct source views: `agg_sales_daily_by_product`, `agg_sales_daily_by_principal`
 
 ## Key Data Sources
 - **Transactional:** pos.order, account.move (sales/purchases), stock.move.line, stock.quant

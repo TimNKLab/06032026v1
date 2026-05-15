@@ -62,7 +62,7 @@ def main() -> int:
     args = p.parse_args()
 
     # Initialize BackfillRunner with print for logging
-    runner = BackfillRunner(log_fn=print)
+    runner = BackfillRunner(log_callback=print)
 
     if args.cmd == "refresh-mvs-cascading":
         views = {v.strip() for v in args.views.split(",") if v.strip()}
