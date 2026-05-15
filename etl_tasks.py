@@ -31,6 +31,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# ETL LOCK COORDINATION
+# ============================================================================
+
+@contextmanager
+def etl_operation_lock():
+    """Context manager to coordinate ETL operations with MV refresh."""
+    import redis
+    
+    redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+    redis_client = redis.from_url(redis_url)
+    
+    try:
+        # Set ETL running flag
+        redis_client.set("etl:operations_running", "true", ex=7200)  # 2 hour timeout
+        logger.info("ETL operations lock acquired")
+        yield
+    finally:
+        # Clear ETL running flag
+        redis_client.delete("etl:operations_running")
+        logger.info("ETL operations lock released")
+        try:
+            redis_client.close()
+        except:
+            pass
+
+# ============================================================================
 # CELERY CONFIGURATION
 # ============================================================================
 
@@ -51,110 +77,111 @@ app.conf.update(
 
 @app.task(bind=True)
 def force_refresh_day(self, dataset_key: str, target_date: str, refresh_dims: bool = False) -> Dict[str, Any]:
-    if dataset_key in {"inventory_moves", "stock_quants"} and refresh_dims:
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "refresh_dimensions", "step_name": "Refresh dimensions", "pct": 5})
+    with etl_operation_lock():
+        if dataset_key in {"inventory_moves", "stock_quants"} and refresh_dims:
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "refresh_dimensions", "step_name": "Refresh dimensions", "pct": 5})
+            if dataset_key == "inventory_moves":
+                refresh_dimensions_incremental.run(["products", "locations", "uoms", "partners", "users", "companies", "lots"])
+            else:
+                refresh_dimensions_incremental.run(["products", "locations", "lots"])
+
+        if dataset_key == "pos":
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract POS", "pct": 10})
+            extraction = extract_pos_order_lines.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+            raw_path = save_raw_data.run(extraction)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean POS", "pct": 60})
+            clean_path = clean_pos_data.run(raw_path, target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+            fact_path = update_star_schema.run(clean_path, target_date)
+            records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+            return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
+        if dataset_key == "invoice_sales":
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract invoice sales", "pct": 10})
+            extraction = extract_sales_invoice_lines.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+            raw_path = save_raw_sales_invoice_lines.run(extraction)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean invoice sales", "pct": 60})
+            clean_path = clean_sales_invoice_lines.run(raw_path, target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+            fact_path = update_invoice_sales_star_schema.run(clean_path, target_date)
+            records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+            return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
+        if dataset_key == "purchases":
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract purchases", "pct": 10})
+            extraction = extract_purchase_invoice_lines.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+            raw_path = save_raw_purchase_invoice_lines.run(extraction)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean purchases", "pct": 60})
+            clean_path = clean_purchase_invoice_lines.run(raw_path, target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+            fact_path = update_purchase_star_schema.run(clean_path, target_date)
+            records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+            return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+
         if dataset_key == "inventory_moves":
-            refresh_dimensions_incremental.run(["products", "locations", "uoms", "partners", "users", "companies", "lots"])
-        else:
-            refresh_dimensions_incremental.run(["products", "locations", "lots"])
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract inventory moves", "pct": 10})
+            extraction = extract_inventory_moves.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+            raw_path = save_raw_inventory_moves.run(extraction)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean inventory moves", "pct": 60})
+            clean_path = clean_inventory_moves.run(raw_path, target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+            fact_path = update_inventory_moves_star_schema.run(clean_path, target_date)
+            records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+            return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
 
-    if dataset_key == "pos":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract POS", "pct": 10})
-        extraction = extract_pos_order_lines.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
-        raw_path = save_raw_data.run(extraction)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean POS", "pct": 60})
-        clean_path = clean_pos_data.run(raw_path, target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
-        fact_path = update_star_schema.run(clean_path, target_date)
-        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
-        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+        if dataset_key == "stock_quants":
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract stock quants", "pct": 10})
+            extraction = extract_stock_quants.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
+            raw_path = save_raw_stock_quants.run(extraction)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean stock quants", "pct": 60})
+            clean_path = clean_stock_quants.run(raw_path, target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
+            fact_path = update_stock_quants_star_schema.run(clean_path, target_date)
+            records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
+            return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
 
-    if dataset_key == "invoice_sales":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract invoice sales", "pct": 10})
-        extraction = extract_sales_invoice_lines.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
-        raw_path = save_raw_sales_invoice_lines.run(extraction)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean invoice sales", "pct": 60})
-        clean_path = clean_sales_invoice_lines.run(raw_path, target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
-        fact_path = update_invoice_sales_star_schema.run(clean_path, target_date)
-        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
-        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+        if dataset_key == "profit":
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_events", "step_name": "Cost events", "pct": 25})
+            cost_events_path = update_product_cost_events.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_snapshot", "step_name": "Cost snapshot", "pct": 50})
+            cost_snapshot_path = update_product_cost_latest_daily.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "sales_profit", "step_name": "Sales profit", "pct": 75})
+            profit_lines_path = update_sales_lines_profit.run(target_date)
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "aggregates", "step_name": "Profit aggregates", "pct": 90})
+            agg_paths = update_profit_aggregates.run(target_date)
+            return {
+                "dataset": dataset_key,
+                "date": target_date,
+                "cost_events_path": cost_events_path,
+                "cost_snapshot_path": cost_snapshot_path,
+                "profit_lines_path": profit_lines_path,
+                "aggregate_paths": agg_paths,
+            }
 
-    if dataset_key == "purchases":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract purchases", "pct": 10})
-        extraction = extract_purchase_invoice_lines.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
-        raw_path = save_raw_purchase_invoice_lines.run(extraction)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean purchases", "pct": 60})
-        clean_path = clean_purchase_invoice_lines.run(raw_path, target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
-        fact_path = update_purchase_star_schema.run(clean_path, target_date)
-        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
-        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+        if dataset_key == "product_cost_events":
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_events", "step_name": "Cost events", "pct": 50})
+            cost_events_path = update_product_cost_events.run(target_date)
+            return {
+                "dataset": dataset_key,
+                "date": target_date,
+                "cost_events_path": cost_events_path,
+            }
 
-    if dataset_key == "inventory_moves":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract inventory moves", "pct": 10})
-        extraction = extract_inventory_moves.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
-        raw_path = save_raw_inventory_moves.run(extraction)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean inventory moves", "pct": 60})
-        clean_path = clean_inventory_moves.run(raw_path, target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
-        fact_path = update_inventory_moves_star_schema.run(clean_path, target_date)
-        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
-        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
+        if dataset_key == "product_cost_latest":
+            self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_snapshot", "step_name": "Cost snapshot", "pct": 50})
+            cost_snapshot_path = update_product_cost_latest_daily.run(target_date)
+            return {
+                "dataset": dataset_key,
+                "date": target_date,
+                "cost_snapshot_path": cost_snapshot_path,
+            }
 
-    if dataset_key == "stock_quants":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "extract", "step_name": "Extract stock quants", "pct": 10})
-        extraction = extract_stock_quants.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "save_raw", "step_name": "Save raw", "pct": 35})
-        raw_path = save_raw_stock_quants.run(extraction)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "clean", "step_name": "Clean stock quants", "pct": 60})
-        clean_path = clean_stock_quants.run(raw_path, target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "update_fact", "step_name": "Update fact", "pct": 85})
-        fact_path = update_stock_quants_star_schema.run(clean_path, target_date)
-        records = extraction.get("count", 0) if isinstance(extraction, dict) else 0
-        return {"dataset": dataset_key, "date": target_date, "records": records, "raw_path": raw_path, "clean_path": clean_path, "fact_path": fact_path}
-
-    if dataset_key == "profit":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_events", "step_name": "Cost events", "pct": 25})
-        cost_events_path = update_product_cost_events.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_snapshot", "step_name": "Cost snapshot", "pct": 50})
-        cost_snapshot_path = update_product_cost_latest_daily.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "sales_profit", "step_name": "Sales profit", "pct": 75})
-        profit_lines_path = update_sales_lines_profit.run(target_date)
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "aggregates", "step_name": "Profit aggregates", "pct": 90})
-        agg_paths = update_profit_aggregates.run(target_date)
-        return {
-            "dataset": dataset_key,
-            "date": target_date,
-            "cost_events_path": cost_events_path,
-            "cost_snapshot_path": cost_snapshot_path,
-            "profit_lines_path": profit_lines_path,
-            "aggregate_paths": agg_paths,
-        }
-
-    if dataset_key == "product_cost_events":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_events", "step_name": "Cost events", "pct": 50})
-        cost_events_path = update_product_cost_events.run(target_date)
-        return {
-            "dataset": dataset_key,
-            "date": target_date,
-            "cost_events_path": cost_events_path,
-        }
-
-    if dataset_key == "product_cost_latest":
-        self.update_state(state="PROGRESS", meta={"dataset": dataset_key, "date": target_date, "step": "cost_snapshot", "step_name": "Cost snapshot", "pct": 50})
-        cost_snapshot_path = update_product_cost_latest_daily.run(target_date)
-        return {
-            "dataset": dataset_key,
-            "date": target_date,
-            "cost_snapshot_path": cost_snapshot_path,
-        }
-
-    raise ValueError(f"Unsupported dataset_key: {dataset_key}")
+        raise ValueError(f"Unsupported dataset_key: {dataset_key}")
 
 # ============================================================================
 # CONFIG IMPORTS (re-exported for backward compatibility)
@@ -1094,6 +1121,12 @@ def update_star_schema(clean_file_path: Optional[str], target_date: str) -> Opti
     except Exception as e:
         logger.error(f"Error updating star schema for {target_date}: {e}", exc_info=True)
         return None
+    finally:
+        try:
+            from services.duckdb_connector import DuckDBManager
+            DuckDBManager().close_connection()
+        except Exception:
+            pass
 
 
 @app.task
@@ -1102,11 +1135,19 @@ def update_invoice_sales_star_schema(clean_file_path: Optional[str], target_date
         if not clean_file_path or not os.path.isfile(clean_file_path):
             logger.warning(f"Invalid file path: {clean_file_path}")
             return None
+
         df = pl.read_parquet(clean_file_path)
         return _update_fact_invoice_sales(df, target_date)
+
     except Exception as e:
         logger.error(f"Error updating invoice sales star schema for {target_date}: {e}", exc_info=True)
         return None
+    finally:
+        try:
+            from services.duckdb_connector import DuckDBManager
+            DuckDBManager().close_connection()
+        except Exception:
+            pass
 
 
 @app.task
@@ -1115,11 +1156,19 @@ def update_purchase_star_schema(clean_file_path: Optional[str], target_date: str
         if not clean_file_path or not os.path.isfile(clean_file_path):
             logger.warning(f"Invalid file path: {clean_file_path}")
             return None
+
         df = pl.read_parquet(clean_file_path)
         return _update_fact_purchases(df, target_date)
+
     except Exception as e:
         logger.error(f"Error updating purchases star schema for {target_date}: {e}", exc_info=True)
         return None
+    finally:
+        try:
+            from services.duckdb_connector import DuckDBManager
+            DuckDBManager().close_connection()
+        except Exception:
+            pass
 
 
 @app.task
@@ -1133,6 +1182,12 @@ def update_inventory_moves_star_schema(clean_file_path: Optional[str], target_da
     except Exception as e:
         logger.error(f"Error updating inventory moves star schema for {target_date}: {e}", exc_info=True)
         return None
+    finally:
+        try:
+            from services.duckdb_connector import DuckDBManager
+            DuckDBManager().close_connection()
+        except Exception:
+            pass
 
 
 @app.task
@@ -1146,6 +1201,12 @@ def update_stock_quants_star_schema(clean_file_path: Optional[str], target_date:
     except Exception as e:
         logger.error(f"Error updating stock quants star schema for {target_date}: {e}", exc_info=True)
         return None
+    finally:
+        try:
+            from services.duckdb_connector import DuckDBManager
+            DuckDBManager().close_connection()
+        except Exception:
+            pass
 
 
 # ============================================================================
@@ -1972,6 +2033,10 @@ app.conf.beat_schedule = {
         'task': 'etl_tasks.daily_profit_pipeline',
         'schedule': crontab(hour=2, minute=20),
     },
+    'scheduled-mv-refresh': {
+        'task': 'etl_tasks.refresh_materialized_views_scheduled',
+        'schedule': crontab(hour=2, minute=30),
+    },
     'incremental-dimension-refresh': {
         'task': 'etl_tasks.refresh_dimensions_incremental',
         'schedule': crontab(hour='*/4', minute=0),
@@ -2075,6 +2140,233 @@ def load_beginning_costs_from_csv(csv_path: str) -> Optional[str]:
         raise
 
 
+@app.task(bind=True)
+def refresh_materialized_views(self, start_date: str, end_date: str):
+    """Refresh all materialized views for date range with proper locking."""
+    import redis
+    import uuid
+    import subprocess
+    import json
+    from services.docker_compose_runner import run_compose_exec_with_output
+    
+    logger.info(f"Starting MV refresh for {start_date} to {end_date}")
+    
+    # Initialize Redis for lock coordination
+    redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+    redis_client = redis.from_url(redis_url)
+    
+    # Generate unique request ID
+    request_id = str(uuid.uuid4())
+    
+    try:
+        # Check if ETL operations are running
+        etl_running_key = "etl:operations_running"
+        if redis_client.exists(etl_running_key):
+            logger.info("ETL operations running, queuing MV refresh request")
+            
+            # Add to queue
+            queue_data = {
+                'id': request_id,
+                'start_date': start_date,
+                'end_date': end_date,
+                'status': 'queued',
+                'created': time.time()
+            }
+            redis_client.lpush("mv:refresh_queue", json.dumps(queue_data))
+            
+            # Update task status
+            self.update_state(
+                state='QUEUED',
+                meta={'request_id': request_id, 'message': 'Queued - waiting for ETL completion'}
+            )
+            
+            # Wait for ETL to complete (with timeout)
+            timeout = 1800  # 30 minutes
+            start_time = time.time()
+            
+            while redis_client.exists(etl_running_key) and (time.time() - start_time) < timeout:
+                time.sleep(10)
+                self.update_state(
+                    state='WAITING',
+                    meta={'request_id': request_id, 'elapsed': int(time.time() - start_time)}
+                )
+            
+            if redis_client.exists(etl_running_key):
+                raise Exception("Timeout waiting for ETL operations to complete")
+        
+        # Acquire DuckDB lock
+        lock_key = "duckdb:write_lock"
+        lock_acquired = False
+        lock_timeout = 300  # 5 minutes
+        
+        try:
+            # Try to acquire lock
+            lock_acquired = redis_client.set(lock_key, request_id, nx=True, ex=lock_timeout)
+            
+            if not lock_acquired:
+                # Lock is held, wait for it to be released
+                logger.info("DuckDB lock held, waiting...")
+                start_time = time.time()
+                
+                while redis_client.exists(lock_key) and (time.time() - start_time) < lock_timeout:
+                    time.sleep(5)
+                    self.update_state(
+                        state='WAITING_FOR_LOCK',
+                        meta={'request_id': request_id, 'elapsed': int(time.time() - start_time)}
+                    )
+                
+                if redis_client.exists(lock_key):
+                    raise Exception("Timeout waiting for DuckDB lock")
+                
+                # Try to acquire lock again
+                lock_acquired = redis_client.set(lock_key, request_id, nx=True, ex=lock_timeout)
+                
+            if not lock_acquired:
+                raise Exception("Failed to acquire DuckDB lock")
+            
+            logger.info(f"DuckDB lock acquired for request {request_id}")
+            
+            # Execute CLI refresh via Docker
+            self.update_state(
+                state='RUNNING',
+                meta={'request_id': request_id, 'message': 'Refreshing materialized views...'}
+            )
+            
+            cli_args = [
+                "python", "scripts/etl_data_manager_cli.py",
+                "refresh-mvs-cascading",
+                "--views", "mv_sales_daily,mv_profit_daily,mv_sales_by_product,mv_profit_daily_by_product",
+                "--start", start_date,
+                "--end", end_date,
+                "--auto-fetch"
+            ]
+            
+            def log_callback(line: str):
+                logger.info(f"MV CLI: {line.strip()}")
+                # Update progress if line contains useful info
+                if "refreshed" in line.lower() or "building" in line.lower():
+                    self.update_state(
+                        state='RUNNING',
+                        meta={'request_id': request_id, 'message': line.strip(), 'elapsed': int(time.time() - start_time)}
+                    )
+            
+            exit_code = run_compose_exec_with_output(
+                service="celery-worker",
+                args=cli_args,
+                cwd="/app",
+                line_callback=log_callback
+            )
+            
+            if exit_code != 0:
+                raise Exception(f"CLI refresh failed with exit code {exit_code}")
+            
+            # Force reload MVs in the dashboard's DuckDB connection
+            # This ensures the dash-app process picks up the new MVs
+            try:
+                from services.duckdb_connector import DuckDBManager
+                manager = DuckDBManager()
+                # Force reload all tracked MVs
+                tracked_mvs = {
+                    "mv_sales_daily", "mv_sales_by_product", "mv_sales_by_principal",
+                    "mv_profit_daily", "mv_inventory_status", "mv_inventory_daily", 
+                    "mv_product_velocity"
+                }
+                manager.ensure_materialized_views(tracked_mvs, force_reload=True)
+                logger.info("Force-reloaded materialized views in DuckDB connection")
+            except Exception as reload_exc:
+                logger.warning(f"Could not force-reload MVs: {reload_exc}")
+
+            # Clear query caches so dashboard picks up new MV data immediately
+            try:
+                from services.profit_metrics import clear_profit_caches
+                from services.duckdb_connector import clear_sales_caches
+                clear_profit_caches()
+                clear_sales_caches()
+                logger.info("Cleared profit and sales query caches after MV refresh")
+            except Exception as cache_exc:
+                logger.warning(f"Could not clear query caches: {cache_exc}")
+            
+            logger.info(f"MV refresh completed successfully for request {request_id}")
+            
+            return {
+                'request_id': request_id,
+                'status': 'success',
+                'start_date': start_date,
+                'end_date': end_date,
+                'message': 'Materialized views refreshed successfully'
+            }
+            
+        finally:
+            # Release DuckDB lock
+            if lock_acquired:
+                redis_client.delete(lock_key)
+                logger.info(f"DuckDB lock released for request {request_id}")
+    
+    except Exception as exc:
+        logger.error(f"MV refresh failed for request {request_id}: {exc}", exc_info=True)
+        
+        # Clean up queue entry if exists
+        try:
+            redis_client.lrem("mv:refresh_queue", 1, json.dumps({
+                'id': request_id, 'start_date': start_date, 'end_date': end_date
+            }))
+        except:
+            pass
+        
+        raise
+    
+    finally:
+        # Clean up
+        try:
+            redis_client.close()
+        except:
+            pass
+
+
+@app.task
+def refresh_materialized_views_scheduled():
+    """Scheduled MV refresh after ETL completion."""
+    from datetime import date, timedelta
+    
+    # Check if auto-refresh is enabled
+    redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
+    redis_client = redis.from_url(redis_url)
+    
+    try:
+        auto_refresh_enabled = redis_client.get("mv:auto_refresh_enabled")
+        if not auto_refresh_enabled or auto_refresh_enabled.decode() != 'true':
+            logger.info("Auto MV refresh disabled, skipping scheduled refresh")
+            return
+        
+        # Get yesterday's date for refresh
+        yesterday = date.today() - timedelta(days=1)
+        start_date = yesterday.isoformat()
+        end_date = yesterday.isoformat()
+        
+        logger.info(f"Starting scheduled MV refresh for {start_date}")
+        
+        # Trigger MV refresh
+        result = refresh_materialized_views.delay(start_date, end_date)
+        
+        logger.info(f"Scheduled MV refresh task queued: {result.id}")
+        
+        return {
+            'status': 'queued',
+            'task_id': result.id,
+            'date': start_date
+        }
+        
+    except Exception as exc:
+        logger.error(f"Scheduled MV refresh failed: {exc}", exc_info=True)
+        raise
+    
+    finally:
+        try:
+            redis_client.close()
+        except:
+            pass
+
+
 app.conf.task_routes = {
     'etl_tasks.extract_pos_order_lines': {'queue': 'extraction'},
     'etl_tasks.extract_sales_invoice_lines': {'queue': 'extraction'},
@@ -2103,4 +2395,6 @@ app.conf.task_routes = {
     'etl_tasks.update_sales_aggregates': {'queue': 'loading'},
     'etl_tasks.load_beginning_costs_from_csv': {'queue': 'loading'},
     'etl_tasks.refresh_dimensions_incremental': {'queue': 'dimensions'},
+    'etl_tasks.refresh_materialized_views': {'queue': 'loading'},
+    'etl_tasks.refresh_materialized_views_scheduled': {'queue': 'loading'},
 }

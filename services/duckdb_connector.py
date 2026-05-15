@@ -67,6 +67,21 @@ class DuckDBManager:
                     self._initialized = True
         return self._connection
 
+    def close_connection(self) -> None:
+        """Close the DuckDB connection to release file locks."""
+        with self._lock:
+            if self._connection is not None:
+                try:
+                    self._connection.close()
+                    print("[duckdb] connection closed")
+                except Exception as e:
+                    print(f"[duckdb] error closing connection: {e}")
+                finally:
+                    self._connection = None
+                    self._initialized = False
+                    self._initialized_groups.clear()
+                    self._materialized_views.clear()
+
     def ensure_view_groups(self, groups: set[str]) -> None:
         """Ensure the requested view groups exist on the singleton connection."""
         if not groups:
@@ -87,16 +102,38 @@ class DuckDBManager:
             self._initialized_groups |= needed
             print(f"[duckdb] ensured groups in {time.time() - start:.3f}s")
 
-    def ensure_materialized_views(self, views: set[str]) -> None:
-        """Ensure materialized views are loaded into memory for ultra-fast queries."""
+    def ensure_materialized_views(self, views: set[str], force_reload: bool = False) -> None:
+        """Ensure materialized views are loaded into memory for ultra-fast queries.
+        
+        Args:
+            views: Set of MV names to ensure exist
+            force_reload: If True, reload all MVs even if already tracked
+        """
         if not views:
             return
 
         conn = self.get_connection()
         with self._lock:
-            needed = views - self._materialized_views
-            if not needed:
-                return
+            # If force_reload is True, reload all requested MVs regardless of tracking
+            if force_reload:
+                needed = views
+                print(f"[duckdb] force-reloading materialized views: {sorted(needed)}")
+                # Don't filter by existing_in_db — _load_materialized_views uses CREATE OR REPLACE
+            else:
+                needed = views - self._materialized_views
+                if not needed:
+                    return
+                # For normal load, only load MVs that exist in DB
+                existing_in_db = set()
+                try:
+                    tables = conn.execute("SHOW TABLES").fetchall()
+                    existing_in_db = {t[0] for t in tables if t[0].startswith('mv_')}
+                except Exception as e:
+                    print(f"[duckdb] error checking existing tables: {e}")
+                needed = needed & existing_in_db
+                if not needed:
+                    print("[duckdb] no requested MVs exist in database")
+                    return
 
             start = time.time()
             print(f"[duckdb] loading materialized views: {sorted(needed)}")
@@ -109,27 +146,24 @@ class DuckDBManager:
         Returns: (needs_full_refresh, max_date_in_mv, new_files_count)
         """
         try:
-            # Check if MV exists and get max date
+            # Check if MV table exists (BASE TABLE = physical table, not view)
             result = conn.execute(f"""
-                SELECT COUNT(*), MAX(date) 
-                FROM information_schema.tables 
-                WHERE table_name = '{mv_name}'
+                SELECT COUNT(*) FROM information_schema.tables 
+                WHERE table_name = '{mv_name}' AND table_type = 'BASE TABLE'
             """).fetchone()
-            
+
             if result[0] == 0:
                 return (True, None, 0)  # MV doesn't exist, needs full load
-            
+
+            # Get max date from the actual MV table
             max_mv_date = conn.execute(f"SELECT MAX(date) FROM {mv_name}").fetchone()[0]
-            
-            # Count new parquet files since last refresh
-            new_files = conn.execute(f"""
-                SELECT COUNT(*) FROM read_parquet_metadata('{parquet_path}/**/*.parquet')
-                WHERE filename > (SELECT MAX(filename) FROM {mv_name}_metadata) 
-                    OR NOT EXISTS (SELECT 1 FROM {mv_name}_metadata)
-            """).fetchone()[0]
-            
-            return (False, max_mv_date, new_files)
-        except Exception:
+
+            if max_mv_date is None:
+                return (True, None, 0)  # MV exists but empty, needs full load
+
+            return (False, max_mv_date, 0)
+        except Exception as e:
+            print(f"[duckdb] _get_mv_refresh_info error for {mv_name}: {e}")
             return (True, None, 0)  # Error, do full refresh
 
     def _load_materialized_views(self, conn: duckdb.DuckDBPyConnection, views: set[str]) -> None:
@@ -271,23 +305,60 @@ class DuckDBManager:
         # Materialized view: Daily profit aggregates
         if "mv_profit_daily" in views:
             agg_profit_path = f"{data_lake}/star-schema/agg_profit_daily"
+            needs_full, max_date, _ = self._get_mv_refresh_info(conn, "mv_profit_daily", agg_profit_path)
+
+            if needs_full or max_date is None:
+                conn.execute(f"""
+                    CREATE OR REPLACE TABLE mv_profit_daily AS
+                    SELECT
+                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) AS date,
+                        COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
+                        COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
+                        COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
+                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
+                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    WHERE revenue_tax_in IS NOT NULL
+                """)
+                refresh_type = 'full'
+            else:
+                # Incremental: load only dates > max_date in MV
+                conn.execute(f"""
+                    INSERT INTO mv_profit_daily
+                    SELECT
+                        COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) AS date,
+                        COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
+                        COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
+                        COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
+                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
+                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
+                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
+                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
+                    WHERE revenue_tax_in IS NOT NULL
+                      AND COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
+                            CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
+                        )) > '{max_date}'
+                """)
+                refresh_type = 'incremental'
+
+            # Update metadata
             conn.execute(f"""
-                CREATE OR REPLACE TABLE mv_profit_daily AS
-                SELECT
-                    COALESCE(TRY_CAST(date AS DATE), MAKE_DATE(
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'year=', 2), '/', 1) AS INTEGER),
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'month=', 2), '/', 1) AS INTEGER),
-                        CAST(SPLIT_PART(SPLIT_PART(filename, 'day=', 2), '/', 1) AS INTEGER)
-                    )) AS date,
-                    COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
-                    COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
-                    COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
-                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
-                    COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
-                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1, filename=true)
-                WHERE revenue_tax_in IS NOT NULL
+                INSERT OR REPLACE INTO mv_refresh_metadata 
+                SELECT 'mv_profit_daily', NOW(), MAX(date), COUNT(*), '{refresh_type}'
+                FROM mv_profit_daily
             """)
+            print(f"[duckdb] mv_profit_daily refreshed ({refresh_type})")
 
         # Materialized view: Daily inventory snapshots
         if "mv_inventory_daily" in views:
@@ -1294,9 +1365,14 @@ def ensure_duckdb_view_groups(groups: set[str]) -> None:
     DuckDBManager().ensure_view_groups(groups)
 
 
-def ensure_materialized_views(views: set[str]) -> None:
-    """Public helper to load materialized views for ultra-fast queries."""
-    DuckDBManager().ensure_materialized_views(views)
+def ensure_materialized_views(views: set[str], force_reload: bool = False) -> None:
+    """Public helper to load materialized views for ultra-fast queries.
+    
+    Args:
+        views: Set of MV names to ensure exist
+        force_reload: If True, reload all MVs even if already tracked
+    """
+    DuckDBManager().ensure_materialized_views(views, force_reload=force_reload)
 
 
 def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
@@ -1592,3 +1668,15 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
         'categories_nested': categories_nested,
         'brands_nested': brands_nested,
     }
+
+
+def clear_sales_caches() -> None:
+    """Clear all lru_cache'd sales query functions to force fresh reads after MV refresh."""
+    query_sales_trends.cache_clear()
+    query_revenue_comparison.cache_clear()
+    query_top_products.cache_clear()
+    query_overview_summary.cache_clear()
+    try:
+        query_hourly_sales_heatmap.cache_clear()
+    except AttributeError:
+        pass

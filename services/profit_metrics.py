@@ -188,11 +188,20 @@ def query_profit_revenue_by_category(start_date: date, end_date: date) -> Dict[s
 
 
 def clear_profit_caches() -> None:
-    """Clear all cached profit query functions to force fresh reads after ETL updates."""
+    """Clear all cached profit query functions to force fresh reads after ETL/MV updates."""
     query_profit_summary.cache_clear()
     query_profit_revenue_by_category.cache_clear()
     query_profit_trends.cache_clear()
     query_profit_by_product.cache_clear()
+    # Also clear versioned Redis cache entries
+    try:
+        from .cache import cache
+        cache.delete_many([
+            k for k in (cache._cache.keys() if hasattr(cache, '_cache') else [])
+            if 'profit' in str(k)
+        ])
+    except Exception:
+        pass
 
 
 def query_profit_drilldown(start_date: date, end_date: date, product_id: Optional[int] = None) -> pd.DataFrame:
