@@ -131,10 +131,8 @@ class DuckDBManager:
             conn = duckdb.connect(database=db_path)
             
             # Map MV names to their source aggregate views (correct names)
-            # Sales MVs migrated to SQLite - removed from DuckDB
-            mv_to_agg = {
-                "mv_profit_daily": "agg_profit_daily",
-            }
+            # Sales and Profit MVs migrated to SQLite - removed from DuckDB
+            mv_to_agg = {}
             
             for mv_name, agg_view in mv_to_agg.items():
                 try:
@@ -275,51 +273,8 @@ class DuckDBManager:
         # Materialized view: Sales by principal (migrated to SQLite - removed from DuckDB)
         # mv_sales_by_principal is now managed by SQLiteManager
 
-        # Materialized view: Daily profit aggregates
-        if "mv_profit_daily" in views:
-            agg_profit_path = f"{data_lake}/star-schema/agg_profit_daily"
-            needs_full, max_date, _ = self._get_mv_refresh_info(conn, "mv_profit_daily", agg_profit_path)
-
-            if needs_full or max_date is None:
-                conn.execute(f"""
-                    CREATE OR REPLACE TABLE mv_profit_daily AS
-                    SELECT
-                        TRY_CAST(date AS DATE) AS date,
-                        COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
-                        COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
-                        COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
-                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
-                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
-                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                    WHERE revenue_tax_in IS NOT NULL
-                """)
-                refresh_type = 'full'
-            else:
-                # Incremental: load only dates > max_date in MV
-                conn.execute(f"""
-                    INSERT INTO mv_profit_daily
-                    SELECT
-                        TRY_CAST(date AS DATE) AS date,
-                        COALESCE(TRY_CAST(revenue_tax_in AS DOUBLE), 0) AS revenue_tax_in,
-                        COALESCE(TRY_CAST(cogs_tax_in AS DOUBLE), 0) AS cogs_tax_in,
-                        COALESCE(TRY_CAST(gross_profit AS DOUBLE), 0) AS gross_profit,
-                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
-                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
-                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_profit_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                    WHERE revenue_tax_in IS NOT NULL
-                      AND TRY_CAST(date AS DATE) > '{max_date}'
-                """)
-                refresh_type = 'incremental'
-
-            # Update metadata
-            conn.execute(f"""
-                INSERT OR REPLACE INTO mv_refresh_metadata 
-                SELECT 'mv_profit_daily', NOW(), MAX(date), COUNT(*), '{refresh_type}'
-                FROM mv_profit_daily
-            """)
-            print(f"[duckdb] mv_profit_daily refreshed ({refresh_type})")
+        # Materialized view: Daily profit aggregates (migrated to SQLite - removed from DuckDB)
+        # mv_profit_daily is now managed by SQLiteManager
 
         # Materialized view: Daily inventory snapshots
         if "mv_inventory_daily" in views:
