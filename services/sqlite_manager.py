@@ -176,3 +176,46 @@ class SQLiteManager:
                 success=False,
                 error_message=str(e)
             )
+
+    def _incremental_refresh(self, conn: sqlite3.Connection, view_name: str, df) -> RefreshResult:
+        """Incremental refresh with transaction protection."""
+        import time
+        start = time.time()
+        
+        try:
+            with conn:
+                # Insert new rows using executemany
+                rows = df.to_pandas().itertuples(index=False, name=None)
+                placeholders = ','.join('?' * len(df.columns))
+                conn.executemany(
+                    f"INSERT INTO {view_name} VALUES ({placeholders})",
+                    rows
+                )
+                
+                # Update metadata atomically
+                new_max_date = df["date"].max()
+                current_row_count = conn.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+                new_row_count = len(df) + current_row_count
+                conn.execute(
+                    "UPDATE mv_refresh_metadata SET max_data_date=?, row_count=?, last_refresh_date=?, refresh_type=? WHERE view_name=?",
+                    (new_max_date, new_row_count, datetime.now(), 'incremental', view_name)
+                )
+            
+            duration = time.time() - start
+            return RefreshResult(
+                view_name=view_name,
+                strategy="incremental",
+                rows_affected=len(df),
+                duration_seconds=duration,
+                success=True
+            )
+        except Exception as e:
+            logger.error(f"Incremental refresh failed for {view_name}: {e}")
+            return RefreshResult(
+                view_name=view_name,
+                strategy="incremental",
+                rows_affected=0,
+                duration_seconds=time.time() - start,
+                success=False,
+                error_message=str(e)
+            )

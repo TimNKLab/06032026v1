@@ -189,3 +189,46 @@ def test_full_refresh_atomic_swap():
         writer_conn.close()
     finally:
         os.unlink(db_path)
+
+def test_incremental_refresh():
+    """Test that incremental refresh works correctly."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
+        db_path = f.name
+    
+    try:
+        manager = SQLiteManager(db_path)
+        manager.initialize_db()
+        
+        # Create initial data with full refresh
+        df1 = pl.DataFrame({
+            "date": ["2026-05-25"],
+            "revenue": [100.0],
+            "transactions": [10]
+        })
+        
+        writer_conn = manager.get_writer_conn()
+        result1 = manager._full_refresh_atomic_swap(writer_conn, "test_view", df1)
+        assert result1.success
+        
+        # Add incremental data
+        df2 = pl.DataFrame({
+            "date": ["2026-05-26"],
+            "revenue": [200.0],
+            "transactions": [20]
+        })
+        
+        result2 = manager._incremental_refresh(writer_conn, "test_view", df2)
+        assert result2.success
+        assert result2.rows_affected == 1
+        
+        # Verify both rows exist
+        with manager.reader_conn() as reader_conn:
+            rows = reader_conn.execute("SELECT * FROM test_view ORDER BY date").fetchall()
+            assert len(rows) == 2
+            assert rows[0][1] == 100.0
+            assert rows[1][1] == 200.0
+        
+        # Close writer connection before cleanup
+        writer_conn.close()
+    finally:
+        os.unlink(db_path)
