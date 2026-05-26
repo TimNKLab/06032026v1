@@ -2,71 +2,69 @@ from datetime import date
 from typing import Dict, Optional
 import pandas as pd
 import time
+import sqlite3
 from functools import lru_cache
-from .duckdb_connector import get_duckdb_connection
-from .duckdb_connector import ensure_duckdb_view_groups
+from .sqlite_manager import SQLiteManager
 from .versioned_cache import versioned_cache
 
 
 @versioned_cache(ttl=3600, key_prefix="profit_trends")
 @lru_cache(maxsize=32)
 def query_profit_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
-    """Query profit trends - uses fast materialized view."""
-    # Use materialized view directly - no view group needed
-    conn = get_duckdb_connection()
-
-    trunc_map = {'daily': 'day', 'weekly': 'week', 'monthly': 'month'}
-    if period not in trunc_map:
+    """Query profit trends - uses SQLite materialized view."""
+    manager = SQLiteManager()
+    
+    # Generate date series in Python (SQLite doesn't have generate_series)
+    if period == 'daily':
+        dates = pd.date_range(start=start_date, end=end_date, freq="D").date.tolist()
+    elif period == 'weekly':
+        dates = pd.date_range(start=start_date, end=end_date, freq="W-MON").date.tolist()
+    elif period == 'monthly':
+        dates = pd.date_range(start=start_date, end=end_date, freq="MS").date.tolist()
+    else:
         raise ValueError("Period must be 'daily', 'weekly', or 'monthly'")
-
-    trunc_expr = trunc_map[period]
-
-    query = f"""
-    WITH date_series AS (
-        SELECT date_trunc('{trunc_expr}', date) as period_start,
-               date_trunc('{trunc_expr}', date) + interval '1 {trunc_expr}' as period_end
-        FROM generate_series(
-            date_trunc('{trunc_expr}', ?::date)::timestamp,
-            date_trunc('{trunc_expr}', ?::date)::timestamp,
-            interval '1 {trunc_expr}'
-        ) as t(date)
-    )
+    
+    query = """
     SELECT 
-        ds.period_start as date,
-        COALESCE(SUM(ap.revenue_tax_in), 0) as revenue,
-        COALESCE(SUM(ap.cogs_tax_in), 0) as cogs,
-        COALESCE(SUM(ap.gross_profit), 0) as gross_profit,
-        COALESCE(SUM(ap.quantity), 0) as items_sold,
-        COALESCE(SUM(ap.transactions), 0) as transactions,
-        COALESCE(SUM(ap.lines), 0) as lines,
+        ? as date,
+        COALESCE(SUM(mv.revenue_tax_in), 0) as revenue,
+        COALESCE(SUM(mv.cogs_tax_in), 0) as cogs,
+        COALESCE(SUM(mv.gross_profit), 0) as gross_profit,
+        COALESCE(SUM(mv.quantity), 0) as items_sold,
+        COALESCE(SUM(mv.transactions), 0) as transactions,
+        COALESCE(SUM(mv.lines), 0) as lines,
         CASE 
-            WHEN SUM(ap.transactions) > 0 
-            THEN SUM(ap.revenue_tax_in) / SUM(ap.transactions) 
+            WHEN SUM(mv.transactions) > 0 
+            THEN SUM(mv.revenue_tax_in) / SUM(mv.transactions) 
             ELSE 0 
         END as avg_transaction_value,
         CASE 
-            WHEN SUM(ap.revenue_tax_in) > 0 
-            THEN SUM(ap.gross_profit) / SUM(ap.revenue_tax_in) * 100 
+            WHEN SUM(mv.revenue_tax_in) > 0 
+            THEN SUM(mv.gross_profit) / SUM(mv.revenue_tax_in) * 100 
             ELSE 0 
         END as gross_margin_pct
-    FROM date_series ds
-    LEFT JOIN mv_profit_daily ap ON 
-        ap.date >= ds.period_start AND 
-        ap.date < ds.period_end
-    GROUP BY ds.period_start
-    ORDER BY ds.period_start
+    FROM mv_profit_daily mv
+    WHERE date(mv.date) = ?
     """
     
     query_start = time.time()
-    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    results = []
+    with manager.reader_conn() as conn:
+        for d in dates:
+            result = pd.read_sql_query(query, conn, params=[d, d])
+            results.append(result)
+    
+    df = pd.concat(results, ignore_index=True)
     print(f"[TIMING] query_profit_trends: {time.time() - query_start:.3f}s")
-    return result
+    return df
 
 
 @lru_cache(maxsize=32)
 def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
-    """Query top products by profit - uses aggregate table for performance."""
-    ensure_duckdb_view_groups({"overview", "dims"})
+    """Query top products by profit - uses SQLite materialized view."""
+    # Note: This still uses DuckDB for product dimension join
+    # In the hybrid architecture, we keep DuckDB for complex joins
+    from .duckdb_connector import get_duckdb_connection
     conn = get_duckdb_connection()
 
     query = """
@@ -111,10 +109,9 @@ def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -
 @versioned_cache(ttl=3600, key_prefix="profit_summary")
 @lru_cache(maxsize=32)
 def query_profit_summary(start_date: date, end_date: date) -> Dict:
-    """Get profit summary - uses fast materialized view."""
-    # Use materialized view directly - no view group needed
-    conn = get_duckdb_connection()
-
+    """Get profit summary - uses SQLite materialized view."""
+    manager = SQLiteManager()
+    
     query = """
     SELECT 
         SUM(revenue_tax_in) as revenue,
@@ -134,11 +131,12 @@ def query_profit_summary(start_date: date, end_date: date) -> Dict:
             ELSE 0 
         END as gross_margin_pct
     FROM mv_profit_daily
-    WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+    WHERE date(mv.date) >= ? AND date(mv.date) <= ?
     """
     
     query_start = time.time()
-    row = conn.execute(query, [start_date, end_date]).fetchone()
+    with manager.reader_conn() as conn:
+        row = conn.execute(query, [start_date, end_date]).fetchone()
     print(f"[TIMING] query_profit_summary: {time.time() - query_start:.3f}s")
     
     revenue, cogs, gross_profit, quantity, transactions, lines, atv, margin_pct = [
