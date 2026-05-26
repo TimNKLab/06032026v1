@@ -219,3 +219,48 @@ class SQLiteManager:
                 success=False,
                 error_message=str(e)
             )
+
+    def _refresh_sales_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
+        """Refresh mv_sales_daily."""
+        # Implementation will be added in Phase 2
+        raise NotImplementedError("Sales domain refresh implemented in Phase 2")
+    
+    def _refresh_profit_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
+        """Refresh mv_profit_daily."""
+        # Implementation will be added in Phase 3
+        raise NotImplementedError("Profit domain refresh implemented in Phase 3")
+    
+    def _refresh_inventory_daily(self, conn: sqlite3.Connection) -> RefreshResult:
+        """Refresh mv_inventory_daily."""
+        # Implementation will be added in Phase 4
+        raise NotImplementedError("Inventory domain refresh implemented in Phase 4")
+
+    def refresh_mv(self, view_name: str, domain: str, conn: sqlite3.Connection, 
+                   date_range: Optional[tuple[str, str]] = None) -> RefreshResult:
+        """Refresh MV based on domain-specific strategy."""
+        strategy, max_date = self.get_refresh_strategy(view_name)
+        
+        if date_range:
+            # Backfill scenario - force full refresh for date range
+            strategy = "full"
+        
+        if domain == "sales":
+            if view_name == "mv_sales_daily":
+                return self._refresh_sales_daily(conn, max_date)
+            elif view_name == "mv_sales_by_product":
+                return self._refresh_sales_daily(conn, max_date)  # Placeholder
+            elif view_name == "mv_sales_by_principal":
+                return self._refresh_sales_daily(conn, max_date)  # Placeholder
+        elif domain == "profit":
+            return self._refresh_profit_daily(conn, max_date)
+        elif domain == "inventory":
+            return self._refresh_inventory_daily(conn)
+        
+        return RefreshResult(
+            view_name=view_name,
+            strategy=strategy,
+            rows_affected=0,
+            duration_seconds=0,
+            success=False,
+            error_message=f"Unknown view: {view_name}"
+        )

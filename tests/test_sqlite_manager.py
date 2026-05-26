@@ -232,3 +232,22 @@ def test_incremental_refresh():
         writer_conn.close()
     finally:
         os.unlink(db_path)
+
+def test_refresh_mv_dispatches_to_domain_method():
+    """Test that refresh_mv dispatches to correct domain method."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
+        db_path = f.name
+    
+    try:
+        manager = SQLiteManager(db_path)
+        manager.initialize_db()
+        
+        writer_conn = manager.get_writer_conn()
+        
+        # Should raise NotImplementedError for unimplemented domains
+        with pytest.raises(NotImplementedError):
+            manager.refresh_mv("mv_sales_daily", "sales", writer_conn)
+        
+        writer_conn.close()
+    finally:
+        os.unlink(db_path)
