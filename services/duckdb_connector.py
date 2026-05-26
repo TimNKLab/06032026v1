@@ -83,8 +83,11 @@ class DuckDBManager:
                     in_celery = os.environ.get('CELERY_WORKER_RUNNING') == '1'
                     setup_start = time.time()
                     if in_celery:
-                        conn = duckdb.connect(database=':memory:')
-                        print(f"[duckdb] celery worker: using in-memory DuckDB (file owned by dash-app)")
+                        # Use disk-backed DuckDB for celery workers to avoid OOM during heavy ETL operations
+                        worker_db_path = f"{data_lake}/cache/nkdash_worker.duckdb"
+                        conn = duckdb.connect(database=worker_db_path)
+                        conn.execute("PRAGMA max_temp_directory_size='20GiB'")
+                        print(f"[duckdb] celery worker: using disk-backed DuckDB at {worker_db_path}")
                     else:
                         conn = duckdb.connect(database=db_path)
                         print(f"[duckdb] connecting to {db_path}...")
@@ -128,10 +131,8 @@ class DuckDBManager:
             conn = duckdb.connect(database=db_path)
             
             # Map MV names to their source aggregate views (correct names)
+            # Sales MVs migrated to SQLite - removed from DuckDB
             mv_to_agg = {
-                "mv_sales_daily": "agg_sales_daily",
-                "mv_sales_by_product": "agg_sales_daily_by_product",
-                "mv_sales_by_principal": "agg_sales_daily_by_principal",
                 "mv_profit_daily": "agg_profit_daily",
             }
             
@@ -265,94 +266,14 @@ class DuckDBManager:
             )
         """)
 
-        # Materialized view: Daily sales aggregates (most queried)
-        if "mv_sales_daily" in views:
-            agg_sales_daily_path = f"{data_lake}/star-schema/agg_sales_daily"
-            needs_full, max_date, _ = self._get_mv_refresh_info(conn, "mv_sales_daily", agg_sales_daily_path)
-            
-            if needs_full or max_date is None:
-                conn.execute(f"""
-                    CREATE OR REPLACE TABLE mv_sales_daily AS
-                    SELECT
-                        TRY_CAST(date AS DATE) AS date,
-                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
-                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
-                        COALESCE(TRY_CAST(items_sold AS DOUBLE), 0) AS items_sold,
-                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                    WHERE revenue IS NOT NULL OR transactions IS NOT NULL
-                """)
-                refresh_type = 'full'
-            else:
-                # Incremental: load only dates > max_date in MV
-                conn.execute(f"""
-                    INSERT INTO mv_sales_daily
-                    SELECT
-                        TRY_CAST(date AS DATE) AS date,
-                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
-                        COALESCE(TRY_CAST(transactions AS BIGINT), 0) AS transactions,
-                        COALESCE(TRY_CAST(items_sold AS DOUBLE), 0) AS items_sold,
-                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_sales_daily_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                    WHERE (revenue IS NOT NULL OR transactions IS NOT NULL)
-                      AND TRY_CAST(date AS DATE) > '{max_date}'
-                """)
-                refresh_type = 'incremental'
-            
-            # Update metadata
-            conn.execute(f"""
-                INSERT OR REPLACE INTO mv_refresh_metadata 
-                SELECT 'mv_sales_daily', NOW(), MAX(date), COUNT(*), '{refresh_type}'
-                FROM mv_sales_daily
-            """)
-            print(f"[duckdb] mv_sales_daily refreshed ({refresh_type})")
+        # Materialized view: Daily sales aggregates (migrated to SQLite - removed from DuckDB)
+        # mv_sales_daily is now managed by SQLiteManager
 
-        # Materialized view: Sales by product
-        if "mv_sales_by_product" in views:
-            agg_by_product_path = f"{data_lake}/star-schema/agg_sales_daily_by_product"
-            needs_full, max_date, _ = self._get_mv_refresh_info(conn, "mv_sales_by_product", agg_by_product_path)
-            
-            if needs_full or max_date is None:
-                conn.execute(f"""
-                    CREATE OR REPLACE TABLE mv_sales_by_product AS
-                    SELECT
-                        TRY_CAST(date AS DATE) AS date,
-                        COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
-                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
-                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
-                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                    WHERE revenue IS NOT NULL
-                """)
-            else:
-                # For incremental, we'd need to handle duplicates - use INSERT OR REPLACE pattern
-                conn.execute(f"""
-                    CREATE OR REPLACE TABLE mv_sales_by_product AS
-                    SELECT * FROM mv_sales_by_product WHERE date <= '{max_date}'
-                    UNION ALL
-                    SELECT
-                        TRY_CAST(date AS DATE) AS date,
-                        COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
-                        COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
-                        COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
-                        COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                    FROM read_parquet('{agg_by_product_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                    WHERE revenue IS NOT NULL
-                      AND TRY_CAST(date AS DATE) > '{max_date}'
-                """)
+        # Materialized view: Sales by product (migrated to SQLite - removed from DuckDB)
+        # mv_sales_by_product is now managed by SQLiteManager
 
-        # Materialized view: Sales by principal
-        if "mv_sales_by_principal" in views:
-            agg_by_principal_path = f"{data_lake}/star-schema/agg_sales_daily_by_principal"
-            conn.execute(f"""
-                CREATE OR REPLACE TABLE mv_sales_by_principal AS
-                SELECT
-                    TRY_CAST(date AS DATE) AS date,
-                    COALESCE(principal, 'Unknown') AS principal,
-                    COALESCE(TRY_CAST(revenue AS DOUBLE), 0) AS revenue,
-                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS quantity,
-                    COALESCE(TRY_CAST(lines AS BIGINT), 0) AS lines
-                FROM read_parquet('{agg_by_principal_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
+        # Materialized view: Sales by principal (migrated to SQLite - removed from DuckDB)
+        # mv_sales_by_principal is now managed by SQLiteManager
                 WHERE revenue IS NOT NULL
             """)
 
