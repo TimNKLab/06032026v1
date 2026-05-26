@@ -222,13 +222,99 @@ class SQLiteManager:
 
     def _refresh_sales_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
         """Refresh mv_sales_daily."""
-        # Implementation will be added in Phase 2
-        raise NotImplementedError("Sales domain refresh implemented in Phase 2")
+        import polars as pl
+        import time
+        start = time.time()
+        
+        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
+        parquet_path = f"{data_lake}/star-schema/agg_sales_daily"
+        
+        try:
+            if max_date is None:
+                # First run or full refresh - use atomic swap
+                df = pl.scan_parquet(f"{parquet_path}/**/*.parquet", 
+                                   hive_partitioning=True).collect()
+                return self._full_refresh_atomic_swap(conn, "mv_sales_daily", df)
+            else:
+                # Incremental load
+                df = pl.scan_parquet(f"{parquet_path}/**/*.parquet", 
+                                   hive_partitioning=True).filter(
+                    pl.col("date") > max_date
+                ).collect()
+                
+                return self._incremental_refresh(conn, "mv_sales_daily", df)
+        except Exception as e:
+            logger.error(f"Sales daily refresh failed: {e}")
+            return RefreshResult(
+                view_name="mv_sales_daily",
+                strategy="incremental" if max_date else "full",
+                rows_affected=0,
+                duration_seconds=time.time() - start,
+                success=False,
+                error_message=str(e)
+            )
     
-    def _refresh_profit_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_profit_daily."""
-        # Implementation will be added in Phase 3
-        raise NotImplementedError("Profit domain refresh implemented in Phase 3")
+    def _refresh_sales_by_product(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
+        """Refresh mv_sales_by_product."""
+        import polars as pl
+        import time
+        start = time.time()
+        
+        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
+        parquet_path = f"{data_lake}/star-schema/agg_sales_daily_by_product"
+        
+        try:
+            if max_date is None:
+                df = pl.scan_parquet(f"{parquet_path}/**/*.parquet", 
+                                   hive_partitioning=True).collect()
+                return self._full_refresh_atomic_swap(conn, "mv_sales_by_product", df)
+            else:
+                df = pl.scan_parquet(f"{parquet_path}/**/*.parquet", 
+                                   hive_partitioning=True).filter(
+                    pl.col("date") > max_date
+                ).collect()
+                return self._incremental_refresh(conn, "mv_sales_by_product", df)
+        except Exception as e:
+            logger.error(f"Sales by product refresh failed: {e}")
+            return RefreshResult(
+                view_name="mv_sales_by_product",
+                strategy="incremental" if max_date else "full",
+                rows_affected=0,
+                duration_seconds=time.time() - start,
+                success=False,
+                error_message=str(e)
+            )
+    
+    def _refresh_sales_by_principal(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
+        """Refresh mv_sales_by_principal."""
+        import polars as pl
+        import time
+        start = time.time()
+        
+        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
+        parquet_path = f"{data_lake}/star-schema/agg_sales_daily_by_principal"
+        
+        try:
+            if max_date is None:
+                df = pl.scan_parquet(f"{parquet_path}/**/*.parquet", 
+                                   hive_partitioning=True).collect()
+                return self._full_refresh_atomic_swap(conn, "mv_sales_by_principal", df)
+            else:
+                df = pl.scan_parquet(f"{parquet_path}/**/*.parquet", 
+                                   hive_partitioning=True).filter(
+                    pl.col("date") > max_date
+                ).collect()
+                return self._incremental_refresh(conn, "mv_sales_by_principal", df)
+        except Exception as e:
+            logger.error(f"Sales by principal refresh failed: {e}")
+            return RefreshResult(
+                view_name="mv_sales_by_principal",
+                strategy="incremental" if max_date else "full",
+                rows_affected=0,
+                duration_seconds=time.time() - start,
+                success=False,
+                error_message=str(e)
+            )
     
     def _refresh_inventory_daily(self, conn: sqlite3.Connection) -> RefreshResult:
         """Refresh mv_inventory_daily."""
@@ -241,16 +327,15 @@ class SQLiteManager:
         strategy, max_date = self.get_refresh_strategy(view_name)
         
         if date_range:
-            # Backfill scenario - force full refresh for date range
             strategy = "full"
         
         if domain == "sales":
             if view_name == "mv_sales_daily":
                 return self._refresh_sales_daily(conn, max_date)
             elif view_name == "mv_sales_by_product":
-                return self._refresh_sales_daily(conn, max_date)  # Placeholder
+                return self._refresh_sales_by_product(conn, max_date)
             elif view_name == "mv_sales_by_principal":
-                return self._refresh_sales_daily(conn, max_date)  # Placeholder
+                return self._refresh_sales_by_principal(conn, max_date)
         elif domain == "profit":
             return self._refresh_profit_daily(conn, max_date)
         elif domain == "inventory":
