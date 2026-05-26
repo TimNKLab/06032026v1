@@ -36,7 +36,7 @@ def get_sales_trends_data(start_date: date, end_date: date, period: str = 'daily
                 COALESCE(SUM(mv.items_sold), 0) as items_sold,
                 COALESCE(SUM(mv.lines), 0) as lines
             FROM mv_sales_daily mv
-            WHERE mv.date = ?
+            WHERE date(mv.date) = ?
             """
             
             query_start = time.time()
