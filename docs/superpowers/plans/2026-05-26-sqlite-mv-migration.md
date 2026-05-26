@@ -1479,6 +1479,78 @@ SQLite is part of Python standard library, but verify no additional dependencies
 
 ```bash
 git add requirements.txt
+git commit -m "docs: verify SQLite dependencies"
+```
+
+### Task 22: Final validation
+
+**Files:**
+- None (validation only)
+
+- [ ] **Step 1: Run ETL pipeline**
+
+Verify that ETL pipeline runs correctly with new SQLite MV refresh mechanism.
+
+- [ ] **Step 2: Test dashboard queries**
+
+Verify that dashboard queries work correctly with SQLite MVs.
+
+- [ ] **Step 3: Performance validation**
+
+Verify that query performance meets expectations.
+
+---
+
+## Implementation Summary
+
+### Completed Work
+
+**Phase 1: SQLiteManager Foundation**
+- Created SQLiteManager class with connection management
+- Implemented full refresh atomic swap pattern
+- Implemented incremental refresh pattern
+- Added domain-specific refresh logic stubs
+- Added unit tests for connection management
+
+**Phase 2: Sales Domain Migration**
+- Implemented sales domain refresh logic using DuckDB for aggregation
+- Updated services/sales_metrics.py to use SQLite MVs
+- Updated etl_tasks.py to use SQLiteManager for MV refresh
+- Removed DuckDB sales MV code from duckdb_connector.py
+- Validated query parity with test_sales_parity.py
+
+**Phase 3: Profit Domain Migration**
+- Implemented profit domain refresh logic using DuckDB for aggregation
+- Updated services/profit_metrics.py to use SQLite MVs (hybrid approach)
+- Removed DuckDB profit MV code from duckdb_connector.py
+- Validated query parity with test_profit_parity.py
+
+**Phase 4: Inventory Domain (Partial)**
+- Implemented inventory domain refresh logic stub
+- Deferred full inventory metrics migration due to snapshot-based data complexity
+- Inventory metrics remain in DuckDB for now
+
+### Hybrid Architecture
+
+The migration adopted a hybrid architecture:
+- **DuckDB**: Retained for ETL operations, data fetching from Odoo, analytical queries, and parquet aggregation
+- **SQLite**: Used exclusively for materialized view storage for dashboard queries
+
+This approach leverages the strengths of both systems:
+- DuckDB's analytical capabilities for ETL and aggregation
+- SQLite's simplicity and WAL mode for concurrent MV access
+
+### Deferred Work
+
+The following tasks were deferred due to complexity or limited benefit:
+- Inventory metrics migration (snapshot-based data differs from transactional sales/profit)
+- Operational page on-demand refresh integration
+- Complete DuckDB inventory MV removal
+
+These can be addressed in future iterations if needed.
+
+```bash
+git add requirements.txt
 git commit -m "chore: verify SQLite dependencies in requirements"
 ```
 
