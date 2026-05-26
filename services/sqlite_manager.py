@@ -221,13 +221,13 @@ class SQLiteManager:
             )
 
     def _refresh_sales_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_sales_daily using DuckDB for aggregation, SQLite for storage."""
+        """Refresh mv_sales_daily using DuckDB aggregate views, SQLite for storage."""
         import polars as pl
         import time
         start = time.time()
         
         try:
-            # Use DuckDB to aggregate data from parquet files
+            # Use DuckDB to aggregate data from parquet files via aggregate view
             from services.duckdb_connector import get_duckdb_connection
             
             duckdb_conn = get_duckdb_connection()
@@ -235,14 +235,14 @@ class SQLiteManager:
             if max_date is None:
                 # First run or full refresh - use atomic swap
                 df = pl.read_database(
-                    "SELECT * FROM mv_sales_daily",
+                    "SELECT * FROM agg_sales_daily",
                     duckdb_conn
                 )
                 return self._full_refresh_atomic_swap(conn, "mv_sales_daily", df)
             else:
-                # Incremental load - get new data from DuckDB
+                # Incremental load - get new data from DuckDB aggregate view
                 df = pl.read_database(
-                    f"SELECT * FROM mv_sales_daily WHERE date > '{max_date}'",
+                    f"SELECT * FROM agg_sales_daily WHERE date > '{max_date}'",
                     duckdb_conn
                 )
                 return self._incremental_refresh(conn, "mv_sales_daily", df)
@@ -258,7 +258,7 @@ class SQLiteManager:
             )
     
     def _refresh_sales_by_product(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_sales_by_product using DuckDB for aggregation, SQLite for storage."""
+        """Refresh mv_sales_by_product using DuckDB aggregate views, SQLite for storage."""
         import polars as pl
         import time
         start = time.time()
@@ -269,13 +269,13 @@ class SQLiteManager:
             
             if max_date is None:
                 df = pl.read_database(
-                    "SELECT * FROM mv_sales_by_product",
+                    "SELECT * FROM agg_sales_daily_by_product",
                     duckdb_conn
                 )
                 return self._full_refresh_atomic_swap(conn, "mv_sales_by_product", df)
             else:
                 df = pl.read_database(
-                    f"SELECT * FROM mv_sales_by_product WHERE date > '{max_date}'",
+                    f"SELECT * FROM agg_sales_daily_by_product WHERE date > '{max_date}'",
                     duckdb_conn
                 )
                 return self._incremental_refresh(conn, "mv_sales_by_product", df)
@@ -291,7 +291,7 @@ class SQLiteManager:
             )
     
     def _refresh_sales_by_principal(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_sales_by_principal using DuckDB for aggregation, SQLite for storage."""
+        """Refresh mv_sales_by_principal using DuckDB aggregate views, SQLite for storage."""
         import polars as pl
         import time
         start = time.time()
@@ -302,13 +302,13 @@ class SQLiteManager:
             
             if max_date is None:
                 df = pl.read_database(
-                    "SELECT * FROM mv_sales_by_principal",
+                    "SELECT * FROM agg_sales_daily_by_principal",
                     duckdb_conn
                 )
                 return self._full_refresh_atomic_swap(conn, "mv_sales_by_principal", df)
             else:
                 df = pl.read_database(
-                    f"SELECT * FROM mv_sales_by_principal WHERE date > '{max_date}'",
+                    f"SELECT * FROM agg_sales_daily_by_principal WHERE date > '{max_date}'",
                     duckdb_conn
                 )
                 return self._incremental_refresh(conn, "mv_sales_by_principal", df)
