@@ -274,8 +274,6 @@ class DuckDBManager:
 
         # Materialized view: Sales by principal (migrated to SQLite - removed from DuckDB)
         # mv_sales_by_principal is now managed by SQLiteManager
-                WHERE revenue IS NOT NULL
-            """)
 
         # Materialized view: Daily profit aggregates
         if "mv_profit_daily" in views:
