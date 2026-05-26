@@ -356,10 +356,33 @@ class SQLiteManager:
                 error_message=str(e)
             )
     
-    def _refresh_inventory_daily(self, conn: sqlite3.Connection) -> RefreshResult:
-        """Refresh mv_inventory_daily."""
-        # Implementation will be added in Phase 4
-        raise NotImplementedError("Inventory domain refresh implemented in Phase 4")
+    def _refresh_inventory_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
+        """Refresh mv_inventory_daily using DuckDB aggregate views, SQLite for storage."""
+        import polars as pl
+        import time
+        start = time.time()
+        
+        try:
+            from services.duckdb_connector import get_duckdb_connection
+            duckdb_conn = get_duckdb_connection()
+            
+            # Note: Inventory data structure differs - uses snapshot_date instead of date
+            # Full refresh for inventory (no incremental support in current implementation)
+            df = pl.read_database(
+                "SELECT * FROM mv_inventory_daily",
+                duckdb_conn
+            )
+            return self._full_refresh_atomic_swap(conn, "mv_inventory_daily", df)
+        except Exception as e:
+            logger.error(f"Inventory daily refresh failed: {e}")
+            return RefreshResult(
+                view_name="mv_inventory_daily",
+                strategy="full",
+                rows_affected=0,
+                duration_seconds=time.time() - start,
+                success=False,
+                error_message=str(e)
+            )
 
     def refresh_mv(self, view_name: str, domain: str, conn: sqlite3.Connection, 
                    date_range: Optional[tuple[str, str]] = None) -> RefreshResult:
