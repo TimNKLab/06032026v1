@@ -1455,7 +1455,7 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
     from services.duckdb_connector import get_duckdb_connection
     conn = get_duckdb_connection()
     
-    unified_costs_query = """
+    unified_costs_query = f"""
     SELECT 
         product_id,
         cost_unit_tax_in,
@@ -1464,6 +1464,7 @@ def _build_sales_lines_profit(target_date: str) -> pl.DataFrame:
         effective_date
     FROM fact_product_costs_unified
     WHERE cost_unit_tax_in > 0
+      AND effective_date <= '{target_date}'
     """
     
     unified_costs_df = pl.from_pandas(conn.execute(unified_costs_query).fetchdf())
@@ -2218,46 +2219,16 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
             if redis_client.exists(etl_running_key):
                 raise Exception("Timeout waiting for ETL operations to complete")
         
-        # Acquire DuckDB lock
-        lock_key = "duckdb:write_lock"
-        lock_acquired = False
-        lock_timeout = 300  # 5 minutes
+        # SQLite uses WAL mode for concurrency - no lock needed
         
         try:
-            # Try to acquire lock
-            lock_acquired = redis_client.set(lock_key, request_id, nx=True, ex=lock_timeout)
-            
-            if not lock_acquired:
-                # Lock is held, wait for it to be released
-                logger.info("DuckDB lock held, waiting...")
-                start_time = time.time()
-                
-                while redis_client.exists(lock_key) and (time.time() - start_time) < lock_timeout:
-                    time.sleep(5)
-                    self.update_state(
-                        state='WAITING_FOR_LOCK',
-                        meta={'request_id': request_id, 'elapsed': int(time.time() - start_time)}
-                    )
-                
-                if redis_client.exists(lock_key):
-                    raise Exception("Timeout waiting for DuckDB lock")
-                
-                # Try to acquire lock again
-                lock_acquired = redis_client.set(lock_key, request_id, nx=True, ex=lock_timeout)
-                
-            if not lock_acquired:
-                raise Exception("Failed to acquire DuckDB lock")
-            
-            logger.info(f"DuckDB lock acquired for request {request_id}")
-            
-            # Execute MV refresh directly in-process (we're already inside Docker)
+            # Execute MV refresh using SQLiteManager
             self.update_state(
                 state='RUNNING',
                 meta={'request_id': request_id, 'message': 'Refreshing materialized views...'}
             )
 
-            from scripts.etl_data_manager import BackfillRunner
-            from scripts.etl_data_manager import MV_TO_PARQUET_MAP
+            from services.sqlite_manager import SQLiteManager
             from datetime import date as _date
 
             def _log(msg):
@@ -2267,48 +2238,68 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
                     meta={'request_id': request_id, 'message': msg}
                 )
 
-            runner = BackfillRunner(log_callback=_log)
-            views = set(MV_TO_PARQUET_MAP.keys())
+            manager = SQLiteManager()
+            manager.initialize_db()
+            conn = manager.get_writer_conn()
 
-            results = runner.refresh_materialized_views_cascading(
-                views=views,
-                start_date=_date.fromisoformat(start_date),
-                end_date=_date.fromisoformat(end_date),
-                auto_fetch=False,  # ETL already ran; just load parquet → MV
-                refresh_dims=False,
-            )
+            # Refresh sales domain MVs
+            sales_views = [
+                ("mv_sales_daily", "sales"),
+                ("mv_sales_by_product", "sales"),
+                ("mv_sales_by_principal", "sales")
+            ]
 
-            if results.get('failed', 0) > 0:
-                errors = results.get('errors', [])
-                raise Exception(f"MV refresh had {results['failed']} failure(s): {'; '.join(errors[:3])}")
-            
-            # Force reload MVs in the dashboard's DuckDB connection
-            # This ensures the dash-app process picks up the new MVs
-            try:
-                from services.duckdb_connector import DuckDBManager
-                manager = DuckDBManager()
-                # Force reload all tracked MVs
-                tracked_mvs = {
-                    "mv_sales_daily", "mv_sales_by_product", "mv_sales_by_principal",
-                    "mv_profit_daily", "mv_inventory_status", "mv_inventory_daily", 
-                    "mv_product_velocity"
-                }
-                manager.ensure_materialized_views(tracked_mvs, force_reload=True)
-                logger.info("Force-reloaded materialized views in DuckDB connection")
-            except Exception as reload_exc:
-                logger.warning(f"Could not force-reload MVs: {reload_exc}")
+            results = []
+            for view_name, domain in sales_views:
+                _log(f"Refreshing {view_name}...")
+                result = manager.refresh_mv(view_name, domain, conn, 
+                                           date_range=(start_date, end_date))
+                results.append(result)
+                if not result.success:
+                    logger.error(f"Failed to refresh {view_name}: {result.error_message}")
+
+            # Refresh profit domain MVs
+            profit_views = [
+                ("mv_profit_daily", "profit")
+            ]
+
+            for view_name, domain in profit_views:
+                _log(f"Refreshing {view_name}...")
+                result = manager.refresh_mv(view_name, domain, conn,
+                                           date_range=(start_date, end_date))
+                results.append(result)
+                if not result.success:
+                    logger.error(f"Failed to refresh {view_name}: {result.error_message}")
+
+            # Refresh inventory domain MVs
+            inventory_views = [
+                ("mv_inventory_daily", "inventory")
+            ]
+
+            for view_name, domain in inventory_views:
+                _log(f"Refreshing {view_name}...")
+                result = manager.refresh_mv(view_name, domain, conn)
+                results.append(result)
+                if not result.success:
+                    logger.error(f"Failed to refresh {view_name}: {result.error_message}")
+
+            conn.close()
+
+            failed_count = sum(1 for r in results if not r.success)
+            if failed_count > 0:
+                errors = [r.error_message for r in results if not r.success]
+                raise Exception(f"MV refresh had {failed_count} failure(s): {'; '.join(errors[:3])}")
 
             # Clear query caches so dashboard picks up new MV data immediately
             try:
                 from services.profit_metrics import clear_profit_caches
-                from services.duckdb_connector import clear_sales_caches
+                # SQLite doesn't need connection reload like DuckDB
                 clear_profit_caches()
-                clear_sales_caches()
-                logger.info("Cleared profit and sales query caches after MV refresh")
+                logger.info("Cleared profit query caches after MV refresh")
             except Exception as cache_exc:
                 logger.warning(f"Could not clear query caches: {cache_exc}")
 
-            # Signal dash-app to reload DuckDB connection (picks up new MV data from file)
+            # Signal dash-app that MVs have been refreshed
             try:
                 redis_client.set("mv:last_refresh_ts", str(time.time()))
                 logger.info("Set mv:last_refresh_ts signal for dash-app")
@@ -2326,10 +2317,8 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
             }
             
         finally:
-            # Release DuckDB lock
-            if lock_acquired:
-                redis_client.delete(lock_key)
-                logger.info(f"DuckDB lock released for request {request_id}")
+            # SQLite WAL mode handles cleanup automatically
+            pass
     
     except Exception as exc:
         logger.error(f"MV refresh failed for request {request_id}: {exc}", exc_info=True)
