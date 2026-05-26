@@ -323,6 +323,39 @@ class SQLiteManager:
                 error_message=str(e)
             )
     
+    def _refresh_profit_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
+        """Refresh mv_profit_daily using DuckDB aggregate views, SQLite for storage."""
+        import polars as pl
+        import time
+        start = time.time()
+        
+        try:
+            from services.duckdb_connector import get_duckdb_connection
+            duckdb_conn = get_duckdb_connection()
+            
+            if max_date is None:
+                df = pl.read_database(
+                    "SELECT * FROM agg_profit_daily",
+                    duckdb_conn
+                )
+                return self._full_refresh_atomic_swap(conn, "mv_profit_daily", df)
+            else:
+                df = pl.read_database(
+                    f"SELECT * FROM agg_profit_daily WHERE date > '{max_date}'",
+                    duckdb_conn
+                )
+                return self._incremental_refresh(conn, "mv_profit_daily", df)
+        except Exception as e:
+            logger.error(f"Profit daily refresh failed: {e}")
+            return RefreshResult(
+                view_name="mv_profit_daily",
+                strategy="incremental" if max_date else "full",
+                rows_affected=0,
+                duration_seconds=time.time() - start,
+                success=False,
+                error_message=str(e)
+            )
+    
     def _refresh_inventory_daily(self, conn: sqlite3.Connection) -> RefreshResult:
         """Refresh mv_inventory_daily."""
         # Implementation will be added in Phase 4
