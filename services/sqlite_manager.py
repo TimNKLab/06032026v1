@@ -81,8 +81,10 @@ class SQLiteManager:
             
             conn.commit()
             logger.info("SQLite database initialized")
-        finally:
-            conn.close()
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Failed to initialize database: {e}")
+            raise
 
     def get_metadata(self, view_name: str) -> Optional[MVMetadata]:
         """Get refresh metadata for a view."""
@@ -115,3 +117,62 @@ class SQLiteManager:
             if row is None or row[0] is None:
                 return "full", None  # First run or recovery
             return "incremental", date.fromisoformat(row[0])
+
+    def _full_refresh_atomic_swap(self, conn: sqlite3.Connection, view_name: str, df) -> RefreshResult:
+        """Full refresh with atomic swap - no downtime."""
+        import time
+        start = time.time()
+        temp_name = f"{view_name}_new"
+        old_name = f"{view_name}_old"
+        
+        try:
+            # Step 1: Create temp table OUTSIDE the swap transaction
+            df.to_pandas().to_sql(temp_name, conn, if_exists="replace", index=False)
+            
+            # Step 2: Atomic swap INSIDE transaction
+            with conn:
+                # Check if view exists for first run
+                table_exists = conn.execute(
+                    f"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{view_name}'"
+                ).fetchone()[0] > 0
+                
+                if table_exists:
+                    conn.execute(f"ALTER TABLE {view_name} RENAME TO {old_name}")
+                
+                conn.execute(f"ALTER TABLE {temp_name} RENAME TO {view_name}")
+                
+                if table_exists:
+                    conn.execute(f"DROP TABLE {old_name}")
+                
+                # Create index after swap (correct name)
+                conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{view_name}_date ON {view_name}(date)")
+                
+                # Update metadata
+                new_max_date = df["date"].max()
+                new_row_count = len(df)
+                conn.execute(
+                    "INSERT OR REPLACE INTO mv_refresh_metadata VALUES (?, ?, ?, ?, ?)",
+                    (view_name, datetime.now(), new_max_date, new_row_count, 'full')
+                )
+            
+            # Step 3: WAL checkpoint after commit
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            
+            duration = time.time() - start
+            return RefreshResult(
+                view_name=view_name,
+                strategy="full",
+                rows_affected=new_row_count,
+                duration_seconds=duration,
+                success=True
+            )
+        except Exception as e:
+            logger.error(f"Full refresh failed for {view_name}: {e}")
+            return RefreshResult(
+                view_name=view_name,
+                strategy="full",
+                rows_affected=0,
+                duration_seconds=time.time() - start,
+                success=False,
+                error_message=str(e)
+            )

@@ -4,6 +4,7 @@ import sys
 import tempfile
 import sqlite3
 from datetime import date
+import polars as pl
 
 # Add project root to sys.path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -137,5 +138,54 @@ def test_get_refresh_strategy_returns_incremental_for_existing_view():
         strategy, max_date = manager.get_refresh_strategy("test_view")
         assert strategy == "incremental"
         assert max_date == date(2026, 5, 25)
+    finally:
+        os.unlink(db_path)
+
+def test_full_refresh_atomic_swap():
+    """Test that atomic swap works correctly."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
+        db_path = f.name
+    
+    try:
+        manager = SQLiteManager(db_path)
+        manager.initialize_db()
+        
+        # Create initial data
+        df1 = pl.DataFrame({
+            "date": ["2026-05-25"],
+            "revenue": [100.0],
+            "transactions": [10]
+        })
+        
+        writer_conn = manager.get_writer_conn()
+        result1 = manager._full_refresh_atomic_swap(writer_conn, "test_view", df1)
+        assert result1.success
+        assert result1.rows_affected == 1
+        
+        # Verify table exists with correct data
+        with manager.reader_conn() as reader_conn:
+            rows = reader_conn.execute("SELECT * FROM test_view").fetchall()
+            assert len(rows) == 1
+            assert rows[0][1] == 100.0
+        
+        # Refresh with new data
+        df2 = pl.DataFrame({
+            "date": ["2026-05-26"],
+            "revenue": [200.0],
+            "transactions": [20]
+        })
+        
+        result2 = manager._full_refresh_atomic_swap(writer_conn, "test_view", df2)
+        assert result2.success
+        assert result2.rows_affected == 1
+        
+        # Verify data was swapped
+        with manager.reader_conn() as reader_conn:
+            rows = reader_conn.execute("SELECT * FROM test_view").fetchall()
+            assert len(rows) == 1
+            assert rows[0][1] == 200.0
+        
+        # Close writer connection before cleanup
+        writer_conn.close()
     finally:
         os.unlink(db_path)
