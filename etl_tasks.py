@@ -14,6 +14,7 @@ from celery import Celery, group, chord, chain
 from celery.exceptions import Ignore
 from celery.schedules import crontab
 from odoorpc_connector import get_odoo_connection, retry_odoo
+import psutil
 
 # ============================================================================
 # LOGGING CONFIGURATION
@@ -29,6 +30,20 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# MEMORY MONITORING
+# ============================================================================
+
+def log_memory_usage(context: str):
+    """Log current memory usage for monitoring."""
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        logger.info(f"[MEMORY] {context} - RSS: {mem_info.rss / 1024 / 1024:.2f}MB, VMS: {mem_info.vms / 1024 / 1024:.2f}MB")
+    except Exception as e:
+        logger.error(f"Failed to log memory usage: {e}")
 
 
 # ============================================================================
@@ -2242,6 +2257,8 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
             manager.initialize_db()
             conn = manager.get_writer_conn()
 
+            log_memory_usage("MV refresh start")
+
             # Refresh sales domain MVs
             sales_views = [
                 ("mv_sales_daily", "sales"),
@@ -2252,9 +2269,10 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
             results = []
             for view_name, domain in sales_views:
                 _log(f"Refreshing {view_name}...")
-                result = manager.refresh_mv(view_name, domain, conn, 
+                result = manager.refresh_mv(view_name, domain, conn,
                                            date_range=(start_date, end_date))
                 results.append(result)
+                log_memory_usage(f"After refreshing {view_name}")
                 if not result.success:
                     logger.error(f"Failed to refresh {view_name}: {result.error_message}")
 
@@ -2268,6 +2286,7 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
                 result = manager.refresh_mv(view_name, domain, conn,
                                            date_range=(start_date, end_date))
                 results.append(result)
+                log_memory_usage(f"After refreshing {view_name}")
                 if not result.success:
                     logger.error(f"Failed to refresh {view_name}: {result.error_message}")
 
@@ -2280,9 +2299,11 @@ def refresh_materialized_views(self, start_date: str, end_date: str):
                 _log(f"Refreshing {view_name}...")
                 result = manager.refresh_mv(view_name, domain, conn)
                 results.append(result)
+                log_memory_usage(f"After refreshing {view_name}")
                 if not result.success:
                     logger.error(f"Failed to refresh {view_name}: {result.error_message}")
 
+            log_memory_usage("MV refresh complete")
             conn.close()
 
             failed_count = sum(1 for r in results if not r.success)
