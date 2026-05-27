@@ -44,7 +44,7 @@ def query_profit_trends(start_date: date, end_date: date, period: str = 'daily')
             ELSE 0 
         END as gross_margin_pct
     FROM mv_profit_daily mv
-    WHERE date(mv.date) = ?
+    WHERE mv.date = ?
     """
     
     query_start = time.time()
@@ -61,47 +61,37 @@ def query_profit_trends(start_date: date, end_date: date, period: str = 'daily')
 
 @lru_cache(maxsize=32)
 def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
-    """Query top products by profit - uses SQLite materialized view."""
-    # Note: This still uses DuckDB for product dimension join
-    # In the hybrid architecture, we keep DuckDB for complex joins
-    from .duckdb_connector import get_duckdb_connection
-    conn = get_duckdb_connection()
-
+    """Query top products by profit - uses SQLite materialized view.
+    
+    Note: Simplified version without dimension joins. Product names/categories
+    would require SQLite dimension tables (mv_dim_products) which are not yet implemented.
+    Returns product_id instead of product_name for now.
+    """
+    manager = SQLiteManager()
+    
     query = """
-    WITH product_profit AS (
-        SELECT 
-            product_id,
-            SUM(revenue_tax_in) as total_revenue,
-            SUM(cogs_tax_in) as total_cogs,
-            SUM(gross_profit) as total_profit,
-            SUM(quantity) as total_quantity,
-            SUM(lines) as total_lines
-        FROM agg_profit_daily_by_product
-        WHERE date >= ? AND date < ? + INTERVAL 1 DAY
-        GROUP BY product_id
-        ORDER BY total_profit DESC
-        LIMIT ?
-    )
     SELECT 
-        COALESCE(p.product_name, 'Product ' || s.product_id::VARCHAR) as product_name,
-        COALESCE(p.product_category, 'Unknown Category') as category,
-        s.total_revenue,
-        s.total_cogs,
-        s.total_profit,
-        s.total_quantity,
-        s.total_lines,
+        product_id,
+        SUM(revenue_tax_in) as total_revenue,
+        SUM(cogs_tax_in) as total_cogs,
+        SUM(gross_profit) as total_profit,
+        SUM(quantity) as total_quantity,
+        SUM(lines) as total_lines,
         CASE 
-            WHEN s.total_revenue > 0 
-            THEN s.total_profit / s.total_revenue * 100 
+            WHEN SUM(revenue_tax_in) > 0 
+            THEN SUM(gross_profit) / SUM(revenue_tax_in) * 100 
             ELSE 0 
         END as profit_margin_pct
-    FROM product_profit s
-    LEFT JOIN dim_products p ON s.product_id = p.product_id
-    ORDER BY s.total_profit DESC
+    FROM mv_profit_daily
+    WHERE date >= ? AND date <= ?
+    GROUP BY product_id
+    ORDER BY total_profit DESC
+    LIMIT ?
     """
     
     query_start = time.time()
-    result = conn.execute(query, [start_date, end_date, limit]).fetchdf()
+    with manager.reader_conn() as conn:
+        result = pd.read_sql_query(query, conn, params=[start_date, end_date, limit])
     print(f"[TIMING] query_profit_by_product: {time.time() - query_start:.3f}s")
     return result
 
@@ -131,7 +121,7 @@ def query_profit_summary(start_date: date, end_date: date) -> Dict:
             ELSE 0 
         END as gross_margin_pct
     FROM mv_profit_daily
-    WHERE date(mv.date) >= ? AND date(mv.date) <= ?
+    WHERE mv.date >= ? AND mv.date <= ?
     """
     
     query_start = time.time()
@@ -157,32 +147,35 @@ def query_profit_summary(start_date: date, end_date: date) -> Dict:
 
 @lru_cache(maxsize=32)
 def query_profit_revenue_by_category(start_date: date, end_date: date) -> Dict[str, Dict[str, float]]:
-    ensure_duckdb_view_groups({"overview", "dims"})
-    conn = get_duckdb_connection()
-
+    """Query profit revenue by category - uses SQLite materialized view.
+    
+    Note: Simplified version without dimension joins. Category breakdown
+    would require SQLite dimension tables (mv_dim_products) which are not yet implemented.
+    Returns aggregated profit by product_id for now.
+    """
+    manager = SQLiteManager()
+    
     query = """
-    SELECT
-        COALESCE(NULLIF(TRIM(p.product_parent_category), ''), 'Unknown') as parent_category,
-        COALESCE(NULLIF(TRIM(p.product_category), ''), 'Unknown') as category,
-        SUM(a.revenue_tax_in) as revenue_tax_in
-    FROM agg_profit_daily_by_product a
-    LEFT JOIN dim_products p ON a.product_id = p.product_id
-    WHERE a.date >= ? AND a.date < ? + INTERVAL 1 DAY
-    GROUP BY 1, 2
-    ORDER BY 1, 2
+    SELECT 
+        product_id,
+        SUM(revenue_tax_in) as revenue_tax_in
+    FROM mv_profit_daily
+    WHERE date >= ? AND date <= ?
+    GROUP BY product_id
+    ORDER BY revenue_tax_in DESC
     """
 
     query_start = time.time()
-    rows = conn.execute(query, [start_date, end_date]).fetchall()
+    with manager.reader_conn() as conn:
+        rows = conn.execute(query, [start_date, end_date]).fetchall()
     print(f"[TIMING] query_profit_revenue_by_category: {time.time() - query_start:.3f}s")
 
-    nested: Dict[str, Dict[str, float]] = {}
-    for parent, child, amt in rows:
-        parent = parent or 'Unknown'
-        child = child or 'Unknown'
-        nested.setdefault(parent, {})[child] = float(amt or 0)
+    # Simplified: return as flat dict by product_id
+    result: Dict[str, float] = {}
+    for product_id, revenue in rows:
+        result[str(product_id)] = float(revenue or 0)
 
-    return nested
+    return result
 
 
 def clear_profit_caches() -> None:
@@ -203,7 +196,13 @@ def clear_profit_caches() -> None:
 
 
 def query_profit_drilldown(start_date: date, end_date: date, product_id: Optional[int] = None) -> pd.DataFrame:
-    """Drill-down to line-level profit details - use sparingly for detailed analysis."""
+    """Drill-down to line-level profit details - use sparingly for detailed analysis.
+    
+    Note: This function still uses DuckDB for detailed drill-down queries.
+    Would require SQLite MV (mv_fact_sales_lines_profit) for full migration.
+    Kept on DuckDB for now as it's a detailed analysis query, not a primary dashboard query.
+    """
+    from .duckdb_connector import get_duckdb_connection, ensure_duckdb_view_groups
     ensure_duckdb_view_groups({"profit_detail"})
     conn = get_duckdb_connection()
 
