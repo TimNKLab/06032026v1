@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime, date
 from dataclasses import dataclass
 from typing import Optional
+from services.data_validator import DataValidator
 
 logger = logging.getLogger(__name__)
 
@@ -234,12 +235,24 @@ class SQLiteManager:
             if max_date is None:
                 # First run or full refresh - use Polars lazy scan
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
-                return self._full_refresh_atomic_swap(conn, "mv_sales_daily", df)
             else:
                 # Incremental load - filter by date using Polars lazy scan
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
                     pl.col("date") > max_date
                 ).collect()
+            
+            # Validate data quality
+            validator = DataValidator()
+            expected_cols = ["date", "revenue", "transactions", "items_sold", "lines"]
+            if not validator.validate_schema(df, expected_cols):
+                raise ValueError(f"Schema validation failed: {validator.get_errors()}")
+            
+            if not validator.validate_row_count(df, min_rows=1):
+                raise ValueError(f"Row count validation failed: {validator.get_errors()}")
+            
+            if max_date is None:
+                return self._full_refresh_atomic_swap(conn, "mv_sales_daily", df)
+            else:
                 return self._incremental_refresh(conn, "mv_sales_daily", df)
         except Exception as e:
             logger.error(f"Sales daily refresh failed: {e}")
@@ -265,11 +278,23 @@ class SQLiteManager:
             
             if max_date is None:
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
-                return self._full_refresh_atomic_swap(conn, "mv_sales_by_product", df)
             else:
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
                     pl.col("date") > max_date
                 ).collect()
+            
+            # Validate data quality
+            validator = DataValidator()
+            expected_cols = ["date", "product_id", "revenue", "quantity"]
+            if not validator.validate_schema(df, expected_cols):
+                raise ValueError(f"Schema validation failed: {validator.get_errors()}")
+            
+            if not validator.validate_row_count(df, min_rows=1):
+                raise ValueError(f"Row count validation failed: {validator.get_errors()}")
+            
+            if max_date is None:
+                return self._full_refresh_atomic_swap(conn, "mv_sales_by_product", df)
+            else:
                 return self._incremental_refresh(conn, "mv_sales_by_product", df)
         except Exception as e:
             logger.error(f"Sales by product refresh failed: {e}")
@@ -295,11 +320,23 @@ class SQLiteManager:
             
             if max_date is None:
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
-                return self._full_refresh_atomic_swap(conn, "mv_sales_by_principal", df)
             else:
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
                     pl.col("date") > max_date
                 ).collect()
+            
+            # Validate data quality
+            validator = DataValidator()
+            expected_cols = ["date", "principal", "revenue"]
+            if not validator.validate_schema(df, expected_cols):
+                raise ValueError(f"Schema validation failed: {validator.get_errors()}")
+            
+            if not validator.validate_row_count(df, min_rows=1):
+                raise ValueError(f"Row count validation failed: {validator.get_errors()}")
+            
+            if max_date is None:
+                return self._full_refresh_atomic_swap(conn, "mv_sales_by_principal", df)
+            else:
                 return self._incremental_refresh(conn, "mv_sales_by_principal", df)
         except Exception as e:
             logger.error(f"Sales by principal refresh failed: {e}")
@@ -325,11 +362,23 @@ class SQLiteManager:
             
             if max_date is None:
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
-                return self._full_refresh_atomic_swap(conn, "mv_profit_daily", df)
             else:
                 df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
                     pl.col("date") > max_date
                 ).collect()
+            
+            # Validate data quality
+            validator = DataValidator()
+            expected_cols = ["date", "revenue_tax_in", "gross_profit", "cost"]
+            if not validator.validate_schema(df, expected_cols):
+                raise ValueError(f"Schema validation failed: {validator.get_errors()}")
+            
+            if not validator.validate_row_count(df, min_rows=1):
+                raise ValueError(f"Row count validation failed: {validator.get_errors()}")
+            
+            if max_date is None:
+                return self._full_refresh_atomic_swap(conn, "mv_profit_daily", df)
+            else:
                 return self._incremental_refresh(conn, "mv_profit_daily", df)
         except Exception as e:
             logger.error(f"Profit daily refresh failed: {e}")
@@ -355,6 +404,16 @@ class SQLiteManager:
             
             # Note: Inventory is a snapshot, always full refresh
             df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
+            
+            # Validate data quality
+            validator = DataValidator()
+            expected_cols = ["snapshot_date", "product_id", "qty_on_hand"]
+            if not validator.validate_schema(df, expected_cols):
+                raise ValueError(f"Schema validation failed: {validator.get_errors()}")
+            
+            if not validator.validate_row_count(df, min_rows=1):
+                raise ValueError(f"Row count validation failed: {validator.get_errors()}")
+            
             return self._full_refresh_atomic_swap(conn, "mv_inventory_daily", df)
         except Exception as e:
             logger.error(f"Inventory daily refresh failed: {e}")
