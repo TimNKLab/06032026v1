@@ -6,6 +6,7 @@ from datetime import datetime, date
 from dataclasses import dataclass
 from typing import Optional
 from services.data_validator import DataValidator
+from services.performance_monitor import monitor_performance
 
 logger = logging.getLogger(__name__)
 
@@ -426,6 +427,7 @@ class SQLiteManager:
                 error_message=str(e)
             )
 
+    @monitor_performance("refresh_mv")
     def refresh_mv(self, view_name: str, domain: str, conn: sqlite3.Connection, 
                    date_range: Optional[tuple[str, str]] = None) -> RefreshResult:
         """Refresh MV based on domain-specific strategy."""
