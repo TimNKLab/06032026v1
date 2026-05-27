@@ -221,30 +221,25 @@ class SQLiteManager:
             )
 
     def _refresh_sales_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_sales_daily using DuckDB aggregate views, SQLite for storage."""
+        """Refresh mv_sales_daily using Polars parquet reads, SQLite for storage."""
         import polars as pl
         import time
+        import os
         start = time.time()
         
         try:
-            # Use DuckDB to aggregate data from parquet files via aggregate view
-            from services.duckdb_connector import get_duckdb_connection
-            
-            duckdb_conn = get_duckdb_connection()
+            data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+            parquet_path = f"{data_lake_root}/star-schema/agg_sales_daily/**/*.parquet"
             
             if max_date is None:
-                # First run or full refresh - use atomic swap
-                df = pl.read_database(
-                    "SELECT * FROM agg_sales_daily",
-                    duckdb_conn
-                )
+                # First run or full refresh - use Polars lazy scan
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
                 return self._full_refresh_atomic_swap(conn, "mv_sales_daily", df)
             else:
-                # Incremental load - get new data from DuckDB aggregate view
-                df = pl.read_database(
-                    f"SELECT * FROM agg_sales_daily WHERE date > '{max_date}'",
-                    duckdb_conn
-                )
+                # Incremental load - filter by date using Polars lazy scan
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
+                    pl.col("date") > max_date
+                ).collect()
                 return self._incremental_refresh(conn, "mv_sales_daily", df)
         except Exception as e:
             logger.error(f"Sales daily refresh failed: {e}")
@@ -258,26 +253,23 @@ class SQLiteManager:
             )
     
     def _refresh_sales_by_product(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_sales_by_product using DuckDB aggregate views, SQLite for storage."""
+        """Refresh mv_sales_by_product using Polars parquet reads, SQLite for storage."""
         import polars as pl
         import time
+        import os
         start = time.time()
         
         try:
-            from services.duckdb_connector import get_duckdb_connection
-            duckdb_conn = get_duckdb_connection()
+            data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+            parquet_path = f"{data_lake_root}/star-schema/agg_sales_daily_by_product/**/*.parquet"
             
             if max_date is None:
-                df = pl.read_database(
-                    "SELECT * FROM agg_sales_daily_by_product",
-                    duckdb_conn
-                )
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
                 return self._full_refresh_atomic_swap(conn, "mv_sales_by_product", df)
             else:
-                df = pl.read_database(
-                    f"SELECT * FROM agg_sales_daily_by_product WHERE date > '{max_date}'",
-                    duckdb_conn
-                )
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
+                    pl.col("date") > max_date
+                ).collect()
                 return self._incremental_refresh(conn, "mv_sales_by_product", df)
         except Exception as e:
             logger.error(f"Sales by product refresh failed: {e}")
@@ -291,26 +283,23 @@ class SQLiteManager:
             )
     
     def _refresh_sales_by_principal(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_sales_by_principal using DuckDB aggregate views, SQLite for storage."""
+        """Refresh mv_sales_by_principal using Polars parquet reads, SQLite for storage."""
         import polars as pl
         import time
+        import os
         start = time.time()
         
         try:
-            from services.duckdb_connector import get_duckdb_connection
-            duckdb_conn = get_duckdb_connection()
+            data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+            parquet_path = f"{data_lake_root}/star-schema/agg_sales_daily_by_principal/**/*.parquet"
             
             if max_date is None:
-                df = pl.read_database(
-                    "SELECT * FROM agg_sales_daily_by_principal",
-                    duckdb_conn
-                )
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
                 return self._full_refresh_atomic_swap(conn, "mv_sales_by_principal", df)
             else:
-                df = pl.read_database(
-                    f"SELECT * FROM agg_sales_daily_by_principal WHERE date > '{max_date}'",
-                    duckdb_conn
-                )
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
+                    pl.col("date") > max_date
+                ).collect()
                 return self._incremental_refresh(conn, "mv_sales_by_principal", df)
         except Exception as e:
             logger.error(f"Sales by principal refresh failed: {e}")
@@ -324,26 +313,23 @@ class SQLiteManager:
             )
     
     def _refresh_profit_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_profit_daily using DuckDB aggregate views, SQLite for storage."""
+        """Refresh mv_profit_daily using Polars parquet reads, SQLite for storage."""
         import polars as pl
         import time
+        import os
         start = time.time()
         
         try:
-            from services.duckdb_connector import get_duckdb_connection
-            duckdb_conn = get_duckdb_connection()
+            data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+            parquet_path = f"{data_lake_root}/star-schema/agg_profit_daily/**/*.parquet"
             
             if max_date is None:
-                df = pl.read_database(
-                    "SELECT * FROM agg_profit_daily",
-                    duckdb_conn
-                )
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
                 return self._full_refresh_atomic_swap(conn, "mv_profit_daily", df)
             else:
-                df = pl.read_database(
-                    f"SELECT * FROM agg_profit_daily WHERE date > '{max_date}'",
-                    duckdb_conn
-                )
+                df = pl.scan_parquet(parquet_path, hive_partitioning=True).filter(
+                    pl.col("date") > max_date
+                ).collect()
                 return self._incremental_refresh(conn, "mv_profit_daily", df)
         except Exception as e:
             logger.error(f"Profit daily refresh failed: {e}")
@@ -357,21 +343,18 @@ class SQLiteManager:
             )
     
     def _refresh_inventory_daily(self, conn: sqlite3.Connection, max_date: Optional[date]) -> RefreshResult:
-        """Refresh mv_inventory_daily using DuckDB aggregate views, SQLite for storage."""
+        """Refresh mv_inventory_daily using Polars parquet reads, SQLite for storage."""
         import polars as pl
         import time
+        import os
         start = time.time()
         
         try:
-            from services.duckdb_connector import get_duckdb_connection
-            duckdb_conn = get_duckdb_connection()
+            data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+            parquet_path = f"{data_lake_root}/star-schema/fact_stock_on_hand_snapshot/**/*.parquet"
             
-            # Note: Inventory data structure differs - uses snapshot_date instead of date
-            # Full refresh for inventory (no incremental support in current implementation)
-            df = pl.read_database(
-                "SELECT * FROM mv_inventory_daily",
-                duckdb_conn
-            )
+            # Note: Inventory is a snapshot, always full refresh
+            df = pl.scan_parquet(parquet_path, hive_partitioning=True).collect()
             return self._full_refresh_atomic_swap(conn, "mv_inventory_daily", df)
         except Exception as e:
             logger.error(f"Inventory daily refresh failed: {e}")
@@ -402,7 +385,7 @@ class SQLiteManager:
         elif domain == "profit":
             return self._refresh_profit_daily(conn, max_date)
         elif domain == "inventory":
-            return self._refresh_inventory_daily(conn)
+            return self._refresh_inventory_daily(conn, max_date)
         
         return RefreshResult(
             view_name=view_name,
