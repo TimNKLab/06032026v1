@@ -5,10 +5,7 @@ import threading
 import time
 from datetime import date, timedelta
 from typing import Dict, Optional
-from functools import lru_cache
 import pandas as pd
-from .cache import cache
-from .versioned_cache import versioned_cache
 
 logger = logging.getLogger(__name__)
 
@@ -125,25 +122,24 @@ class DuckDBManager:
         """Reload materialized views in background thread - called after connection is ready."""
         try:
             print("[duckdb] background: reloading materialized views...")
-            # Use a fresh connection to avoid corruption issues
+            # Use a fresh connection to avoid lock contention with main thread
             data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
             db_path = f"{data_lake}/cache/nkdash.duckdb"
-            conn = duckdb.connect(database=db_path)
+            conn = duckdb.connect(database=db_path, read_only=False)
             
-            # Map MV names to their source aggregate views (correct names)
-            # Sales and Profit MVs migrated to SQLite - removed from DuckDB
-            mv_to_agg = {}
-            
-            for mv_name, agg_view in mv_to_agg.items():
-                try:
-                    # Drop and recreate MV from correct aggregate view
-                    conn.execute(f"DROP TABLE IF EXISTS {mv_name}")
-                    conn.execute(f"CREATE TABLE {mv_name} AS SELECT * FROM {agg_view}")
-                    print(f"[duckdb] background: {mv_name} reloaded")
-                except Exception as e:
-                    print(f"[duckdb] background: failed to reload {mv_name}: {e}")
-            
-            print("[duckdb] background: MV reload complete")
+            try:
+                # Drop legacy SQLite MVs that were migrated away
+                legacy_mvs = ['mv_profit_daily', 'mv_sales_by_product', 'mv_sales_by_principal', 'mv_refresh_metadata']
+                for mv_name in legacy_mvs:
+                    try:
+                        conn.execute(f"DROP TABLE IF EXISTS {mv_name}")
+                        print(f"[duckdb] background: dropped legacy MV {mv_name}")
+                    except Exception as e:
+                        print(f"[duckdb] background: failed to drop {mv_name}: {e}")
+                
+                print("[duckdb] background: MV reload complete")
+            finally:
+                conn.close()
         except Exception as e:
             print(f"[duckdb] background: MV reload failed: {e}")
 
@@ -363,7 +359,6 @@ class DuckDBManager:
             """)
 
     @staticmethod
-    @lru_cache(maxsize=1)
     def _get_data_paths() -> tuple:
         """Cache data paths to avoid repeated env lookups."""
         data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
@@ -1294,8 +1289,6 @@ def ensure_materialized_views(views: set[str], force_reload: bool = False) -> No
     DuckDBManager().ensure_materialized_views(views, force_reload=force_reload)
 
 
-@versioned_cache(ttl=3600, key_prefix="sales_by_principal")
-@lru_cache(maxsize=32)
 def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     ensure_duckdb_view_groups({"sales_agg"})
     conn = DuckDBManager().get_connection()
@@ -1330,8 +1323,6 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
     return DuckDBManager().get_connection()
 
 
-@versioned_cache(ttl=3600, key_prefix="sales_trends")
-@lru_cache(maxsize=32)
 def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
     """Query sales trends - uses pre-aggregated daily data for speed."""
     ensure_duckdb_view_groups({"sales_agg"})
@@ -1376,8 +1367,6 @@ def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') 
     return result
 
 
-@versioned_cache(ttl=3600, key_prefix="hourly_pattern")
-@lru_cache(maxsize=32)
 def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     """Query hourly sales - pre-generates all hours in SQL."""
     ensure_duckdb_view_groups({"sales"})
@@ -1405,8 +1394,6 @@ def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
     return result
 
 
-@versioned_cache(ttl=3600, key_prefix="top_products")
-@lru_cache(maxsize=32)
 def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     """Query top products - optimized: aggregate by product_id first, then join."""
     ensure_duckdb_view_groups({"sales_agg", "dims"})
@@ -1439,8 +1426,6 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
     return result
 
 
-@versioned_cache(ttl=3600, key_prefix="revenue_comparison")
-@lru_cache(maxsize=32)
 def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     """Compare revenue - SINGLE query for both periods using FILTER."""
     ensure_duckdb_view_groups({"sales_agg"})
@@ -1516,8 +1501,6 @@ def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
     }
 
 
-@versioned_cache(ttl=3600, key_prefix="hourly_heatmap")
-@lru_cache(maxsize=32)
 def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame:
     """Query hourly heatmap data."""
     ensure_duckdb_view_groups({"sales"})
@@ -1540,7 +1523,6 @@ def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame
     return result
 
 
-@lru_cache(maxsize=32)
 def query_overview_summary(start_date: date, end_date: date) -> Dict:
     """Get overview summary - uses pre-aggregated data for speed."""
     ensure_duckdb_view_groups({"sales_agg", "dims"})
@@ -1595,17 +1577,275 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
     }
 
 
-def clear_sales_caches() -> None:
-    """Clear all lru_cache'd sales query functions to force fresh reads after MV refresh."""
-    query_sales_trends.cache_clear()
-    query_revenue_comparison.cache_clear()
-    query_top_products.cache_clear()
-    query_overview_summary.cache_clear()
-    query_hourly_sales_heatmap.cache_clear()
-    query_hourly_sales_pattern.cache_clear()
-    query_sales_by_principal.cache_clear()
-    # Clear the column cache too
-    _column_cache.clear()
+def query_profit_summary(start_date: date, end_date: date) -> Dict:
+    """Get profit summary - uses DuckDB aggregates."""
+    ensure_duckdb_view_groups({"profit_agg"})
+    conn = get_duckdb_connection()
+    
+    query = """
+    SELECT 
+        SUM(revenue_tax_in) as revenue,
+        SUM(cogs_tax_in) as cogs,
+        SUM(gross_profit) as gross_profit,
+        SUM(quantity) as quantity,
+        SUM(transactions) as transactions,
+        SUM(lines) as lines,
+        CASE 
+            WHEN SUM(transactions) > 0 
+            THEN SUM(revenue_tax_in) / SUM(transactions) 
+            ELSE 0 
+        END as avg_transaction_value,
+        CASE 
+            WHEN SUM(revenue_tax_in) > 0 
+            THEN SUM(gross_profit) / SUM(revenue_tax_in) * 100 
+            ELSE 0 
+        END as gross_margin_pct
+    FROM agg_profit_daily
+    WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+    """
+    
+    query_start = time.time()
+    row = conn.execute(query, [start_date, end_date]).fetchone()
+    print(f"[TIMING] query_profit_summary: {time.time() - query_start:.3f}s")
+    
+    revenue, cogs, gross_profit, quantity, transactions, lines, atv, margin_pct = [
+        v or 0 for v in row
+    ]
+
+    return {
+        'revenue': float(revenue),
+        'cogs': float(cogs),
+        'gross_profit': float(gross_profit),
+        'quantity': float(quantity),
+        'transactions': int(transactions),
+        'lines': int(lines),
+        'avg_transaction_value': float(atv),
+        'gross_margin_pct': float(margin_pct)
+    }
+
+
+def query_profit_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
+    """Query profit trends - uses DuckDB aggregates."""
+    ensure_duckdb_view_groups({"profit_agg"})
+    conn = get_duckdb_connection()
+    
+    # Generate date series in SQL
+    trunc_expr = 'day' if period == 'daily' else 'week' if period == 'weekly' else 'month'
+    
+    query = f"""
+    WITH date_series AS (
+        SELECT 
+            date_trunc('{trunc_expr}', date) + interval '1 {trunc_expr}' as period_end
+        FROM generate_series(
+            date_trunc('{trunc_expr}', ?::date)::timestamp,
+            date_trunc('{trunc_expr}', ?::date)::timestamp,
+            interval '1 {trunc_expr}'
+        ) as t(date)
+    )
+    SELECT 
+        ds.period_end as date,
+        COALESCE(SUM(a.revenue_tax_in), 0) as revenue,
+        COALESCE(SUM(a.cogs_tax_in), 0) as cogs,
+        COALESCE(SUM(a.gross_profit), 0) as gross_profit,
+        COALESCE(SUM(a.quantity), 0) as items_sold,
+        COALESCE(SUM(a.transactions), 0) as transactions,
+        COALESCE(SUM(a.lines), 0) as lines,
+        CASE 
+            WHEN SUM(a.transactions) > 0 
+            THEN SUM(a.revenue_tax_in) / SUM(a.transactions) 
+            ELSE 0 
+        END as avg_transaction_value,
+        CASE 
+            WHEN SUM(a.revenue_tax_in) > 0 
+            THEN SUM(a.gross_profit) / SUM(a.revenue_tax_in) * 100 
+            ELSE 0 
+        END as gross_margin_pct
+    FROM date_series ds
+    LEFT JOIN agg_profit_daily a ON 
+        a.date >= ds.period_end - INTERVAL '1 {trunc_expr}' AND 
+        a.date < ds.period_end
+    GROUP BY ds.period_end
+    ORDER BY ds.period_end
+    """
+    
+    query_start = time.time()
+    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    print(f"[TIMING] query_profit_trends: {time.time() - query_start:.3f}s")
+    return result
+
+
+def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
+    """Query top products by profit - uses DuckDB aggregates."""
+    ensure_duckdb_view_groups({"profit_agg", "dims"})
+    conn = get_duckdb_connection()
+    
+    query = """
+    WITH product_agg AS (
+        SELECT 
+            product_id,
+            SUM(revenue_tax_in) as total_revenue,
+            SUM(cogs_tax_in) as total_cogs,
+            SUM(gross_profit) as total_profit,
+            SUM(quantity) as total_quantity,
+            SUM(lines) as total_lines
+        FROM agg_profit_daily_by_product
+        WHERE date >= ? AND date < ? + INTERVAL 1 DAY
+        GROUP BY product_id
+        ORDER BY total_profit DESC
+        LIMIT ?
+    )
+    SELECT 
+        s.product_id,
+        COALESCE(p.product_name, 'Product ' || s.product_id::VARCHAR) as product_name,
+        COALESCE(p.product_category, 'Unknown Category') as category,
+        s.total_revenue,
+        s.total_cogs,
+        s.total_profit,
+        s.total_quantity,
+        s.total_lines,
+        CASE 
+            WHEN s.total_revenue > 0 
+            THEN s.total_profit / s.total_revenue * 100 
+            ELSE 0 
+        END as profit_margin_pct
+    FROM product_agg s
+    LEFT JOIN dim_products p ON s.product_id = p.product_id
+    ORDER BY s.total_profit DESC
+    """
+    
+    query_start = time.time()
+    result = conn.execute(query, [start_date, end_date, limit]).fetchdf()
+    print(f"[TIMING] query_profit_by_product: {time.time() - query_start:.3f}s")
+    return result
+
+
+def query_profit_drilldown(start_date: date, end_date: date, product_id: Optional[int] = None) -> pd.DataFrame:
+    """Drill-down to line-level profit details - uses DuckDB fact table."""
+    ensure_duckdb_view_groups({"profit_detail"})
+    conn = get_duckdb_connection()
+    
+    if product_id:
+        where_clause = "WHERE date >= ? AND date < date(?, '+1 day') AND product_id = ?"
+        params = [start_date, end_date, product_id]
+    else:
+        where_clause = "WHERE date >= ? AND date < date(?, '+1 day')"
+        params = [start_date, end_date]
+
+    query = f"""
+    SELECT 
+        date,
+        txn_id,
+        line_id,
+        product_id,
+        quantity,
+        revenue_tax_in,
+        cost_unit_tax_in,
+        cogs_tax_in,
+        gross_profit,
+        CASE 
+            WHEN revenue_tax_in > 0 
+            THEN gross_profit * 100.0 / revenue_tax_in
+            ELSE 0 
+        END as profit_margin_pct
+    FROM fact_sales_lines_profit
+    {where_clause}
+    ORDER BY date, gross_profit DESC
+    """
+    
+    query_start = time.time()
+    result = conn.execute(query, params).fetchdf()
+    print(f"[TIMING] query_profit_drilldown: {time.time() - query_start:.3f}s")
+    return result
+
+
+def query_profit_revenue_by_category(start_date: date, end_date: date) -> Dict[str, Dict[str, float]]:
+    """Query profit revenue by category - uses DuckDB aggregates."""
+    ensure_duckdb_view_groups({"profit_agg", "dims"})
+    conn = get_duckdb_connection()
+    
+    query = """
+    WITH product_agg AS (
+        SELECT 
+            a.product_id,
+            SUM(a.revenue_tax_in) as revenue_tax_in
+        FROM agg_profit_daily_by_product a
+        WHERE a.date >= ? AND a.date < ? + INTERVAL 1 DAY
+        GROUP BY a.product_id
+    )
+    SELECT 
+        COALESCE(p.product_parent_category, 'Unknown') as parent_cat,
+        COALESCE(p.product_category, 'Unknown') as cat,
+        SUM(s.revenue_tax_in) as revenue
+    FROM product_agg s
+    LEFT JOIN dim_products p ON s.product_id = p.product_id
+    GROUP BY parent_cat, cat
+    ORDER BY revenue DESC
+    """
+    
+    query_start = time.time()
+    rows = conn.execute(query, [start_date, end_date]).fetchall()
+    print(f"[TIMING] query_profit_revenue_by_category: {time.time() - query_start:.3f}s")
+
+    result = {}
+    for parent_cat, cat, revenue in rows:
+        result.setdefault(str(parent_cat), {})[str(cat)] = float(revenue or 0)
+
+    return result
+
+
+def query_inventory_snapshot(snapshot_date: date) -> pd.DataFrame:
+    """Query inventory snapshot from DuckDB view over parquet.
+    
+    Replaces SQLite MV mv_inventory_daily.
+    """
+    import os
+    
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    snapshot_path = f"{data_lake_root}/star-schema/fact_stock_on_hand_snapshot/**/*.parquet"
+    
+    conn = get_duckdb_connection()
+    
+    query = f"""
+    SELECT
+        product_id,
+        SUM(quantity) AS qty_on_hand
+    FROM read_parquet('{snapshot_path}', hive_partitioning=1)
+    WHERE snapshot_date = ?
+    GROUP BY product_id
+    """
+    
+    query_start = time.time()
+    df = conn.execute(query, [snapshot_date]).fetchdf()
+    print(f"[TIMING] query_inventory_snapshot: {time.time() - query_start:.3f}s")
+    return df
+
+
+def query_sales_by_product_duckdb(start_date: date, end_date: date) -> pd.DataFrame:
+    """Query sales by product from DuckDB view over parquet.
+    
+    Replaces SQLite MV mv_sales_by_product.
+    """
+    import os
+    
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    agg_path = f"{data_lake_root}/star-schema/agg_sales_daily_by_product/**/*.parquet"
+    
+    conn = get_duckdb_connection()
+    
+    query = f"""
+    SELECT
+        product_id,
+        SUM(quantity) AS units_sold,
+        SUM(revenue) AS revenue
+    FROM read_parquet('{agg_path}', hive_partitioning=1)
+    WHERE date >= ? AND date <= ?
+    GROUP BY product_id
+    """
+    
+    query_start = time.time()
+    df = conn.execute(query, [start_date, end_date]).fetchdf()
+    print(f"[TIMING] query_sales_by_product_duckdb: {time.time() - query_start:.3f}s")
+    return df
 
 
 def _execute_with_timeout(conn, query: str, params: list = None, timeout_ms: int = 10000) -> pd.DataFrame:
