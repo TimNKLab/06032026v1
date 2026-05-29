@@ -1,7 +1,6 @@
 import csv
 import os
 from datetime import date, datetime, timedelta
-from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 import math
@@ -10,9 +9,6 @@ from typing import Dict, Optional
 
 import pandas as pd
 
-from services.duckdb_connector import get_duckdb_connection
-from services.duckdb_connector import ensure_duckdb_view_groups
-from services.duckdb_connector import DuckDBManager
 
 DEFAULT_ABC_THRESHOLDS = {
     "a": 0.2,
@@ -49,57 +45,100 @@ def _normalize_snapshot_date(value: Optional[object]) -> Optional[date]:
 
 
 def _get_snapshot_date(as_of_date: date) -> Optional[date]:
-    ensure_duckdb_view_groups({"inventory"})
+    """Get snapshot date from DuckDB view over parquet."""
+    from services.duckdb_connector import get_duckdb_connection
+    import os
+    
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    snapshot_path = f"{data_lake_root}/star-schema/fact_stock_on_hand_snapshot/**/*.parquet"
+    
     conn = get_duckdb_connection()
-    row = conn.execute(
-        """
-        SELECT snapshot_date
-        FROM fact_stock_on_hand_snapshot
-        WHERE snapshot_date = ?
-        """,
-        [as_of_date],
-    ).fetchone()
-    return _normalize_snapshot_date(row[0] if row else None)
+    
+    query = f"""
+    SELECT DISTINCT snapshot_date
+    FROM read_parquet('{snapshot_path}', hive_partitioning=1)
+    WHERE snapshot_date = ?
+    LIMIT 1
+    """
+    
+    result = conn.execute(query, [as_of_date]).fetchone()
+    return _normalize_snapshot_date(result[0] if result else None)
 
 
 def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end: date) -> pd.DataFrame:
-    ensure_duckdb_view_groups({"inventory", "sales", "dims"})
-    conn = get_duckdb_connection()
-    query = """
-        WITH on_hand AS (
+    """Stock levels using SQLite MVs + Polars for dimensions.
+    
+    Note: Cross-domain join (inventory + sales + dimensions).
+    Uses SQLite MVs for inventory/sales aggregates, Polars for dimension parquet.
+    """
+    import polars as pl
+    from services.sqlite_manager import SQLiteManager
+    
+    # Get inventory snapshot from SQLite MV
+    manager = SQLiteManager()
+    with manager.reader_conn() as conn:
+        on_hand_df = pd.read_sql_query(
+            """
             SELECT
                 product_id,
-                SUM(quantity) AS on_hand_qty,
-                SUM(reserved_quantity) AS reserved_qty
-            FROM fact_stock_on_hand_snapshot
+                SUM(qty_on_hand) AS on_hand_qty
+            FROM mv_inventory_daily
             WHERE snapshot_date = ?
-            GROUP BY 1
-        ),
-        sales AS (
+            GROUP BY product_id
+            """,
+            conn,
+            params=[snapshot_date]
+        )
+    
+    # Get sales aggregates from SQLite MV
+    with manager.reader_conn() as conn:
+        sales_df = pd.read_sql_query(
+            """
             SELECT
                 product_id,
                 SUM(quantity) AS units_sold
-            FROM fact_sales_all
-            WHERE date >= ? AND date < ? + INTERVAL 1 DAY
-            GROUP BY 1
+            FROM mv_sales_by_product
+            WHERE date >= ? AND date < date(?, '+1 day')
+            GROUP BY product_id
+            """,
+            conn,
+            params=[lookback_start, lookback_end]
         )
-        SELECT
-            o.product_id,
-            COALESCE(p.product_name, 'Product ' || o.product_id::VARCHAR) AS product_name,
-            COALESCE(p.product_category, 'Unknown Category') AS product_category,
-            COALESCE(p.product_brand, 'Unknown Brand') AS product_brand,
-            COALESCE(p.product_barcode, '') AS product_barcode,
-            COALESCE(p.product_sku, '') AS product_sku,
-            o.on_hand_qty,
-            o.reserved_qty,
-            COALESCE(s.units_sold, 0) AS units_sold
-        FROM on_hand o
-        LEFT JOIN sales s ON o.product_id = s.product_id
-        LEFT JOIN dim_products p ON o.product_id = p.product_id
-        ORDER BY o.on_hand_qty DESC
-    """
-
-    return conn.execute(query, [snapshot_date, lookback_start, lookback_end]).df()
+    
+    # Load dimensions from parquet using Polars
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    dim_path = f"{data_lake_root}/star-schema/dim_products.parquet"
+    
+    if os.path.exists(dim_path):
+        dim_df = pl.read_parquet(dim_path).to_pandas()
+    else:
+        # Fallback: empty dimensions
+        dim_df = pd.DataFrame(columns=['product_id', 'product_name', 'product_category', 
+                                       'product_brand', 'product_barcode', 'product_sku'])
+    
+    # Join data
+    result = on_hand_df.merge(sales_df, on='product_id', how='left')
+    result = result.merge(dim_df, on='product_id', how='left')
+    
+    # Fill missing values
+    result['units_sold'] = result['units_sold'].fillna(0)
+    result['reserved_qty'] = 0  # Not available in current MV schema
+    
+    # Format product name fallback
+    result['product_name'] = result['product_name'].fillna(
+        result['product_id'].apply(lambda x: f'Product {x}')
+    )
+    result['product_category'] = result['product_category'].fillna('Unknown Category')
+    result['product_brand'] = result['product_brand'].fillna('Unknown Brand')
+    result['product_barcode'] = result['product_barcode'].fillna('')
+    result['product_sku'] = result['product_sku'].fillna('')
+    
+    # Select and order columns
+    result = result[['product_id', 'product_name', 'product_category', 'product_brand',
+                     'product_barcode', 'product_sku', 'on_hand_qty', 'reserved_qty', 'units_sold']]
+    result = result.sort_values('on_hand_qty', ascending=False)
+    
+    return result
 
 
 def _data_lake_root() -> str:
@@ -144,7 +183,6 @@ def _parse_reconcile_stocks_csv(path: Path) -> pd.DataFrame:
     return df
 
 
-@lru_cache(maxsize=1)
 def _load_ledger_baseline() -> pd.DataFrame:
     baseline_path = _resolve_ledger_baseline_path()
     return _parse_reconcile_stocks_csv(baseline_path)
@@ -155,27 +193,46 @@ def _query_location_ledger_deltas(
     end_ts: datetime,
     location_pool: set,
 ) -> pd.DataFrame:
-    ensure_duckdb_view_groups({"inventory"})
-    conn = get_duckdb_connection()
+    """Query inventory movement deltas using Polars parquet read."""
+    import polars as pl
+    
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    moves_path = f"{data_lake_root}/star-schema/fact_inventory_moves/**/*.parquet"
+    
     pool_values = sorted(location_pool)
-    pool_sql = ",".join(str(v) for v in pool_values)
-    query = """
-        SELECT
-            product_id,
-            SUM(
-                CASE
-                    WHEN location_dest_id IN ({pool_sql}) AND (location_src_id IS NULL OR location_src_id NOT IN ({pool_sql}))
-                        THEN ABS(qty_moved)
-                    WHEN location_src_id IN ({pool_sql}) AND (location_dest_id IS NULL OR location_dest_id NOT IN ({pool_sql}))
-                        THEN -ABS(qty_moved)
-                    ELSE 0
-                END
-            ) AS qty_delta
-        FROM fact_inventory_moves
-        WHERE movement_date > ? AND movement_date <= ?
-        GROUP BY 1
-    """.format(pool_sql=pool_sql)
-    return conn.execute(query, [start_ts, end_ts]).df()
+    
+    # Read and filter inventory moves using Polars
+    if os.path.exists(moves_path.replace("/**/*.parquet", "")):
+        df = pl.scan_parquet(moves_path, hive_partitioning=True).filter(
+            (pl.col("movement_date") > start_ts) & 
+            (pl.col("movement_date") <= end_ts)
+        ).collect().to_pandas()
+        
+        if df.empty:
+            return pd.DataFrame(columns=['product_id', 'qty_delta'])
+        
+        # Calculate qty_delta based on location pool logic
+        def calculate_delta(row):
+            dest_id = row.get('location_dest_id')
+            src_id = row.get('location_src_id')
+            qty = abs(row.get('qty_moved', 0))
+            
+            # Incoming to pool
+            if dest_id in pool_values and (src_id is None or src_id not in pool_values):
+                return qty
+            # Outgoing from pool
+            elif src_id in pool_values and (dest_id is None or dest_id not in pool_values):
+                return -qty
+            else:
+                return 0
+        
+        df['qty_delta'] = df.apply(calculate_delta, axis=1)
+        
+        # Aggregate by product
+        result = df.groupby('product_id', as_index=False).agg({'qty_delta': 'sum'})
+        return result
+    else:
+        return pd.DataFrame(columns=['product_id', 'qty_delta'])
 
 
 def get_stock_levels_ledger(
@@ -313,197 +370,166 @@ def get_stock_levels_ledger(
     }
 
 
-def get_stock_levels(
-    as_of_date: date,
-    lookback_days: int = DEFAULT_STOCK_LOOKBACK_DAYS,
-    low_stock_days: int = DEFAULT_LOW_STOCK_DAYS,
-) -> Dict[str, object]:
-    if not isinstance(as_of_date, date):
-        as_of_date = date.today()
-
-    lookback_days = max(1, int(lookback_days or DEFAULT_STOCK_LOOKBACK_DAYS))
-    snapshot_date = _get_snapshot_date(as_of_date)
-
-    empty_items = pd.DataFrame(columns=[
-        "product_id", "product_name", "product_category", "product_brand",
-        "on_hand_qty", "reserved_qty", "units_sold", "avg_daily_sold",
-        "days_of_cover", "low_stock_flag", "dead_stock_flag",
-    ])
-
-    if snapshot_date is None:
-        return {
-            "snapshot_date": None,
-            "items": empty_items,
-            "summary": {
-                "total_on_hand": 0.0,
-                "low_stock_count": 0,
-                "dead_stock_count": 0,
-                "lookback_days": lookback_days,
-                "low_stock_days": low_stock_days,
-            },
-        }
-
-    lookback_start = as_of_date - timedelta(days=lookback_days - 1)
-    df = _query_stock_levels(snapshot_date, lookback_start, as_of_date)
-
-    if df.empty:
-        return {
-            "snapshot_date": snapshot_date,
-            "items": empty_items,
-            "summary": {
-                "total_on_hand": 0.0,
-                "low_stock_count": 0,
-                "dead_stock_count": 0,
-                "lookback_days": lookback_days,
-                "low_stock_days": low_stock_days,
-            },
-        }
-
-    df = df.copy()
-    df["on_hand_qty"] = pd.to_numeric(df["on_hand_qty"], errors="coerce").fillna(0)
-    df["reserved_qty"] = pd.to_numeric(df["reserved_qty"], errors="coerce").fillna(0)
-    df["units_sold"] = pd.to_numeric(df["units_sold"], errors="coerce").fillna(0)
-
-    df["avg_daily_sold"] = df["units_sold"] / float(lookback_days)
-    df["days_of_cover"] = df["on_hand_qty"] / df["avg_daily_sold"].replace(0, pd.NA)
-
-    df["low_stock_flag"] = df["days_of_cover"].notna() & (df["days_of_cover"] < low_stock_days)
-    df["dead_stock_flag"] = (df["on_hand_qty"] > 0) & (df["units_sold"] <= 0)
-
-    total_on_hand = float(df["on_hand_qty"].sum())
-    if math.isclose(total_on_hand, 0.0, abs_tol=1e-9):
-        total_on_hand = 0.0
-
-    summary = {
-        "total_on_hand": total_on_hand,
-        "low_stock_count": int(df["low_stock_flag"].sum()),
-        "dead_stock_count": int(df["dead_stock_flag"].sum()),
-        "lookback_days": lookback_days,
-        "low_stock_days": low_stock_days,
-    }
-
-    return {
-        "snapshot_date": snapshot_date,
-        "items": df,
-        "summary": summary,
-    }
-
 
 def _query_sell_through(snapshot_date: date, start_date: date, end_date: date) -> pd.DataFrame:
-    ensure_duckdb_view_groups({"inventory", "sales", "dims"})
+    """Sell-through using SQLite MVs + Polars for parquet reads.
     
-    # Load inventory materialized views for faster queries
-    db_manager = DuckDBManager()
-    db_manager.ensure_materialized_views({"mv_inventory_status", "mv_inventory_daily", "mv_product_velocity"})
+    Note: Cross-domain join (inventory + sales + inventory moves + dimensions).
+    Uses SQLite MVs for inventory/sales aggregates, Polars for inventory moves/dimensions parquet.
+    """
+    import polars as pl
+    from services.sqlite_manager import SQLiteManager
     
-    conn = get_duckdb_connection()
-    query = """
-        WITH begin_on_hand AS (
+    # Get inventory snapshot from SQLite MV
+    manager = SQLiteManager()
+    with manager.reader_conn() as conn:
+        on_hand_df = pd.read_sql_query(
+            """
             SELECT
                 product_id,
-                SUM(quantity) AS begin_on_hand
-            FROM fact_stock_on_hand_snapshot
+                SUM(qty_on_hand) AS begin_on_hand
+            FROM mv_inventory_daily
             WHERE snapshot_date = ?
-            GROUP BY 1
-        ),
-        sales AS (
+            GROUP BY product_id
+            """,
+            conn,
+            params=[snapshot_date]
+        )
+    
+    # Get sales aggregates from SQLite MV
+    with manager.reader_conn() as conn:
+        sales_df = pd.read_sql_query(
+            """
             SELECT
                 product_id,
                 SUM(quantity) AS units_sold
-            FROM fact_sales_all
-            WHERE date >= ? AND date < ? + INTERVAL 1 DAY
-            GROUP BY 1
-        ),
-        moves AS (
-            SELECT
-                product_id,
-                SUM(
-                    CASE
-                        WHEN qty_moved > 0
-                             AND (
-                                COALESCE(movement_type, '') = 'incoming'
-                                OR (
-                                    COALESCE(movement_type, '') = ''
-                                    AND COALESCE(picking_type_code, '') = 'incoming'
-                                )
-                             )
-                        THEN qty_moved
-                        ELSE 0
-                    END
-                ) AS units_incoming,
-                SUM(
-                    CASE
-                        WHEN qty_moved > 0 AND COALESCE(movement_type, '') = 'production_in'
-                        THEN qty_moved
-                        ELSE 0
-                    END
-                ) AS units_production_in,
-                SUM(
-                    CASE
-                        WHEN COALESCE(movement_type, '') = 'adjustment'
-                        THEN qty_moved
-                        ELSE 0
-                    END
-                ) AS units_adjustment_net,
-                SUM(
-                    CASE
-                        WHEN COALESCE(movement_type, '') = 'production_out'
-                        THEN qty_moved
-                        ELSE 0
-                    END
-                ) AS units_production_out,
-                SUM(
-                    CASE
-                        WHEN COALESCE(movement_type, '') = 'transfer'
-                        THEN qty_moved
-                        ELSE 0
-                    END
-                ) AS units_transfer_net
-            FROM fact_inventory_moves
-            WHERE movement_date >= ? AND movement_date < ? + INTERVAL 1 DAY
-            GROUP BY 1
-        ),
-        combined AS (
-            SELECT
-                COALESCE(b.product_id, s.product_id, m.product_id) AS product_id,
-                COALESCE(b.begin_on_hand, 0) AS begin_on_hand,
-                COALESCE(m.units_incoming, 0) + COALESCE(m.units_production_in, 0) AS units_received,
-                COALESCE(m.units_incoming, 0) AS units_incoming,
-                COALESCE(m.units_production_in, 0) AS units_production_in,
-                COALESCE(m.units_adjustment_net, 0) AS units_adjustment_net,
-                COALESCE(m.units_production_out, 0) AS units_production_out,
-                COALESCE(m.units_transfer_net, 0) AS units_transfer_net,
-                COALESCE(s.units_sold, 0) AS units_sold
-            FROM begin_on_hand b
-            FULL JOIN sales s ON b.product_id = s.product_id
-            FULL JOIN moves m ON COALESCE(b.product_id, s.product_id) = m.product_id
+            FROM mv_sales_by_product
+            WHERE date >= ? AND date < date(?, '+1 day')
+            GROUP BY product_id
+            """,
+            conn,
+            params=[start_date, end_date]
         )
-        SELECT
-            c.product_id,
-            COALESCE(p.product_name, 'Product ' || c.product_id::VARCHAR) AS product_name,
-            COALESCE(p.product_category, 'Unknown Category') AS product_category,
-            COALESCE(p.product_brand, 'Unknown Brand') AS product_brand,
-            COALESCE(p.product_barcode, '') AS product_barcode,
-            COALESCE(p.product_sku, '') AS product_sku,
-            c.begin_on_hand,
-            c.units_received,
-            c.units_incoming,
-            c.units_production_in,
-            c.units_adjustment_net,
-            c.units_production_out,
-            c.units_transfer_net,
-            c.units_sold,
-            CASE
-                WHEN (c.begin_on_hand + c.units_received) = 0 THEN NULL
-                ELSE c.units_sold / (c.begin_on_hand + c.units_received)
-            END AS sell_through
-        FROM combined c
-        LEFT JOIN dim_products p ON c.product_id = p.product_id
-        WHERE c.product_id IS NOT NULL
-        ORDER BY c.units_sold DESC
-    """
-
-    return conn.execute(query, [snapshot_date, start_date, end_date, start_date, end_date]).df()
+    
+    # Load inventory moves from parquet using Polars
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    moves_path = f"{data_lake_root}/star-schema/fact_inventory_moves/**/*.parquet"
+    
+    if os.path.exists(moves_path.replace("/**/*.parquet", "")):
+        # Read and filter by date range
+        moves_df = pl.scan_parquet(moves_path, hive_partitioning=True).filter(
+            (pl.col("movement_date") >= start_date) & 
+            (pl.col("movement_date") < end_date + timedelta(days=1))
+        ).collect().to_pandas()
+        
+        # Replicate CTE movement_type classifications
+        moves_df['qty_moved'] = pd.to_numeric(moves_df.get('qty_moved', 0), errors='coerce').fillna(0)
+        moves_df['movement_type'] = moves_df.get('movement_type', '').fillna('')
+        moves_df['picking_type_code'] = moves_df.get('picking_type_code', '').fillna('')
+        
+        # Classify movements
+        def classify_movement(row):
+            qty = row['qty_moved']
+            mtype = row['movement_type']
+            pcode = row['picking_type_code']
+            
+            if qty <= 0:
+                return 0, 0, 0, 0, 0
+            
+            units_incoming = 0
+            units_production_in = 0
+            units_adjustment = 0
+            units_production_out = 0
+            units_transfer = 0
+            
+            if mtype == 'incoming' or (mtype == '' and pcode == 'incoming'):
+                units_incoming = qty
+            elif mtype == 'production_in':
+                units_production_in = qty
+            elif mtype == 'adjustment':
+                units_adjustment = qty
+            elif mtype == 'production_out':
+                units_production_out = qty
+            elif mtype == 'transfer':
+                units_transfer = qty
+            
+            return units_incoming, units_production_in, units_adjustment, units_production_out, units_transfer
+        
+        movement_cols = moves_df.apply(classify_movement, axis=1, result_type='expand')
+        moves_df['units_incoming'] = movement_cols[0]
+        moves_df['units_production_in'] = movement_cols[1]
+        moves_df['units_adjustment_net'] = movement_cols[2]
+        moves_df['units_production_out'] = movement_cols[3]
+        moves_df['units_transfer_net'] = movement_cols[4]
+        
+        # Aggregate by product
+        moves_agg = moves_df.groupby('product_id', as_index=False).agg({
+            'units_incoming': 'sum',
+            'units_production_in': 'sum',
+            'units_adjustment_net': 'sum',
+            'units_production_out': 'sum',
+            'units_transfer_net': 'sum'
+        })
+    else:
+        # Fallback: empty moves
+        moves_agg = pd.DataFrame(columns=[
+            'product_id', 'units_incoming', 'units_production_in',
+            'units_adjustment_net', 'units_production_out', 'units_transfer_net'
+        ])
+    
+    # Load dimensions from parquet using Polars
+    dim_path = f"{data_lake_root}/star-schema/dim_products.parquet"
+    
+    if os.path.exists(dim_path):
+        dim_df = pl.read_parquet(dim_path).to_pandas()
+    else:
+        # Fallback: empty dimensions
+        dim_df = pd.DataFrame(columns=['product_id', 'product_name', 'product_category', 
+                                       'product_brand', 'product_barcode', 'product_sku'])
+    
+    # Join data using Pandas (replicate FULL JOIN logic with outer merges)
+    combined = on_hand_df.merge(sales_df, on='product_id', how='outer')
+    combined = combined.merge(moves_agg, on='product_id', how='outer')
+    
+    # Fill missing values
+    combined['begin_on_hand'] = combined['begin_on_hand'].fillna(0)
+    combined['units_sold'] = combined['units_sold'].fillna(0)
+    combined['units_incoming'] = combined['units_incoming'].fillna(0)
+    combined['units_production_in'] = combined['units_production_in'].fillna(0)
+    combined['units_adjustment_net'] = combined['units_adjustment_net'].fillna(0)
+    combined['units_production_out'] = combined['units_production_out'].fillna(0)
+    combined['units_transfer_net'] = combined['units_transfer_net'].fillna(0)
+    
+    # Calculate derived columns
+    combined['units_received'] = combined['units_incoming'] + combined['units_production_in']
+    
+    # Join with dimensions
+    result = combined.merge(dim_df, on='product_id', how='left')
+    
+    # Format product name fallback
+    result['product_name'] = result['product_name'].fillna(
+        result['product_id'].apply(lambda x: f'Product {x}')
+    )
+    result['product_category'] = result['product_category'].fillna('Unknown Category')
+    result['product_brand'] = result['product_brand'].fillna('Unknown Brand')
+    result['product_barcode'] = result['product_barcode'].fillna('')
+    result['product_sku'] = result['product_sku'].fillna('')
+    
+    # Calculate sell-through ratio
+    result['sell_through'] = result.apply(
+        lambda row: row['units_sold'] / (row['begin_on_hand'] + row['units_received'])
+        if (row['begin_on_hand'] + row['units_received']) > 0 else None,
+        axis=1
+    )
+    
+    # Select and order columns
+    result = result[['product_id', 'product_name', 'product_category', 'product_brand',
+                     'product_barcode', 'product_sku', 'begin_on_hand', 'units_received',
+                     'units_incoming', 'units_production_in', 'units_adjustment_net',
+                     'units_production_out', 'units_transfer_net', 'units_sold', 'sell_through']]
+    result = result.sort_values('units_sold', ascending=False)
+    
+    return result
 
 
 def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, object]:
@@ -604,31 +630,50 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
 
 
 def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
-    ensure_duckdb_view_groups({"sales", "dims", "sales_agg"})
+    """ABC analysis using SQLite sales aggregates + Polars for dimensions.
     
-    # Load sales materialized views for faster queries
-    db_manager = DuckDBManager()
-    db_manager.ensure_materialized_views({"mv_sales_daily", "mv_sales_by_product"})
-    
-    conn = get_duckdb_connection()
+    Note: This query requires cross-domain join (sales + dimensions).
+    Uses SQLite MV for sales aggregates and Polars for dimension parquet.
+    """
+    import polars as pl
+    from services.sqlite_manager import SQLiteManager
     
     query_start = time.time()
-    query = """
-        SELECT
-            s.product_id,
-            SUM(s.revenue) as revenue,
-            SUM(s.quantity) as quantity,
-            p.product_name,
-            p.product_category,
-            p.product_brand
-        FROM fact_sales_all s
-        LEFT JOIN dim_products p ON s.product_id = p.product_id
-        WHERE s.date >= ? AND s.date < ? + INTERVAL 1 DAY
-        GROUP BY 1, 4, 5, 6
-        ORDER BY 2 DESC
-    """
     
-    result = conn.execute(query, [start_date, end_date]).fetchdf()
+    # Get sales aggregates from SQLite MV
+    manager = SQLiteManager()
+    with manager.reader_conn() as conn:
+        sales_df = pd.read_sql_query(
+            """
+            SELECT 
+                product_id,
+                SUM(revenue) as revenue,
+                SUM(quantity) as quantity
+            FROM mv_sales_by_product
+            WHERE date >= ? AND date < date(?, '+1 day')
+            GROUP BY product_id
+            """,
+            conn,
+            params=[start_date, end_date]
+        )
+    
+    # Load dimensions from parquet using Polars
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    dim_path = f"{data_lake_root}/star-schema/dim_products.parquet"
+    
+    if os.path.exists(dim_path):
+        dim_df = pl.read_parquet(dim_path).to_pandas()
+        # Join sales with dimensions
+        result = sales_df.merge(dim_df, on='product_id', how='left')
+        result = result[['product_id', 'revenue', 'quantity', 'product_name', 'product_category', 'product_brand']]
+        result = result.sort_values('revenue', ascending=False)
+    else:
+        # Fallback: return sales data without dimensions
+        result = sales_df
+        result['product_name'] = None
+        result['product_category'] = None
+        result['product_brand'] = None
+    
     print(f"[TIMING] get_abc_analysis: {time.time() - query_start:.3f}s")
     return result
 
@@ -640,7 +685,7 @@ def query_inventory_summary(
     low_stock_days: int = 14,
 ) -> Dict:
     """
-    Return summary counts for executive summary cards.
+    Return summary counts for executive summary cards using SQLite MVs + Polars.
 
     Returns: {
         'overstock_value': float,  # inventory value of overstock items
@@ -651,125 +696,160 @@ def query_inventory_summary(
         'total_sku_count': int,
     }
     """
-    from services.duckdb_connector import get_duckdb_connection
-    from services.duckdb_connector import ensure_duckdb_view_groups
-
+    import polars as pl
+    from services.sqlite_manager import SQLiteManager
+    
     # Defensive: Limit lookback to prevent excessive queries
     lookback_days = min(lookback_days, 90)  # Max 90 days lookback
     lookback_start = snapshot_date - timedelta(days=lookback_days - 1)
 
-    ensure_duckdb_view_groups({"inventory", "sales", "dims"})
-    
-    # Load materialized views for ultra-fast queries
-    db_manager = DuckDBManager()
-    db_manager.ensure_materialized_views({"mv_inventory_status", "mv_inventory_daily", "mv_product_velocity"})
-    
-    conn = get_duckdb_connection()
-
     query_start = time.time()
     
-    # Use materialized views for faster query performance
-    query = """
-        WITH latest_stock AS (
-            SELECT 
+    # Get inventory snapshot from SQLite MV
+    manager = SQLiteManager()
+    with manager.reader_conn() as conn:
+        stock_df = pd.read_sql_query(
+            """
+            SELECT
                 product_id,
-                on_hand_qty,
-                available_qty,
-                avg_daily_sold,
-                days_of_cover,
-                stock_status
-            FROM mv_inventory_status
-        ),
-        sales_30d AS (
-            SELECT 
+                SUM(qty_on_hand) AS on_hand_qty
+            FROM mv_inventory_daily
+            WHERE snapshot_date = ?
+            GROUP BY product_id
+            """,
+            conn,
+            params=[snapshot_date]
+        )
+    
+    # Get sales aggregates from SQLite MV
+    with manager.reader_conn() as conn:
+        sales_df = pd.read_sql_query(
+            """
+            SELECT
                 product_id,
                 SUM(quantity) AS units_sold,
                 SUM(revenue) AS revenue
-            FROM fact_sales_all
-            WHERE date >= ? AND date <= ?
-            GROUP BY 1
-        ),
-        with_value AS (
-            SELECT
-                ls.product_id,
-                ls.on_hand_qty,
-                ls.days_of_cover,
-                ls.stock_status,
-                COALESCE(s.revenue, 0) AS revenue,
-                COALESCE(s.units_sold, 0) AS units_sold,
-                CASE
-                    WHEN COALESCE(s.units_sold, 0) = 0 THEN 0
-                    ELSE ls.on_hand_qty * (s.revenue / NULLIF(s.units_sold, 0))
-                END AS est_stock_value
-            FROM latest_stock ls
-            LEFT JOIN sales_30d s ON ls.product_id = s.product_id
+            FROM mv_sales_by_product
+            WHERE date >= ? AND date < date(?, '+1 day')
+            GROUP BY product_id
+            """,
+            conn,
+            params=[lookback_start, snapshot_date]
         )
-        SELECT
-            COUNT(*) AS total_sku_count,
-            SUM(est_stock_value) AS total_inventory_value,
-            SUM(CASE WHEN stock_status = 'dead_stock' THEN 1 ELSE 0 END) AS dead_stock_count,
-            SUM(CASE WHEN stock_status = 'low_stock' THEN 1 ELSE 0 END) AS low_stock_count,
-            SUM(CASE WHEN stock_status = 'overstock' THEN 1 ELSE 0 END) AS overstock_sku_count,
-            SUM(CASE WHEN stock_status = 'overstock' THEN est_stock_value ELSE 0 END) AS overstock_value
-        FROM with_value
-    """
-
-    result = conn.execute(
-        query,
-        [lookback_start, snapshot_date]
-    ).fetchone()
+    
+    # Calculate avg_daily_sold from sales data
+    if not sales_df.empty:
+        sales_df['avg_daily_sold'] = sales_df['units_sold'] / lookback_days
+    else:
+        sales_df = pd.DataFrame(columns=['product_id', 'units_sold', 'revenue', 'avg_daily_sold'])
+    
+    # Join stock and sales data
+    combined = stock_df.merge(sales_df, on='product_id', how='left')
+    
+    # Fill missing values
+    combined['units_sold'] = combined['units_sold'].fillna(0)
+    combined['revenue'] = combined['revenue'].fillna(0)
+    combined['avg_daily_sold'] = combined['avg_daily_sold'].fillna(0)
+    
+    # Calculate days_of_cover
+    combined['days_of_cover'] = combined.apply(
+        lambda row: row['on_hand_qty'] / row['avg_daily_sold'] if row['avg_daily_sold'] > 0 else 999999,
+        axis=1
+    )
+    
+    # Classify stock_status
+    def classify_stock_status(row):
+        if row['units_sold'] == 0:
+            return 'dead_stock'
+        elif row['days_of_cover'] < low_stock_days:
+            return 'low_stock'
+        elif row['days_of_cover'] > overstock_days:
+            return 'overstock'
+        else:
+            return 'healthy'
+    
+    combined['stock_status'] = combined.apply(classify_stock_status, axis=1)
+    
+    # Calculate est_stock_value
+    combined['est_stock_value'] = combined.apply(
+        lambda row: row['on_hand_qty'] * (row['revenue'] / row['units_sold']) if row['units_sold'] > 0 else 0,
+        axis=1
+    )
+    
+    # Calculate summary metrics
+    total_sku_count = len(combined)
+    total_inventory_value = combined['est_stock_value'].sum()
+    dead_stock_count = (combined['stock_status'] == 'dead_stock').sum()
+    low_stock_count = (combined['stock_status'] == 'low_stock').sum()
+    overstock_sku_count = (combined['stock_status'] == 'overstock').sum()
+    overstock_value = combined[combined['stock_status'] == 'overstock']['est_stock_value'].sum()
     
     print(f"[TIMING] query_inventory_summary: {time.time() - query_start:.3f}s")
 
     return {
-        'total_sku_count': int(result[0] or 0),
-        'total_inventory_value': float(result[1] or 0),
-        'dead_stock_count': int(result[2] or 0),
-        'low_stock_count': int(result[3] or 0),
-        'overstock_sku_count': int(result[4] or 0),
-        'overstock_value': float(result[5] or 0),
+        'total_sku_count': int(total_sku_count),
+        'total_inventory_value': float(total_inventory_value),
+        'dead_stock_count': int(dead_stock_count),
+        'low_stock_count': int(low_stock_count),
+        'overstock_sku_count': int(overstock_sku_count),
+        'overstock_value': float(overstock_value),
     }
 
 
 def get_inventory_costs(as_of_date: date) -> pd.DataFrame:
-    """Fetch latest known unit cost per product as of the given date.
+    """Fetch latest known unit cost per product as of the given date using Polars parquet reads.
 
     First tries purchase history from fact_product_cost_latest_daily.
     Falls back to beginning costs from CSV for products never purchased.
 
     Returns DataFrame with columns: product_id, cost_unit_tax_in
     """
-    ensure_duckdb_view_groups({"profit_detail"})
-    conn = get_duckdb_connection()
-
+    import polars as pl
+    
+    data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+    
     # Query 1: Get costs from purchase history
-    purchase_query = """
-        SELECT
-            product_id,
-            cost_unit_tax_in
-        FROM fact_product_cost_latest_daily
-        WHERE date <= ?
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY date DESC) = 1
-    """
-    purchase_costs = conn.execute(purchase_query, [as_of_date]).fetchdf()
-
+    cost_latest_path = f"{data_lake_root}/star-schema/fact_product_cost_latest_daily/**/*.parquet"
+    
+    if os.path.exists(cost_latest_path.replace("/**/*.parquet", "")):
+        purchase_df = pl.scan_parquet(cost_latest_path, hive_partitioning=True).filter(
+            pl.col("date") <= as_of_date
+        ).collect().to_pandas()
+        
+        if not purchase_df.empty:
+            # Get latest cost per product as of as_of_date
+            purchase_df = purchase_df.sort_values(['product_id', 'date'], ascending=[True, False])
+            purchase_df = purchase_df.drop_duplicates(subset=['product_id'], keep='first')
+            purchase_costs = purchase_df[['product_id', 'cost_unit_tax_in']].copy()
+        else:
+            purchase_costs = pd.DataFrame(columns=['product_id', 'cost_unit_tax_in'])
+    else:
+        purchase_costs = pd.DataFrame(columns=['product_id', 'cost_unit_tax_in'])
+    
     # Query 2: Get beginning costs for products without purchase history
     # Only use beginning costs if as_of_date >= effective_date (2025-02-10)
-    beginning_query = """
-        SELECT
-            b.product_id,
-            b.cost_unit_tax_in
-        FROM fact_product_beginning_costs b
-        LEFT JOIN (
-            SELECT DISTINCT product_id
-            FROM fact_product_cost_latest_daily
-            WHERE date <= ?
-        ) p ON b.product_id = p.product_id
-        WHERE p.product_id IS NULL
-          AND b.is_active = TRUE
-          AND b.effective_date <= ?
-    """
-    beginning_costs = conn.execute(beginning_query, [as_of_date, as_of_date]).fetchdf()
+    beginning_path = f"{data_lake_root}/star-schema/fact_product_beginning_costs.parquet"
+    
+    if os.path.exists(beginning_path):
+        beginning_df = pl.read_parquet(beginning_path).to_pandas()
+        
+        if not beginning_df.empty:
+            # Filter for products not in purchase_costs
+            products_with_costs = set(purchase_costs['product_id']) if not purchase_costs.empty else set()
+            beginning_df = beginning_df[
+                (~beginning_df['product_id'].isin(products_with_costs)) &
+                (beginning_df['is_active'] == True) &
+                (beginning_df['effective_date'] <= as_of_date)
+            ]
+            beginning_costs = beginning_df[['product_id', 'cost_unit_tax_in']].copy()
+        else:
+            beginning_costs = pd.DataFrame(columns=['product_id', 'cost_unit_tax_in'])
+    else:
+        beginning_costs = pd.DataFrame(columns=['product_id', 'cost_unit_tax_in'])
+    
+    # Combine results
+    result = pd.concat([purchase_costs, beginning_costs], ignore_index=True)
+    return result
 
     # Combine both sources
     if purchase_costs.empty:
