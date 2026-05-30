@@ -205,8 +205,8 @@ def _query_location_ledger_deltas(
     # Read and filter inventory moves using Polars
     if os.path.exists(moves_path.replace("/**/*.parquet", "")):
         df = pl.scan_parquet(moves_path, hive_partitioning=True).filter(
-            (pl.col("date") > start_ts) & 
-            (pl.col("date") <= end_ts)
+            (pl.col("date").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S") > start_ts) & 
+            (pl.col("date").str.strptime(pl.Datetime, "%Y-%m-%d %H:%M:%S") <= end_ts)
         ).collect().to_pandas()
         
         if df.empty:
