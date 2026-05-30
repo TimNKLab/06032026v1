@@ -352,6 +352,36 @@ def get_stock_levels_ledger(
 # Previously used SQLite MVs which no longer exist
 
 
+def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, object]:
+    """Stub function - sell-through analysis deferred due to complexity.
+    
+    Previously required fact_inventory_moves data and complex CTE structure.
+    Returns empty data structure to prevent page load errors.
+    """
+    empty_items = pd.DataFrame(columns=[
+        "product_id", "product_name", "product_category", "product_brand",
+        "product_barcode", "product_sku",
+        "begin_on_hand", "units_received", "units_incoming", "units_production_in",
+        "units_adjustment_net", "units_production_out", "units_transfer_net",
+        "units_sold", "sell_through",
+    ])
+
+    empty_categories = pd.DataFrame(columns=[
+        "product_category", "begin_on_hand", "units_received", "units_sold", "sell_through",
+    ])
+
+    return {
+        "snapshot_date": None,
+        "items": empty_items,
+        "categories": empty_categories,
+        "summary": {
+            "sell_through": 0.0,
+            "units_sold": 0.0,
+            "units_received": 0.0,
+            "begin_on_hand": 0.0,
+        },
+    }
+
 def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
     """ABC analysis using DuckDB sales aggregates + Polars for dimensions.
     
