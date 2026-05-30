@@ -10,6 +10,28 @@ from typing import Dict, Optional
 import pandas as pd
 
 
+# COLUMN REFERENCE AUDIT LOG
+# Updated: 2026-05-30
+#
+# Polars Direct Parquet Access (uses raw parquet column names):
+# ----------------------------------------------------------------------
+# _query_location_ledger_deltas (line 170-214):
+#   - Source: fact_inventory_moves/**/*.parquet
+#   - Filter column: "date" ✓ (matches parquet schema)
+#   - Access columns: location_dest_id, location_src_id, qty_moved ✓ (verified)
+#
+# get_inventory_costs (line 516-567):
+#   - Source: fact_product_cost/**/*.parquet  
+#   - Filter column: "date" ✓ (matches DuckDB view definition)
+#   - Access columns: product_id, cost_unit_tax_in ✓ (verified)
+#
+# DuckDB View Access (uses view column names):
+# ----------------------------------------------------------------------
+# query_inventory_snapshot: Uses DuckDB view fact_stock_on_hand_snapshot
+# query_sales_by_product_duckdb: Uses DuckDB view mv_sales_by_product
+# These return column names as defined in DuckDB views, not raw parquet
+
+
 DEFAULT_ABC_THRESHOLDS = {
     "a": 0.2,
     "b": 0.5,
@@ -45,14 +67,16 @@ def _normalize_snapshot_date(value: Optional[object]) -> Optional[date]:
 
 
 def _get_snapshot_date(as_of_date: date) -> Optional[date]:
-    """Get snapshot date from DuckDB view over parquet."""
-    from services.duckdb_connector import get_duckdb_connection
+    """Get snapshot date from DuckDB view over parquet with read-only connection."""
+    from services.duckdb_connector import DuckDBManager
     import os
     
     data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
     snapshot_path = f"{data_lake_root}/star-schema/fact_stock_on_hand_snapshot/**/*.parquet"
     
-    conn = get_duckdb_connection()
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     query = f"""
     SELECT DISTINCT snapshot_date
@@ -181,8 +205,8 @@ def _query_location_ledger_deltas(
     # Read and filter inventory moves using Polars
     if os.path.exists(moves_path.replace("/**/*.parquet", "")):
         df = pl.scan_parquet(moves_path, hive_partitioning=True).filter(
-            (pl.col("movement_date") > start_ts) & 
-            (pl.col("movement_date") <= end_ts)
+            (pl.col("date") > start_ts) & 
+            (pl.col("date") <= end_ts)
         ).collect().to_pandas()
         
         if df.empty:
@@ -266,10 +290,6 @@ def get_stock_levels_ledger(
 
     lookback_start = as_of_date - timedelta(days=lookback_days - 1)
     ensure_duckdb_view_groups({"sales", "dims", "inventory"})
-    
-    # Load materialized views for faster queries
-    db_manager = DuckDBManager()
-    db_manager.ensure_materialized_views({"mv_inventory_status", "mv_inventory_daily", "mv_product_velocity"})
     
     conn = get_duckdb_connection()
     
