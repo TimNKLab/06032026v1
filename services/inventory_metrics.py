@@ -546,7 +546,7 @@ def get_inventory_costs(as_of_date: date) -> pd.DataFrame:
     
     if os.path.exists(cost_latest_path.replace("/**/*.parquet", "")):
         purchase_df = pl.scan_parquet(cost_latest_path, hive_partitioning=True).filter(
-            pl.col("date") <= as_of_date
+            pl.col("date").str.strptime(pl.Datetime, "%Y-%m-%d") <= as_of_date
         ).collect().to_pandas()
         
         if not purchase_df.empty:
