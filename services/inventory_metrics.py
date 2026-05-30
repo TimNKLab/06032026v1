@@ -662,7 +662,7 @@ def query_inventory_summary(
     low_stock_days: int = 14,
 ) -> Dict:
     """
-    Return summary counts for executive summary cards using SQLite MVs + Polars.
+    Return summary counts for executive summary cards using DuckDB parquet reads.
 
     Returns: {
         'overstock_value': float,  # inventory value of overstock items
@@ -673,8 +673,7 @@ def query_inventory_summary(
         'total_sku_count': int,
     }
     """
-    import polars as pl
-    from services.sqlite_manager import SQLiteManager
+    from services.duckdb_connector import query_inventory_snapshot, query_sales_by_product_duckdb
     
     # Defensive: Limit lookback to prevent excessive queries
     lookback_days = min(lookback_days, 90)  # Max 90 days lookback
@@ -682,37 +681,12 @@ def query_inventory_summary(
 
     query_start = time.time()
     
-    # Get inventory snapshot from SQLite MV
-    manager = SQLiteManager()
-    with manager.reader_conn() as conn:
-        stock_df = pd.read_sql_query(
-            """
-            SELECT
-                product_id,
-                SUM(qty_on_hand) AS on_hand_qty
-            FROM mv_inventory_daily
-            WHERE snapshot_date = ?
-            GROUP BY product_id
-            """,
-            conn,
-            params=[snapshot_date]
-        )
+    # Get inventory snapshot from DuckDB parquet
+    stock_df = query_inventory_snapshot(snapshot_date)
+    stock_df = stock_df.rename(columns={'qty_on_hand': 'on_hand_qty'})
     
-    # Get sales aggregates from SQLite MV
-    with manager.reader_conn() as conn:
-        sales_df = pd.read_sql_query(
-            """
-            SELECT
-                product_id,
-                SUM(quantity) AS units_sold,
-                SUM(revenue) AS revenue
-            FROM mv_sales_by_product
-            WHERE date >= ? AND date < date(?, '+1 day')
-            GROUP BY product_id
-            """,
-            conn,
-            params=[lookback_start, snapshot_date]
-        )
+    # Get sales aggregates from DuckDB parquet
+    sales_df = query_sales_by_product_duckdb(lookback_start, snapshot_date)
     
     # Calculate avg_daily_sold from sales data
     if not sales_df.empty:
