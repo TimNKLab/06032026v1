@@ -66,44 +66,21 @@ def _get_snapshot_date(as_of_date: date) -> Optional[date]:
 
 
 def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end: date) -> pd.DataFrame:
-    """Stock levels using SQLite MVs + Polars for dimensions.
+    """Stock levels using DuckDB parquet reads + Polars for dimensions.
     
     Note: Cross-domain join (inventory + sales + dimensions).
-    Uses SQLite MVs for inventory/sales aggregates, Polars for dimension parquet.
+    Uses DuckDB for inventory/sales aggregates, Polars for dimension parquet.
     """
     import polars as pl
-    from services.sqlite_manager import SQLiteManager
+    from services.duckdb_connector import query_inventory_snapshot, query_sales_by_product_duckdb
     
-    # Get inventory snapshot from SQLite MV
-    manager = SQLiteManager()
-    with manager.reader_conn() as conn:
-        on_hand_df = pd.read_sql_query(
-            """
-            SELECT
-                product_id,
-                SUM(qty_on_hand) AS on_hand_qty
-            FROM mv_inventory_daily
-            WHERE snapshot_date = ?
-            GROUP BY product_id
-            """,
-            conn,
-            params=[snapshot_date]
-        )
+    # Get inventory snapshot from DuckDB parquet
+    on_hand_df = query_inventory_snapshot(snapshot_date)
+    on_hand_df = on_hand_df.rename(columns={'qty_on_hand': 'on_hand_qty'})
     
-    # Get sales aggregates from SQLite MV
-    with manager.reader_conn() as conn:
-        sales_df = pd.read_sql_query(
-            """
-            SELECT
-                product_id,
-                SUM(quantity) AS units_sold
-            FROM mv_sales_by_product
-            WHERE date >= ? AND date < date(?, '+1 day')
-            GROUP BY product_id
-            """,
-            conn,
-            params=[lookback_start, lookback_end]
-        )
+    # Get sales aggregates from DuckDB parquet
+    sales_df = query_sales_by_product_duckdb(lookback_start, lookback_end)
+    sales_df = sales_df.rename(columns={'units_sold': 'units_sold'})
     
     # Load dimensions from parquet using Polars
     data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
@@ -122,7 +99,7 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
     
     # Fill missing values
     result['units_sold'] = result['units_sold'].fillna(0)
-    result['reserved_qty'] = 0  # Not available in current MV schema
+    result['reserved_qty'] = 0  # Not available in current schema
     
     # Format product name fallback
     result['product_name'] = result['product_name'].fillna(
