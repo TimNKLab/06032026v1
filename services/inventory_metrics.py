@@ -532,6 +532,11 @@ def query_inventory_summary(
     # Get sales aggregates from DuckDB parquet
     sales_df = query_sales_by_product_duckdb(lookback_start, snapshot_date)
     
+    # Filter sales to only products with inventory (reduce memory footprint)
+    product_ids_with_inventory = set(stock_df[stock_df['on_hand_qty'] != 0]['product_id'].tolist())
+    if product_ids_with_inventory:
+        sales_df = sales_df[sales_df['product_id'].isin(list(product_ids_with_inventory))]
+    
     # Calculate avg_daily_sold from sales data
     if not sales_df.empty:
         sales_df['avg_daily_sold'] = sales_df['units_sold'] / lookback_days
