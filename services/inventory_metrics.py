@@ -89,11 +89,24 @@ def _get_snapshot_date(as_of_date: date) -> Optional[date]:
     return _normalize_snapshot_date(result[0] if result else None)
 
 
-def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end: date) -> pd.DataFrame:
-    """Stock levels using DuckDB parquet reads + Polars for dimensions.
+def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end: date, limit: int = 5000) -> pd.DataFrame:
+    """Stock levels using Polars lazy evaluation + efficient filtering.
     
-    Note: Cross-domain join (inventory + sales + dimensions).
-    Uses DuckDB for inventory/sales aggregates, Polars for dimension parquet.
+    Memory optimization strategy:
+    1. Filter dimensions to only products with non-zero inventory
+    2. Filter sales to only those products
+    3. Use Polars lazy joins instead of pandas merges
+    4. Convert final result to pandas for UI compatibility
+    5. Limit result size to prevent UI overload
+    
+    Args:
+        snapshot_date: Date to query inventory snapshot
+        lookback_start: Start date for sales lookback period
+        lookback_end: End date for sales lookback period
+        limit: Maximum number of rows to return (default 5000)
+    
+    Returns:
+        DataFrame with stock levels data
     """
     import polars as pl
     from services.duckdb_connector import query_inventory_snapshot, query_sales_by_product_duckdb
