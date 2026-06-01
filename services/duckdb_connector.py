@@ -19,9 +19,6 @@ class DuckDBManager:
     _lock = threading.Lock()
     _initialized = False
     _initialized_groups: set[str] = set()
-    _materialized_views: set[str] = set()  # Track which MVs are loaded
-    _last_mv_refresh_ts: float = 0.0  # Timestamp of last MV reload known to this process
-    _needs_mv_reload: bool = False  # Flag to trigger MV reload in background
 
     def __new__(cls):
         if cls._instance is None:
@@ -30,44 +27,16 @@ class DuckDBManager:
                     cls._instance = super().__new__(cls)
         return cls._instance
 
-    def _check_mv_refresh_signal(self) -> None:
-        """Check Redis for MV refresh signal from celery-worker. Reload if stale."""
-        # Skip in celery workers - they use in-memory DuckDB, not file-backed
-        if os.environ.get('CELERY_WORKER_RUNNING') == '1':
-            return
-        try:
-            import redis as redis_lib
-            redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
-            r = redis_lib.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
-            val = r.get("mv:last_refresh_ts")
-            r.close()
-            if val is None:
-                return
-            remote_ts = float(val)
-            if remote_ts > self._last_mv_refresh_ts:
-                print(f"[duckdb] MV refresh signal detected (ts={remote_ts:.0f}), reloading connection...")
-                with self._lock:
-                    if remote_ts > self._last_mv_refresh_ts:
-                        # Close and reopen connection to pick up new MV data from file
-                        if self._connection is not None:
-                            try:
-                                self._connection.close()
-                            except Exception:
-                                pass
-                            self._connection = None
-                            self._initialized = False
-                            self._initialized_groups.clear()
-                            self._materialized_views.clear()
-                        self._last_mv_refresh_ts = remote_ts
-                        # Mark that MVs need reload - will be handled by ensure_materialized_views
-                        self._needs_mv_reload = True
-        except Exception:
-            pass  # Redis unavailable — skip silently
+    def get_readonly_connection(self) -> duckdb.DuckDBPyConnection:
+        """Returns in-memory connection for read operations to avoid file locks.
+        
+        Use this for queries that read parquet files directly.
+        In-memory connections don't hold file locks, preventing conflicts.
+        """
+        conn = duckdb.connect(database=':memory:')
+        return conn
 
     def get_connection(self) -> duckdb.DuckDBPyConnection:
-        # Check if MVs were refreshed externally (e.g., by celery-worker)
-        self._check_mv_refresh_signal()
-
         if self._connection is None:
             with self._lock:
                 if self._connection is None:
@@ -89,15 +58,6 @@ class DuckDBManager:
                         conn = duckdb.connect(database=db_path)
                         print(f"[duckdb] connecting to {db_path}...")
                     
-                    # Check if materialized views already exist (from previous run)
-                    existing_mvs = set()
-                    try:
-                        tables = conn.execute("SHOW TABLES").fetchall()
-                        existing_mvs = {t[0] for t in tables if t[0].startswith('mv_')}
-                        print(f"[duckdb] existing materialized views: {sorted(existing_mvs)}")
-                    except Exception:
-                        pass
-                    
                     preload_all = os.environ.get("PRELOAD_ALL_DUCKDB_VIEWS") in {"1", "true", "True", "yes", "YES"}
                     if preload_all:
                         self._setup_views(conn, groups={"all"})
@@ -107,41 +67,18 @@ class DuckDBManager:
                         self._setup_views(conn, groups={"overview"})
                         self._initialized_groups = {"overview"}
                     
-                    # Track which MVs are already loaded
-                    self._materialized_views = existing_mvs
-                    
                     print(f"[duckdb] views ready in {time.time() - setup_start:.3f}s")
                     self._connection = conn
                     self._initialized = True
-                    # Reload MVs in background if signal detected (after connection is fully ready)
-                    if getattr(self, '_needs_mv_reload', False):
-                        threading.Thread(target=self._reload_mvs_background, daemon=True).start()
         return self._connection
 
-    def _reload_mvs_background(self) -> None:
-        """Reload materialized views in background thread - called after connection is ready."""
-        try:
-            print("[duckdb] background: reloading materialized views...")
-            # Use a fresh connection to avoid lock contention with main thread
-            data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
-            db_path = f"{data_lake}/cache/nkdash.duckdb"
-            conn = duckdb.connect(database=db_path, read_only=False)
-            
-            try:
-                # Drop legacy SQLite MVs that were migrated away
-                legacy_mvs = ['mv_profit_daily', 'mv_sales_by_product', 'mv_sales_by_principal', 'mv_refresh_metadata']
-                for mv_name in legacy_mvs:
-                    try:
-                        conn.execute(f"DROP TABLE IF EXISTS {mv_name}")
-                        print(f"[duckdb] background: dropped legacy MV {mv_name}")
-                    except Exception as e:
-                        print(f"[duckdb] background: failed to drop {mv_name}: {e}")
-                
-                print("[duckdb] background: MV reload complete")
-            finally:
-                conn.close()
-        except Exception as e:
-            print(f"[duckdb] background: MV reload failed: {e}")
+    def get_readonly_connection(self) -> duckdb.DuckDBPyConnection:
+        """Returns the main connection for queries.
+        
+        Note: DuckDB doesn't support read-only + read-write connections to the same file.
+        This method returns the main connection which is suitable for all queries.
+        """
+        return self.get_connection()
 
     def close_connection(self) -> None:
         """Close the DuckDB connection to release file locks."""
@@ -156,7 +93,6 @@ class DuckDBManager:
                     self._connection = None
                     self._initialized = False
                     self._initialized_groups.clear()
-                    self._materialized_views.clear()
 
     def ensure_view_groups(self, groups: set[str]) -> None:
         """Ensure the requested view groups exist on the singleton connection."""
@@ -179,184 +115,20 @@ class DuckDBManager:
             print(f"[duckdb] ensured groups in {time.time() - start:.3f}s")
 
     def ensure_materialized_views(self, views: set[str], force_reload: bool = False) -> None:
-        """Ensure materialized views are loaded into memory for ultra-fast queries.
+        """No-op stub - MV loading logic removed.
         
-        Args:
-            views: Set of MV names to ensure exist
-            force_reload: If True, reload all MVs even if already tracked
+        Materialized views are no longer used. The system now queries
+        parquet files directly via DuckDB views.
         """
-        if not views:
-            return
-
-        conn = self.get_connection()
-        with self._lock:
-            # If force_reload is True, reload all requested MVs regardless of tracking
-            if force_reload:
-                needed = views
-                print(f"[duckdb] force-reloading materialized views: {sorted(needed)}")
-                # Don't filter by existing_in_db — _load_materialized_views uses CREATE OR REPLACE
-            else:
-                needed = views - self._materialized_views
-                if not needed:
-                    return
-                # For normal load, only load MVs that exist in DB
-                existing_in_db = set()
-                try:
-                    tables = conn.execute("SHOW TABLES").fetchall()
-                    existing_in_db = {t[0] for t in tables if t[0].startswith('mv_')}
-                except Exception as e:
-                    print(f"[duckdb] error checking existing tables: {e}")
-                needed = needed & existing_in_db
-                if not needed:
-                    print("[duckdb] no requested MVs exist in database")
-                    return
-
-            start = time.time()
-            print(f"[duckdb] loading materialized views: {sorted(needed)}")
-            self._load_materialized_views(conn, needed)
-            self._materialized_views |= needed
-            print(f"[duckdb] materialized views ready in {time.time() - start:.3f}s")
+        pass
 
     def _get_mv_refresh_info(self, conn: duckdb.DuckDBPyConnection, mv_name: str, parquet_path: str) -> tuple:
-        """Get refresh info for incremental MV loading.
-        Returns: (needs_full_refresh, max_date_in_mv, new_files_count)
-        """
-        try:
-            # Check if MV table exists (BASE TABLE = physical table, not view)
-            result = conn.execute(f"""
-                SELECT COUNT(*) FROM information_schema.tables 
-                WHERE table_name = '{mv_name}' AND table_type = 'BASE TABLE'
-            """).fetchone()
-
-            if result[0] == 0:
-                return (True, None, 0)  # MV doesn't exist, needs full load
-
-            # Get max date from the actual MV table
-            max_mv_date = conn.execute(f"SELECT MAX(date) FROM {mv_name}").fetchone()[0]
-
-            if max_mv_date is None:
-                return (True, None, 0)  # MV exists but empty, needs full load
-
-            return (False, max_mv_date, 0)
-        except Exception as e:
-            print(f"[duckdb] _get_mv_refresh_info error for {mv_name}: {e}")
-            return (True, None, 0)  # Error, do full refresh
+        """No-op stub - MV loading logic removed."""
+        return (True, None, 0)
 
     def _load_materialized_views(self, conn: duckdb.DuckDBPyConnection, views: set[str]) -> None:
-        """Load data from parquet views into native DuckDB tables for speed.
-        Uses incremental refresh - only loads new/changed partitions.
-        """
-        data_lake = os.environ.get('DATA_LAKE_ROOT') or os.environ.get('DATA_LAKE_PATH', '/data-lake')
-        
-        # Ensure metadata tracking table exists
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS mv_refresh_metadata (
-                view_name VARCHAR,
-                last_refresh_date TIMESTAMP,
-                max_data_date DATE,
-                row_count BIGINT,
-                refresh_type VARCHAR,  -- 'full' or 'incremental'
-                PRIMARY KEY (view_name)
-            )
-        """)
-
-        # Materialized view: Daily sales aggregates (migrated to SQLite - removed from DuckDB)
-        # mv_sales_daily is now managed by SQLiteManager
-
-        # Materialized view: Sales by product (migrated to SQLite - removed from DuckDB)
-        # mv_sales_by_product is now managed by SQLiteManager
-
-        # Materialized view: Sales by principal (migrated to SQLite - removed from DuckDB)
-        # mv_sales_by_principal is now managed by SQLiteManager
-
-        # Materialized view: Daily profit aggregates (migrated to SQLite - removed from DuckDB)
-        # mv_profit_daily is now managed by SQLiteManager
-
-        # Materialized view: Daily inventory snapshots
-        if "mv_inventory_daily" in views:
-            stock_snapshot_path = f"{data_lake}/star-schema/fact_stock_on_hand_snapshot"
-            conn.execute(f"""
-                CREATE OR REPLACE TABLE mv_inventory_daily AS
-                SELECT
-                    TRY_CAST(snapshot_date AS DATE) AS snapshot_date,
-                    COALESCE(TRY_CAST(product_id AS BIGINT), 0) AS product_id,
-                    COALESCE(TRY_CAST(quantity AS DOUBLE), 0) AS on_hand_qty,
-                    COALESCE(TRY_CAST(reserved_quantity AS DOUBLE), 0) AS reserved_qty,
-                    COALESCE(TRY_CAST((quantity - reserved_quantity) AS DOUBLE), 0) AS available_qty,
-                    0 AS incoming_qty,
-                    0 AS outgoing_qty,
-                    location_id,
-                    NULL AS warehouse_id
-                FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                WHERE product_id IS NOT NULL
-            """)
-
-        # Materialized view: Product velocity (daily sales rate from sales data)
-        if "mv_product_velocity" in views:
-            conn.execute("""
-                CREATE OR REPLACE TABLE mv_product_velocity AS
-                SELECT
-                    product_id,
-                    COUNT(DISTINCT date) AS days_with_sales,
-                    SUM(quantity) AS total_sold,
-                    AVG(quantity) AS avg_daily_sold,
-                    STDDEV(quantity) AS stddev_daily_sold,
-                    MAX(date) AS last_sale_date,
-                    MIN(date) AS first_sale_date
-                FROM fact_sales_all
-                WHERE date >= CURRENT_DATE - INTERVAL '90 days'
-                  AND quantity IS NOT NULL
-                  AND quantity > 0
-                GROUP BY product_id
-            """)
-
-        # Materialized view: Inventory status with cover calculations
-        if "mv_inventory_status" in views:
-            stock_snapshot_path = f"{data_lake}/star-schema/fact_stock_on_hand_snapshot"
-            conn.execute(f"""
-                CREATE OR REPLACE TABLE mv_inventory_status AS
-                WITH latest_stock AS (
-                    SELECT
-                        product_id,
-                        quantity as on_hand_qty,
-                        (quantity - reserved_quantity) as available_qty,
-                        location_id,
-                        ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY snapshot_date DESC) as rn
-                    FROM read_parquet('{stock_snapshot_path}/**/*.parquet', union_by_name=True, hive_partitioning=1)
-                    WHERE product_id IS NOT NULL
-                ),
-                velocity AS (
-                    SELECT
-                        product_id,
-                        AVG(quantity) as avg_daily_sold
-                    FROM fact_sales_all
-                    WHERE date >= CURRENT_DATE - INTERVAL '30 days'
-                      AND quantity IS NOT NULL
-                      AND quantity > 0
-                    GROUP BY product_id
-                )
-                SELECT
-                    ls.product_id,
-                    ls.on_hand_qty,
-                    ls.available_qty,
-                    ls.location_id,
-                    COALESCE(v.avg_daily_sold, 0) as avg_daily_sold,
-                    CASE
-                        WHEN COALESCE(v.avg_daily_sold, 0) > 0 THEN ls.on_hand_qty / NULLIF(v.avg_daily_sold, 0)
-                        WHEN ls.on_hand_qty > 0 THEN 999999
-                        ELSE 0
-                    END as days_of_cover,
-                    CASE
-                        WHEN ls.on_hand_qty <= 0 THEN 'out_of_stock'
-                        WHEN COALESCE(v.avg_daily_sold, 0) = 0 AND ls.on_hand_qty > 0 THEN 'dead_stock'
-                        WHEN ls.on_hand_qty / NULLIF(v.avg_daily_sold, 0) < 14 THEN 'low_stock'
-                        WHEN ls.on_hand_qty / NULLIF(v.avg_daily_sold, 0) > 90 THEN 'overstock'
-                        ELSE 'healthy'
-                    END as stock_status
-                FROM latest_stock ls
-                LEFT JOIN velocity v ON ls.product_id = v.product_id
-                WHERE ls.rn = 1
-            """)
+        """No-op stub - MV loading logic removed."""
+        pass
 
     @staticmethod
     def _get_data_paths() -> tuple:
@@ -1279,16 +1051,6 @@ def ensure_duckdb_view_groups(groups: set[str]) -> None:
     DuckDBManager().ensure_view_groups(groups)
 
 
-def ensure_materialized_views(views: set[str], force_reload: bool = False) -> None:
-    """Public helper to load materialized views for ultra-fast queries.
-    
-    Args:
-        views: Set of MV names to ensure exist
-        force_reload: If True, reload all MVs even if already tracked
-    """
-    DuckDBManager().ensure_materialized_views(views, force_reload=force_reload)
-
-
 def query_sales_by_principal(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
     ensure_duckdb_view_groups({"sales_agg"})
     conn = DuckDBManager().get_connection()
@@ -1324,9 +1086,12 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
 
 
 def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
-    """Query sales trends - uses pre-aggregated daily data for speed."""
+    """Query sales trends - uses pre-aggregated daily data for speed with read-only connection."""
     ensure_duckdb_view_groups({"sales_agg"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
 
     trunc_map = {'daily': 'day', 'weekly': 'week', 'monthly': 'month'}
     if period not in trunc_map:
@@ -1368,9 +1133,12 @@ def query_sales_trends(start_date: date, end_date: date, period: str = 'daily') 
 
 
 def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
-    """Query hourly sales - pre-generates all hours in SQL."""
+    """Query hourly sales - pre-generates all hours in SQL with read-only connection."""
     ensure_duckdb_view_groups({"sales"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
 
     query = """
     WITH hours AS (SELECT unnest(range(7, 24)) as hour),
@@ -1395,9 +1163,12 @@ def query_hourly_sales_pattern(target_date: date) -> pd.DataFrame:
 
 
 def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
-    """Query top products - optimized: aggregate by product_id first, then join."""
+    """Query top products - optimized: aggregate by product_id first, then join with read-only connection."""
     ensure_duckdb_view_groups({"sales_agg", "dims"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
 
     query = """
     WITH product_agg AS (
@@ -1427,9 +1198,12 @@ def query_top_products(start_date: date, end_date: date, limit: int = 20) -> pd.
 
 
 def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
-    """Compare revenue - SINGLE query for both periods using FILTER."""
+    """Compare revenue - SINGLE query for both periods using FILTER with read-only connection."""
     ensure_duckdb_view_groups({"sales_agg"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
 
     period_days = (end_date - start_date).days + 1
     prev_start = start_date - timedelta(days=period_days)
@@ -1502,9 +1276,12 @@ def query_revenue_comparison(start_date: date, end_date: date) -> Dict:
 
 
 def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame:
-    """Query hourly heatmap data."""
+    """Query hourly heatmap data with read-only connection."""
     ensure_duckdb_view_groups({"sales"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
 
     query = """
     SELECT
@@ -1524,9 +1301,12 @@ def query_hourly_sales_heatmap(start_date: date, end_date: date) -> pd.DataFrame
 
 
 def query_overview_summary(start_date: date, end_date: date) -> Dict:
-    """Get overview summary - uses pre-aggregated data for speed."""
+    """Get overview summary - uses pre-aggregated data for speed with read-only connection."""
     ensure_duckdb_view_groups({"sales_agg", "dims"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
 
     # Single combined query using pre-aggregated data
     query = """
@@ -1578,9 +1358,12 @@ def query_overview_summary(start_date: date, end_date: date) -> Dict:
 
 
 def query_profit_summary(start_date: date, end_date: date) -> Dict:
-    """Get profit summary - uses DuckDB aggregates."""
+    """Get profit summary - uses DuckDB aggregates with read-only connection."""
     ensure_duckdb_view_groups({"profit_agg"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     query = """
     SELECT 
@@ -1625,9 +1408,12 @@ def query_profit_summary(start_date: date, end_date: date) -> Dict:
 
 
 def query_profit_trends(start_date: date, end_date: date, period: str = 'daily') -> pd.DataFrame:
-    """Query profit trends - uses DuckDB aggregates."""
+    """Query profit trends - uses DuckDB aggregates with read-only connection."""
     ensure_duckdb_view_groups({"profit_agg"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     # Generate date series in SQL
     trunc_expr = 'day' if period == 'daily' else 'week' if period == 'weekly' else 'month'
@@ -1675,9 +1461,12 @@ def query_profit_trends(start_date: date, end_date: date, period: str = 'daily')
 
 
 def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -> pd.DataFrame:
-    """Query top products by profit - uses DuckDB aggregates."""
+    """Query top products by profit - uses DuckDB aggregates with read-only connection."""
     ensure_duckdb_view_groups({"profit_agg", "dims"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     query = """
     WITH product_agg AS (
@@ -1720,9 +1509,12 @@ def query_profit_by_product(start_date: date, end_date: date, limit: int = 20) -
 
 
 def query_profit_drilldown(start_date: date, end_date: date, product_id: Optional[int] = None) -> pd.DataFrame:
-    """Drill-down to line-level profit details - uses DuckDB fact table."""
+    """Drill-down to line-level profit details - uses DuckDB fact table with read-only connection."""
     ensure_duckdb_view_groups({"profit_detail"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     if product_id:
         where_clause = "WHERE date >= ? AND date < date(?, '+1 day') AND product_id = ?"
@@ -1759,9 +1551,12 @@ def query_profit_drilldown(start_date: date, end_date: date, product_id: Optiona
 
 
 def query_profit_revenue_by_category(start_date: date, end_date: date) -> Dict[str, Dict[str, float]]:
-    """Query profit revenue by category - uses DuckDB aggregates."""
+    """Query profit revenue by category - uses DuckDB aggregates with read-only connection."""
     ensure_duckdb_view_groups({"profit_agg", "dims"})
-    conn = get_duckdb_connection()
+    
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     query = """
     WITH product_agg AS (
@@ -1797,13 +1592,16 @@ def query_inventory_snapshot(snapshot_date: date) -> pd.DataFrame:
     """Query inventory snapshot from DuckDB view over parquet.
     
     Replaces SQLite MV mv_inventory_daily.
+    Uses read-only connection to prevent lock conflicts.
     """
     import os
     
     data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
     snapshot_path = f"{data_lake_root}/star-schema/fact_stock_on_hand_snapshot/**/*.parquet"
     
-    conn = get_duckdb_connection()
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     query = f"""
     SELECT
@@ -1812,6 +1610,7 @@ def query_inventory_snapshot(snapshot_date: date) -> pd.DataFrame:
     FROM read_parquet('{snapshot_path}', hive_partitioning=1)
     WHERE snapshot_date = ?
     GROUP BY product_id
+    LIMIT 5000
     """
     
     query_start = time.time()
@@ -1824,13 +1623,16 @@ def query_sales_by_product_duckdb(start_date: date, end_date: date) -> pd.DataFr
     """Query sales by product from DuckDB view over parquet.
     
     Replaces SQLite MV mv_sales_by_product.
+    Uses read-only connection to prevent lock conflicts.
     """
     import os
     
     data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
     agg_path = f"{data_lake_root}/star-schema/agg_sales_daily_by_product/**/*.parquet"
     
-    conn = get_duckdb_connection()
+    # Use read-only connection to prevent lock conflicts
+    manager = DuckDBManager()
+    conn = manager.get_readonly_connection()
     
     query = f"""
     SELECT
@@ -1840,6 +1642,7 @@ def query_sales_by_product_duckdb(start_date: date, end_date: date) -> pd.DataFr
     FROM read_parquet('{agg_path}', hive_partitioning=1)
     WHERE date >= ? AND date <= ?
     GROUP BY product_id
+    LIMIT 5000
     """
     
     query_start = time.time()
@@ -1856,17 +1659,15 @@ def _execute_with_timeout(conn, query: str, params: list = None, timeout_ms: int
         query: SQL query to execute
         params: Query parameters (optional)
         timeout_ms: Timeout in milliseconds (default 10000 = 10s)
+        Note: DuckDB doesn't support statement_timeout, this parameter is kept for API compatibility
     
     Returns:
         pandas DataFrame with results
     
     Raises:
-        Exception: If query times out or fails
+        Exception: If query fails
     """
-    # Set statement timeout
-    conn.execute(f"SET statement_timeout={timeout_ms}")
-    
-    # Execute query
+    # Execute query (DuckDB doesn't support statement_timeout)
     if params:
         result = conn.execute(query, params).fetchdf()
     else:
