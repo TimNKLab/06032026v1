@@ -173,9 +173,11 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
     result_pl = on_hand_pl.join(sales_pl, on='product_id', how='left')
     result_pl = result_pl.join(dim_pl, on='product_id', how='left')
     
-    # Fill missing values
-    result['units_sold'] = result['units_sold'].fillna(0)
-    result['reserved_qty'] = 0  # Not available in current schema
+    # Fill missing values in Polars
+    result_pl = result_pl.with_columns([
+        pl.col('units_sold').fill_null(0),
+        pl.lit(0).alias('reserved_qty'),  # Not available in current schema
+    ])
     
     # Format product name fallback
     result['product_name'] = result['product_name'].fillna(
