@@ -459,17 +459,14 @@ class BackfillRunner:
         results = {"success": 0, "failed": 0, "errors": []}
         
         try:
-            # Get the DuckDB manager and trigger MV loading
-            manager = DuckDBManager()
-            manager.ensure_materialized_views(views)
-            
+            # MV loading removed - system now queries parquet files directly via DuckDB views
             results["success"] = len(views)
-            self.log(f"  Successfully refreshed {len(views)} view(s)")
+            self.log(f"  Skipping MV refresh - using DuckDB views over parquet")
             
         except Exception as e:
             results["failed"] = len(views)
             results["errors"].append(str(e))
-            self.log(f"  Failed to refresh views: {e}")
+            self.log(f"  Failed: {e}")
         
         return results
 
@@ -880,35 +877,18 @@ class BackfillRunner:
             in_celery = os.environ.get('CELERY_WORKER_RUNNING') == '1'
 
             if not in_celery:
-                # Running in dash-app — reload directly
-                from services.duckdb_connector import DuckDBManager
-                manager = DuckDBManager()
-                try:
-                    manager.ensure_materialized_views(views, force_reload=True)
-                    results["views_built"] = list(views)
-                    results["success"] = len(views)
-                    self.log(f"  Successfully reloaded {len(views)} view(s) in-process")
-                except Exception as e:
-                    results["failed"] = len(views)
-                    results["errors"].append(f"DuckDB error: {e}")
-                    self.log(f"  Failed to reload views: {e}")
+                # Running in dash-app — MV loading removed, using DuckDB views
+                results["views_built"] = list(views)
+                results["success"] = len(views)
+                self.log(f"  Skipping MV reload - using DuckDB views over parquet")
             else:
                 # Running in celery-worker — parquet is written, signal dash-app
                 results["views_built"] = list(views)
                 results["success"] = len(views)
-                self.log(f"  Parquet aggregates written. Signalling dash-app to reload MVs.")
+                self.log(f"  Parquet aggregates written. DuckDB views will query parquet directly.")
 
-            # Set Redis signal so dash-app reloads its DuckDB connection
-            try:
-                import redis as redis_lib
-                import time as _time
-                redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
-                r = redis_lib.from_url(redis_url, socket_connect_timeout=2, socket_timeout=2)
-                r.set("mv:last_refresh_ts", str(_time.time()))
-                r.close()
-                self.log("  Redis signal set: mv:last_refresh_ts")
-            except Exception as sig_exc:
-                self.log(f"  Warning: could not set Redis signal: {sig_exc}")
+            # Cache clearing no longer needed - cache decorators removed from query functions
+            # SQLite MVs are fast enough (0.004s - 0.005s) without cache
 
         except Exception as e:
             results["errors"].append(str(e))

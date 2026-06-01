@@ -13,8 +13,7 @@ from services.sqlite_manager import SQLiteManager
 
 def test_initialize_db_creates_metadata_table():
     """Test that initialize_db creates the metadata table."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -27,12 +26,15 @@ def test_initialize_db_creates_metadata_table():
             assert len(tables) == 1
             assert tables[0][0] == 'mv_refresh_metadata'
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_reader_conn_context_manager():
     """Test that reader_conn properly closes connection."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -50,12 +52,15 @@ def test_reader_conn_context_manager():
             # Expected - connection is closed
             pass
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_writer_conn_reuse():
     """Test that writer_conn returns same connection instance."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -64,13 +69,18 @@ def test_writer_conn_reuse():
         conn1 = manager.get_writer_conn()
         conn2 = manager.get_writer_conn()
         assert conn1 is conn2
+        
+        conn1.close()
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_get_metadata_returns_none_for_nonexistent_view():
     """Test that get_metadata returns None for non-existent view."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -79,12 +89,15 @@ def test_get_metadata_returns_none_for_nonexistent_view():
         metadata = manager.get_metadata("nonexistent")
         assert metadata is None
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_get_metadata_returns_correct_data():
     """Test that get_metadata returns correct metadata."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -102,12 +115,15 @@ def test_get_metadata_returns_correct_data():
         assert metadata.row_count == 100
         assert metadata.refresh_type == "incremental"
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_get_refresh_strategy_returns_full_for_first_run():
     """Test that get_refresh_strategy returns 'full' for first run."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -117,12 +133,15 @@ def test_get_refresh_strategy_returns_full_for_first_run():
         assert strategy == "full"
         assert max_date is None
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_get_refresh_strategy_returns_incremental_for_existing_view():
     """Test that get_refresh_strategy returns 'incremental' for existing view."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -139,12 +158,15 @@ def test_get_refresh_strategy_returns_incremental_for_existing_view():
         assert strategy == "incremental"
         assert max_date == date(2026, 5, 25)
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_full_refresh_atomic_swap():
     """Test that atomic swap works correctly."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -188,12 +210,15 @@ def test_full_refresh_atomic_swap():
         # Close writer connection before cleanup
         writer_conn.close()
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_incremental_refresh():
     """Test that incremental refresh works correctly."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -231,12 +256,15 @@ def test_incremental_refresh():
         # Close writer connection before cleanup
         writer_conn.close()
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking
 
 def test_refresh_mv_dispatches_to_domain_method():
     """Test that refresh_mv dispatches to correct domain method."""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as f:
-        db_path = f.name
+    db_path = tempfile.mktemp(suffix='.sqlite')
     
     try:
         manager = SQLiteManager(db_path)
@@ -244,10 +272,17 @@ def test_refresh_mv_dispatches_to_domain_method():
         
         writer_conn = manager.get_writer_conn()
         
-        # Should raise NotImplementedError for unimplemented domains
-        with pytest.raises(NotImplementedError):
-            manager.refresh_mv("mv_sales_daily", "sales", writer_conn)
+        # Sales domain is now implemented - should attempt to read from parquet
+        # This will fail without actual parquet data, but that's expected
+        result = manager.refresh_mv("mv_sales_daily", "sales", writer_conn)
+        # Should return a RefreshResult (success=False due to missing data)
+        assert result.view_name == "mv_sales_daily"
+        assert not result.success  # Expected to fail without parquet data
         
         writer_conn.close()
     finally:
-        os.unlink(db_path)
+        if os.path.exists(db_path):
+            try:
+                os.unlink(db_path)
+            except PermissionError:
+                pass  # Windows file locking

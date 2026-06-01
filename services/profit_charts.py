@@ -2,11 +2,9 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 from datetime import date
-from .cache import cache
 from .profit_metrics import query_profit_trends, query_profit_by_product, query_profit_summary
 
 
-@cache.memoize()
 def build_profit_trends_chart(start_date: date, end_date: date, period: str = 'daily') -> go.Figure:
     """Build profit trends chart with revenue, COGS, and profit lines."""
     df = query_profit_trends(start_date, end_date, period)
@@ -99,7 +97,6 @@ def build_profit_trends_chart(start_date: date, end_date: date, period: str = 'd
     return fig
 
 
-@cache.memoize()
 def build_profit_margin_chart(start_date: date, end_date: date, period: str = 'daily') -> go.Figure:
     """Build profit margin percentage chart."""
     df = query_profit_trends(start_date, end_date, period)
@@ -170,7 +167,6 @@ def build_profit_margin_chart(start_date: date, end_date: date, period: str = 'd
     return fig
 
 
-@cache.memoize()
 def build_top_products_profit_chart(start_date: date, end_date: date, limit: int = 20) -> go.Figure:
     """Build top products by profit chart."""
     df = query_profit_by_product(start_date, end_date, limit)
@@ -241,7 +237,6 @@ def build_top_products_profit_chart(start_date: date, end_date: date, limit: int
     return fig
 
 
-@cache.memoize()
 def build_profit_kpi_cards(start_date: date, end_date: date) -> dict:
     """Build KPI card data for profit dashboard."""
     summary = query_profit_summary(start_date, end_date)

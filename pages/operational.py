@@ -19,8 +19,6 @@ from services.etl_ops import (
     scan_dimension_files,
     parse_date,
 )
-from services.profit_metrics import clear_profit_caches
-from scripts.etl_data_manager import get_mv_scanner, MV_TO_PARQUET_MAP
 from etl_tasks import (
     app,
     force_refresh_day,
@@ -51,7 +49,6 @@ from etl_tasks import (
     update_profit_aggregates,
 )
 from celery.result import AsyncResult
-from etl_tasks import refresh_materialized_views
 
 
 class Dataset(str, Enum):
@@ -289,8 +286,6 @@ layout = dmc.Container(
         dmc.Text('Scan missing partitions and trigger manual refresh jobs.', c='dimmed', mb='lg'),
         dcc.Store(id='etl-ops-bulk-state', storage_type='memory'),
         dcc.Interval(id='etl-ops-bulk-poll', interval=2000, disabled=True),
-        dcc.Store(id='etl-ops-mv-refresh-state', storage_type='memory'),
-        dcc.Interval(id='etl-ops-mv-refresh-poll', interval=2000, disabled=True),
         
         # Bento Grid Layout
         dmc.Grid(
@@ -366,7 +361,6 @@ layout = dmc.Container(
                                     [
                                         dmc.Button('Scan Partitions', id='etl-ops-scan', variant='filled'),
                                         dmc.Button('Trigger Refresh', id='etl-ops-trigger', variant='light'),
-                                        dmc.Button('Refresh MVs', id='etl-ops-mv-refresh', variant='light', color='green'),
                                         dmc.Button('Bulk Repair', id='etl-ops-bulk-run', variant='outline'),
                                     ],
                                     gap='sm',
@@ -381,7 +375,7 @@ layout = dmc.Container(
                                                 description='Wait for completion',
                                                 size='sm',
                                             ),
-                                            span={'base': 12, 'sm': 4},
+                                            span={'base': 12, 'sm': 6},
                                         ),
                                         dmc.GridCol(
                                             dmc.Switch(
@@ -389,17 +383,9 @@ layout = dmc.Container(
                                                 label='Refresh dimensions',
                                                 description='Slow operation',
                                                 size='sm',
+                                                checked=True,
                                             ),
-                                            span={'base': 12, 'sm': 4},
-                                        ),
-                                        dmc.GridCol(
-                                            dmc.Switch(
-                                                id='etl-ops-auto-mv',
-                                                label='Auto-refresh MVs',
-                                                description='After ETL completion',
-                                                size='sm',
-                                            ),
-                                            span={'base': 12, 'sm': 4},
+                                            span={'base': 12, 'sm': 6},
                                         ),
                                     ],
                                     gutter={'base': 'xs', 'sm': 'md'},
@@ -621,7 +607,7 @@ layout = dmc.Container(
                                                             label='Refresh dimension tables',
                                                             description='Update product, partner, etc. tables',
                                                             size='sm',
-                                                            checked=False
+                                                            checked=True
                                                         ),
                                                         dmc.Text('Build Aggregates', fw=500, size='sm'),
                                                         dmc.Switch(
@@ -636,14 +622,6 @@ layout = dmc.Container(
                                                             id='etl-ops-validate',
                                                             label='Run profit validation',
                                                             description='Check data integrity after refresh',
-                                                            size='sm',
-                                                            checked=False
-                                                        ),
-                                                        dmc.Text('Refresh MVs', fw=500, size='sm'),
-                                                        dmc.Switch(
-                                                            id='etl-ops-refresh-mv',
-                                                            label='Refresh materialized views',
-                                                            description='Update MVs after data changes',
                                                             size='sm',
                                                             checked=False
                                                         ),
@@ -695,61 +673,6 @@ layout = dmc.Container(
     size='100%',  # Changed from 'lg' to '100%' for full viewport width
     px='md',      # Added horizontal padding for breathing room
     py='lg',
-)
-
-# MV Management Section
-dmc.GridCol(
-    dmc.Paper(
-        dmc.Stack(
-            [
-                dmc.Group(
-                    [
-                        dmc.Text('Materialized View Management', fw=600, size='lg'),
-                        dmc.Badge('Advanced', color='blue', variant='light', size='xs'),
-                    ],
-                    gap='sm',
-                    align='center'
-                ),
-                dmc.Group(
-                    [
-                        dmc.Button('Scan MV Differences', id='etl-ops-mv-scan', n_clicks=0, 
-                                    variant='filled'),
-                        dmc.Button('Refresh All MVs', id='etl-ops-mv-refresh-all', n_clicks=0,
-                                    variant='light'),
-                        dmc.Button('Cascading MV Refresh', id='etl-ops-mv-cascading', n_clicks=0,
-                                    variant='light', color='green'),
-                    ],
-                    gap='sm',
-                ),
-                dmc.Text('MV scan status: —', id='etl-ops-mv-status', size='sm', c='dimmed'),
-                dag.AgGrid(
-                    id='etl-ops-mv-results',
-                    columnDefs=[
-                        {'field': 'mv_name', 'headerName': 'Materialized View', 'filter': 'agTextColumnFilter', 'minWidth': 200},
-                        {'field': 'status', 'headerName': 'Status', 'filter': 'agTextColumnFilter', 'minWidth': 120},
-                        {'field': 'missing_count', 'headerName': 'Missing Days', 'filter': 'agTextColumnFilter', 'minWidth': 120},
-                        {'field': 'date_counts', 'headerName': 'Parquet/MV Dates', 'filter': 'agTextColumnFilter', 'minWidth': 150},
-                    ],
-                    defaultColDef=_aggrid_default_col_def(),
-                    rowData=[],
-                    dashGridOptions=_aggrid_pagination_options(),
-                ),
-                dmc.Group(
-                    [
-                        dmc.Button('Export CSV', id='etl-ops-mv-export', variant='light', size='xs'),
-                    ],
-                    justify='flex-end',
-                    mt='sm'
-                ),
-            ],
-            gap='sm',
-        ),
-        p='md',
-        radius='lg',
-        withBorder=True,
-        shadow='sm',
-    ),
-    span=6,
 )
 
 # Aggregate Management Section
@@ -992,11 +915,10 @@ def trigger_refresh(n_clicks, dataset_key, date_start, date_end, sync_mode, refr
         dash.State('etl-ops-refresh-dims', 'checked'),
         dash.State('etl-ops-build-agg', 'checked'),
         dash.State('etl-ops-validate', 'checked'),
-        dash.State('etl-ops-refresh-mv', 'checked'),
     ],
     prevent_initial_call=True,
 )
-def bulk_scan_and_enqueue(n_clicks, date_start, date_end, auto_fetch, refresh_dims, build_agg, validate_profit, refresh_mv):
+def bulk_scan_and_enqueue(n_clicks, date_start, date_end, auto_fetch, refresh_dims, build_agg, validate_profit):
     start_date = parse_date(date_start) or date.today()
     end_date = parse_date(date_end) or start_date
     if end_date < start_date:
@@ -1048,7 +970,6 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end, auto_fetch, refresh_di
         'refresh_dims': refresh_dims,
         'build_agg': build_agg,
         'validate_profit': validate_profit,
-        'refresh_mv': refresh_mv,
     }
 
     row_data = []
@@ -1082,7 +1003,7 @@ def bulk_scan_and_enqueue(n_clicks, date_start, date_end, auto_fetch, refresh_di
     prevent_initial_call=True,
 )
 def bulk_poll(n_intervals, bulk_state):
-    if not bulk_state or bulk_state.get('status') not in {'running', 'mv_refreshing'}:
+    if not bulk_state or bulk_state.get('status') != 'running':
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, True
 
     jobs = bulk_state.get('jobs') or []
@@ -1148,12 +1069,6 @@ def bulk_poll(n_intervals, bulk_state):
         })
 
     if done >= total:
-        # Check if we're in MV refresh phase
-        if bulk_state.get('status') == 'mv_refreshing':
-            bulk_state['status'] = 'done'
-            msg = f"Done: All jobs completed including MV refresh"
-            return bulk_state, msg, 100, row_data, True
-        
         # Initial completion - handle advanced options
         profit_affecting = {
             Dataset.POS,
@@ -1168,17 +1083,10 @@ def bulk_poll(n_intervals, bulk_state):
         refresh_dims = bulk_state.get('refresh_dims', False)
         build_agg = bulk_state.get('build_agg', False)
         validate_profit = bulk_state.get('validate_profit', False)
-        refresh_mv = bulk_state.get('refresh_mv', False)
         
-        # Clear caches for profit-affecting datasets
-        if processed_datasets & profit_affecting:
-            try:
-                clear_profit_caches()
-                msg = f"Done: {done}/{total} job(s) finished | Cleared dashboard caches"
-            except Exception as e:
-                msg = f"Done: {done}/{total} job(s) finished | Failed to clear dashboard caches: {str(e)}"
-        else:
-            msg = f"Done: {done}/{total} job(s) finished"
+        # Cache clearing no longer needed - cache decorators removed from query functions
+        # DuckDB views over parquet are fast enough without cache
+        msg = f"Done: {done}/{total} job(s) finished"
         
         # Handle advanced options after data refresh
         advanced_tasks = []
@@ -1221,73 +1129,7 @@ def bulk_poll(n_intervals, bulk_state):
             except Exception as e:
                 msg += f" | Failed to validate profit: {str(e)}"
         
-        # Check if auto MV refresh is enabled and trigger if needed
-        try:
-            redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
-            redis_client = redis.from_url(redis_url)
-            auto_mv_enabled = redis_client.exists("mv:auto_refresh_enabled")
-            
-            if refresh_mv and processed_datasets & profit_affecting:
-                # Get date range from bulk state
-                start_date = bulk_state.get('start')
-                end_date = bulk_state.get('end')
-                
-                # Trigger MV refresh for same date range
-                mv_task = refresh_materialized_views.delay(start_date, end_date)
-                
-                # Add MV refresh job to the job list for tracking
-                mv_job = {
-                    'dataset': 'materialized_views',
-                    'start': start_date,
-                    'end': end_date,
-                    'task_id': mv_task.id,
-                    'state': 'PENDING',
-                    'step': 'queued',
-                    'step_name': 'MV Refresh Queued',
-                }
-                updated_jobs.append(mv_job)
-                bulk_state['jobs'] = updated_jobs
-                bulk_state['status'] = 'mv_refreshing'
-                
-                msg += f" | MV refresh queued (ID: {mv_task.id[:8]}...)"
-                
-                return bulk_state, msg, 100, row_data, False
-            elif auto_mv_enabled and processed_datasets & profit_affecting:
-                # Get date range from bulk state
-                start_date = bulk_state.get('start')
-                end_date = bulk_state.get('end')
-                
-                # Trigger MV refresh for same date range
-                mv_task = refresh_materialized_views.delay(start_date, end_date)
-                
-                # Add MV refresh job to the job list for tracking
-                mv_job = {
-                    'dataset': 'materialized_views',
-                    'start': start_date,
-                    'end': end_date,
-                    'task_id': mv_task.id,
-                    'state': 'PENDING',
-                    'step': 'queued',
-                    'step_name': 'MV Refresh Queued',
-                }
-                updated_jobs.append(mv_job)
-                bulk_state['jobs'] = updated_jobs
-                bulk_state['status'] = 'mv_refreshing'
-                
-                msg += f" | MV refresh queued (ID: {mv_task.id[:8]}...)"
-                
-                return bulk_state, msg, 100, row_data, False
-                
-        except Exception as e:
-            msg += f" | Failed to trigger MV refresh: {str(e)}"
-        finally:
-            try:
-                if 'redis_client' in locals():
-                    redis_client.close()
-            except:
-                pass
-        
-        # No MV refresh needed - complete
+        # Complete the bulk operation
         bulk_state['status'] = 'done'
         return bulk_state, msg, 100, row_data, True
 
@@ -1322,14 +1164,6 @@ def export_etl_ops_bulk(n_clicks):
     return True
 
 @dash.callback(
-    dash.Output('etl-ops-mv-results', 'exportDataAsCsv'),
-    dash.Input('etl-ops-mv-export', 'n_clicks'),
-    prevent_initial_call=True,
-)
-def export_etl_ops_mv(n_clicks):
-    return True
-
-@dash.callback(
     dash.Output('etl-ops-validation-results', 'exportDataAsCsv'),
     dash.Input('etl-ops-validation-export', 'n_clicks'),
     prevent_initial_call=True,
@@ -1346,134 +1180,6 @@ def export_etl_ops_aggregates(n_clicks):
     return True
 
 
-@dash.callback(
-    dash.Output('etl-ops-auto-mv', 'checked', allow_duplicate=True),
-    dash.Input('etl-ops-auto-mv', 'checked'),
-    prevent_initial_call=True,
-)
-def toggle_auto_mv_refresh(auto_enabled):
-    """Toggle auto MV refresh setting."""
-    redis_url = os.environ.get('REDIS_URL', 'redis://redis:6379/0')
-    redis_client = redis.from_url(redis_url)
-    
-    try:
-        if auto_enabled:
-            redis_client.set("mv:auto_refresh_enabled", "true")
-        else:
-            redis_client.delete("mv:auto_refresh_enabled")
-        return dash.no_update
-    except Exception as e:
-        # Log error but return no_update to maintain UI state
-        print(f"Error in toggle_auto_mv_refresh: {e}")
-        return dash.no_update
-    finally:
-        try:
-            redis_client.close()
-        except Exception as e:
-            # Silently ignore Redis connection cleanup errors
-            pass
-
-
-@dash.callback(
-    [
-        dash.Output('etl-ops-mv-refresh-state', 'data', allow_duplicate=True),
-        dash.Output('etl-ops-trigger-status', 'children', allow_duplicate=True),
-        dash.Output('etl-ops-mv-refresh-poll', 'disabled', allow_duplicate=True),
-    ],
-    dash.Input('etl-ops-mv-refresh', 'n_clicks'),
-    [dash.State('etl-ops-date-start', 'value'),
-     dash.State('etl-ops-date-end', 'value')],
-    prevent_initial_call=True,
-)
-def trigger_mv_refresh(n_clicks, date_start, date_end):
-    """Trigger MV refresh for selected date range."""
-    if not n_clicks:
-        return [dash.no_update, dash.no_update, True]
-    
-    start_date = parse_date(date_start) or date.today()
-    end_date = parse_date(date_end) or start_date
-    
-    try:
-        # Trigger the MV refresh task
-        task = refresh_materialized_views.delay(start_date.isoformat(), end_date.isoformat())
-        
-        # Store task state for polling
-        state = {
-            'status': 'running',
-            'task_id': task.id,
-            'start_date': start_date.isoformat(),
-            'end_date': end_date.isoformat(),
-        }
-        
-        return [state, f"RUNNING: MV refresh task {task.id[:8]}...", False]
-        
-    except Exception as exc:
-        return [dash.no_update, f"ERROR: Failed to queue MV refresh: {str(exc)}", True]
-
-
-@dash.callback(
-    [
-        dash.Output('etl-ops-mv-refresh-state', 'data', allow_duplicate=True),
-        dash.Output('etl-ops-trigger-status', 'children', allow_duplicate=True),
-        dash.Output('etl-ops-mv-refresh-poll', 'disabled', allow_duplicate=True),
-    ],
-    dash.Input('etl-ops-mv-refresh-poll', 'n_intervals'),
-    dash.State('etl-ops-mv-refresh-state', 'data'),
-    prevent_initial_call=True,
-)
-def mv_refresh_poll(n_intervals, mv_state):
-    """Poll MV refresh task status."""
-    if not mv_state or mv_state.get('status') not in {'running', 'queued'}:
-        return [dash.no_update, dash.no_update, True]
-    
-    task_id = mv_state.get('task_id')
-    if not task_id:
-        return [dash.no_update, "ERROR: No task ID", True]
-    
-    try:
-        res = AsyncResult(task_id, app=app)
-        state = res.state
-        
-        if state == 'SUCCESS':
-            result = res.result if hasattr(res, 'result') else {}
-            msg = f"SUCCESS: MV refresh completed for {mv_state.get('start_date')} to {mv_state.get('end_date')}"
-            return [dash.no_update, msg, True]
-        
-        elif state == 'QUEUED':
-            info = res.info if hasattr(res, 'info') else {}
-            elapsed = info.get('elapsed', 0) if isinstance(info, dict) else 0
-            msg = f"QUEUED: Waiting for ETL completion... ({elapsed}s)"
-            return [mv_state, msg, False]
-        
-        elif state == 'WAITING':
-            info = res.info if hasattr(res, 'info') else {}
-            elapsed = info.get('elapsed', 0) if isinstance(info, dict) else 0
-            msg = f"WAITING: Waiting for DuckDB lock... ({elapsed}s)"
-            return [mv_state, msg, False]
-        
-        elif state == 'WAITING_FOR_LOCK':
-            info = res.info if hasattr(res, 'info') else {}
-            elapsed = info.get('elapsed', 0) if isinstance(info, dict) else 0
-            msg = f"WAITING_FOR_LOCK: Acquiring DuckDB lock... ({elapsed}s)"
-            return [mv_state, msg, False]
-        
-        elif state == 'RUNNING':
-            info = res.info if hasattr(res, 'info') else {}
-            message = info.get('message', 'Refreshing...') if isinstance(info, dict) else 'Refreshing...'
-            return [mv_state, f"RUNNING: {message}", False]
-        
-        elif state in ('FAILURE', 'REVOKED'):
-            error = res.info if hasattr(res, 'info') else 'Unknown error'
-            msg = f"FAILED: {str(error)[:100]}"
-            return [dash.no_update, msg, True]
-        
-        else:
-            # PENDING or unknown state
-            return [mv_state, f"PENDING: Task {state}", False]
-    
-    except Exception as exc:
-        return [dash.no_update, f"ERROR: {str(exc)}", True]
-
 
 @dash.callback(
     dash.Output('etl-ops-bulk-modal', 'opened', allow_duplicate=True),
@@ -1483,82 +1189,8 @@ def mv_refresh_poll(n_intervals, mv_state):
 def bulk_close(n_clicks):
     return False
 
-@dash.callback(
-    dash.Output('etl-ops-mv-status', 'children', allow_duplicate=True),
-    dash.Output('etl-ops-mv-status', 'className', allow_duplicate=True),
-    dash.Output('etl-ops-mv-refresh-all', 'disabled'),
-    dash.Input('etl-ops-mv-cascading', 'n_clicks'),
-    dash.State('etl-ops-date-start', 'value'),
-    dash.State('etl-ops-date-end', 'value'),
-    prevent_initial_call=True,
-    allow_duplicate=True,
-)
-def refresh_mvs_cascading(n_clicks, date_start, date_end):
-    if not n_clicks:
-        return dash.no_update, dash.no_update, dash.no_update
-    
-    start_date = parse_date(date_start) or date.today()
-    end_date = parse_date(date_end) or start_date
-    
-    try:
-        from scripts.etl_data_manager import get_backfill_runner
-        runner = get_backfill_runner(log_callback=lambda msg: print(f"Progress: {msg}"))
-        
-        print("Starting cascading MV refresh...")
-        
-        # Refresh all MVs with auto-fetch
-        views = set(MV_TO_PARQUET_MAP.keys())
-        results = runner.refresh_materialized_views_cascading(
-            views=views,
-            start_date=start_date,
-            end_date=end_date,
-            auto_fetch=True,
-            refresh_dims=False
-        )
-        
-        success_count = results.get('success', 0)
-        failed_count = results.get('failed', 0)
-        errors = results.get('errors', [])
-        
-        if failed_count == 0:
-            status_msg = f"✅ Cascading refresh complete: {success_count} views refreshed successfully"
-            return status_msg, "alert alert-success", False
-        else:
-            error_msg = f"⚠️ Refresh completed with {failed_count} errors. Success: {success_count}"
-            if errors:
-                error_msg += f" Errors: {'; '.join(errors[:3])}"
-            return error_msg, "alert alert-warning", False
-            
-    except Exception as e:
-        return f"❌ Cascading refresh failed: {str(e)}", "alert alert-danger", False
 
-@dash.callback(
-    dash.Output('etl-ops-mv-status', 'children', allow_duplicate=True),
-    dash.Output('etl-ops-mv-status', 'className', allow_duplicate=True),
-    dash.Input('etl-ops-mv-refresh-all', 'n_clicks'),
-    prevent_initial_call=True,
-    allow_duplicate=True,
-)
-def refresh_all_mvs_simple(n_clicks):
-    if not n_clicks:
-        return dash.no_update, dash.no_update
-    
-    try:
-        from scripts.etl_data_manager import get_backfill_runner
-        runner = get_backfill_runner()
-        views = set(MV_TO_PARQUET_MAP.keys())
-        results = runner.refresh_materialized_views(views)
-        
-        success_count = results.get('success', 0)
-        failed_count = results.get('failed', 0)
-        
-        if failed_count == 0:
-            return f"✅ Simple refresh complete: {success_count} views refreshed", "alert alert-success"
-        else:
-            return f"⚠️ Refresh completed with {failed_count} errors", "alert alert-warning"
-            
-    except Exception as e:
-        return f"❌ Simple refresh failed: {str(e)}", "alert alert-danger"
+
 
 @dash.callback(
     dash.Output('etl-ops-agg-status', 'children'),

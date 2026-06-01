@@ -18,10 +18,10 @@ def test_mv_refresh_imports():
     print("Testing MV refresh imports...")
     
     try:
-        from etl_tasks import refresh_materialized_views, refresh_materialized_views_scheduled
-        print("✓ MV refresh tasks imported successfully")
+        from etl_tasks import refresh_materialized_views
+        print("✓ MV refresh task imported successfully")
     except ImportError as e:
-        print(f"✗ MV refresh tasks import failed: {e}")
+        print(f"✗ MV refresh task import failed: {e}")
         return False
     
     try:
@@ -83,7 +83,6 @@ def test_task_configuration():
                     if 'materialized_views' in route]
         expected_routes = [
             'etl_tasks.refresh_materialized_views',
-            'etl_tasks.refresh_materialized_views_scheduled'
         ]
         
         if set(expected_routes).issubset(set(mv_routes)):
@@ -92,14 +91,14 @@ def test_task_configuration():
             print(f"✗ Missing task routes. Found: {mv_routes}")
             return False
         
-        # Check beat schedule
+        # Check beat schedule - scheduled-mv-refresh should NOT be present
         scheduled_tasks = [task for task in app.conf.beat_schedule.keys() 
                           if 'mv' in task.lower()]
         
-        if 'scheduled-mv-refresh' in scheduled_tasks:
-            print("✓ Scheduled MV refresh task configured")
+        if 'scheduled-mv-refresh' not in scheduled_tasks:
+            print("✓ Scheduled MV refresh task correctly removed")
         else:
-            print(f"✗ Missing scheduled MV refresh. Found: {scheduled_tasks}")
+            print(f"✗ Scheduled MV refresh still present. Found: {scheduled_tasks}")
             return False
         
         return True

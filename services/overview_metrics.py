@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Dict
 
-from services.duckdb_connector import query_overview_summary
+from services.duckdb_connector import query_overview_summary as duckdb_query_overview_summary
 
 
 def get_total_overview_summary(target_date_start: date, target_date_end: date = None) -> Dict:
@@ -11,10 +11,11 @@ def get_total_overview_summary(target_date_start: date, target_date_end: date = 
         target_date_end = target_date_start
 
     try:
-        # Use DuckDB for faster queries
-        return query_overview_summary(target_date_start, target_date_end)
+        return duckdb_query_overview_summary(target_date_start, target_date_end)
     except Exception as e:
-        print(f"DuckDB query failed in get_total_overview_summary: {e}")
+        print(f"[OVERVIEW] DuckDB query failed: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             'target_date_start': target_date_start,
             'target_date_end': target_date_end,

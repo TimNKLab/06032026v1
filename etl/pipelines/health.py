@@ -30,7 +30,17 @@ def catch_up_etl_impl() -> Dict[str, Any]:
         end_date = (today - timedelta(days=1)).isoformat()
 
         from etl.pipelines.ranges import date_range_etl_pipeline_impl
-        return date_range_etl_pipeline_impl(start_date, end_date)
+        result = date_range_etl_pipeline_impl(start_date, end_date)
+        
+        # Trigger MV refresh for the actual processed range (not old last_processed)
+        try:
+            from etl_tasks import refresh_materialized_views
+            logger.info(f"Triggering MV refresh for catch-up range {start_date} to {end_date}")
+            refresh_materialized_views.delay(start_date, end_date)
+        except Exception as e:
+            logger.warning(f"Failed to trigger MV refresh after catch-up: {e}")
+        
+        return result
 
     return {"status": "up_to_date"}
 

@@ -5,6 +5,7 @@ import dash_mantine_components as dmc
 import plotly.express as px
 from datetime import date, timedelta
 import time
+import pandas as pd
 from typing import Tuple
 
 from services.profit_metrics import query_profit_summary, query_profit_trends
@@ -33,6 +34,9 @@ def _build_figure(d_start, d_end, period='daily'):
         return _empty_fig('No data for selected range.')
     df = trends[['date', 'revenue', 'gross_profit']].rename(
         columns={'revenue': 'Revenue', 'gross_profit': 'Gross Profit'})
+    # Convert date to datetime if it's a string
+    if df['date'].dtype == 'object':
+        df['date'] = pd.to_datetime(df['date'])
     fig = px.bar(df, x='date', y=['Revenue', 'Gross Profit'], barmode='group',
                  color_discrete_map={'Revenue': '#228be6', 'Gross Profit': '#40c057'})
     title = (d_start.strftime('%d %b %Y') if d_start == d_end

@@ -11,9 +11,26 @@ from .cache import cache
 def get_etl_version() -> str:
     """Get current ETL version for cache invalidation.
     
-    Uses max(refresh_date) from DuckDB metadata, or falls back to file-based version.
+    Uses max(last_refresh_date) from SQLite MV metadata, or falls back to file-based version.
     """
-    # Try DuckDB metadata first (lazy import to avoid circular dependency)
+    # Try SQLite metadata first (since we migrated to SQLite MVs)
+    try:
+        from .sqlite_manager import SQLiteManager
+        manager = SQLiteManager()
+        manager.initialize_db()
+        conn = manager.get_reader_conn()
+        result = conn.execute("""
+            SELECT COALESCE(MAX(last_refresh_date), 'v1') 
+            FROM mv_refresh_metadata
+        """).fetchone()
+        conn.close()
+        if result and result[0]:
+            # Hash the timestamp to create a short version string
+            return hashlib.md5(str(result[0]).encode()).hexdigest()[:8]
+    except Exception:
+        pass
+    
+    # Fallback: Try DuckDB metadata (for backward compatibility)
     try:
         from .duckdb_connector import DuckDBManager
         conn = DuckDBManager().get_connection()

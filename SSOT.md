@@ -62,8 +62,49 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 - **NK_20260408_sales_aggregates_optimization_9d2e** - Sales aggregates ETL implementation for performance (validated, includes materialized views)
 - **NK_20260408_historical_backfill_7e3f** - Historical sales aggregates backfill Feb 2025–Feb 2026 (validated, 1,203 files created)
 - **NK_20260514_mv_refresh_stuck_0001** - MV refresh stuck issue (in progress)
+- **NK_20260527_sell_through_migration_8f3a** - SQLite MV migration for sell-through query (validated)
+- **NK_20260527_duckdb_cleanup_9f4b** - DuckDB cleanup for user-facing queries (validated)
 
 ## Team Log
+
+### 2026-05-27: NK_20260527_duckdb_cleanup_9f4b - DuckDB cleanup for user-facing queries
+- **Changes:**
+  - Migrated `query_inventory_summary()` to SQLite MVs + Polars (stock status calculations in Python)
+  - Migrated `_query_location_ledger_deltas()` to Polars parquet reads (inventory movement deltas)
+  - Migrated `get_inventory_costs()` to Polars parquet reads (product cost data)
+  - Removed unused `get_stock_levels()` function (complex, not called by dashboard)
+  - Removed DuckDB imports from inventory_metrics.py
+  - Updated app.py `/api/mv-diagnostics` to check SQLite MVs
+  - Updated app.py `/health` to check SQLite MVs
+  - Removed `_precreate_views()` background thread from app.py
+- **Validation:**
+  - Parity test created: tests/test_inventory_cleanup_parity.py (7/7 passed)
+  - Verified no DuckDB imports in inventory_metrics.py
+  - Verified app.py endpoints use SQLite
+  - Verified remaining DuckDB usage only in duckdb_connector.py (ETL operations)
+- **Notes:**
+  - Completes DuckDB cleanup for user-facing query operations
+  - DuckDB now used ONLY for ETL operations (extraction, parquet creation)
+  - SQLite used for all user-facing MVs and dashboard queries
+  - Polars used for parquet reads during query operations
+  - Architecture aligned with user preference: DuckDB=ETL, SQLite=queries
+
+### 2026-05-27: NK_20260527_sell_through_migration_8f3a - SQLite MV migration for sell-through
+- **Changes:**
+  - Migrated `_query_sell_through()` from DuckDB to SQLite MVs + Polars parquet reads
+  - Removed DuckDB dependencies (ensure_duckdb_view_groups, DuckDBManager, get_duckdb_connection)
+  - Implemented movement_type classification logic in Python/Pandas (incoming, production_in, adjustment, production_out, transfer)
+  - Used SQLite MVs: mv_inventory_daily (stock snapshots), mv_sales_by_product (sales aggregates)
+  - Used Polars for parquet reads: fact_inventory_moves (movement data), dim_products (dimensions)
+  - Used Pandas merge for cross-domain joins
+- **Validation:**
+  - Parity test created: tests/test_sell_through_parity.py (5/5 passed)
+  - Verified SQLiteManager usage, Polars parquet reads, movement classification preservation
+  - Verified sell-through ratio calculation preserved
+- **Notes:**
+  - Completes Phase 4 (Inventory Domain Migration) deferred item
+  - Follows established migration pattern: SQLite MVs for aggregates, Polars for parquet reads, Pandas for joins
+  - No new SQLite MV refresh logic needed (uses existing mv_inventory_daily and mv_sales_by_product)
 
 ### 2026-05-14: NK_20260514_mv_refresh_stuck_0001 - MV refresh stuck and view name fix
 - **Changes:**

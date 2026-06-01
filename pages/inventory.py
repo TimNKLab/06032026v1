@@ -13,7 +13,6 @@ from services.duckdb_connector import get_duckdb_connection
 from services.duckdb_connector import ensure_duckdb_view_groups
 from services.inventory_metrics import (
     get_abc_analysis,
-    get_stock_levels,
     get_stock_levels_ledger,
     get_sell_through_analysis,
     get_inventory_costs,
