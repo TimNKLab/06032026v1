@@ -180,13 +180,13 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
     ])
     
     # Format product name fallback
-    result['product_name'] = result['product_name'].fillna(
-        result['product_id'].apply(lambda x: f'Product {x}')
-    )
-    result['product_category'] = result['product_category'].fillna('Unknown Category')
-    result['product_brand'] = result['product_brand'].fillna('Unknown Brand')
-    result['product_barcode'] = result['product_barcode'].fillna('')
-    result['product_sku'] = result['product_sku'].fillna('')
+    result_pl = result_pl.with_columns([
+        pl.coalesce([pl.col('product_name'), pl.format('Product {}', pl.col('product_id'))]).alias('product_name'),
+        pl.coalesce([pl.col('product_category'), pl.lit('Unknown Category')]).alias('product_category'),
+        pl.coalesce([pl.col('product_brand'), pl.lit('Unknown Brand')]).alias('product_brand'),
+        pl.coalesce([pl.col('product_barcode'), pl.lit('')]).alias('product_barcode'),
+        pl.coalesce([pl.col('product_sku'), pl.lit('')]).alias('product_sku')
+    ])
     
     # Select and order columns
     result = result[['product_id', 'product_name', 'product_category', 'product_brand',
