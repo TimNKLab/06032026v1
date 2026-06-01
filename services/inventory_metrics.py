@@ -169,6 +169,10 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
             'product_sku': pl.Utf8
         })
     
+    # Perform joins in Polars (memory efficient)
+    result_pl = on_hand_pl.join(sales_pl, on='product_id', how='left')
+    result_pl = result_pl.join(dim_pl, on='product_id', how='left')
+    
     # Fill missing values
     result['units_sold'] = result['units_sold'].fillna(0)
     result['reserved_qty'] = 0  # Not available in current schema
