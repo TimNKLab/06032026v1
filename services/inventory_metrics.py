@@ -115,16 +115,26 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
     on_hand_df = query_inventory_snapshot(snapshot_date)
     on_hand_df = on_hand_df.rename(columns={'qty_on_hand': 'on_hand_qty'})
     
-    # Get sales aggregates from DuckDB parquet
+    # Get sales aggregates first to identify products with sales (even if inventory=0)
     sales_df = query_sales_by_product_duckdb(lookback_start, lookback_end)
     sales_df = sales_df.rename(columns={'units_sold': 'units_sold'})
     
-    # Load dimensions from parquet using Polars
+    # Filter dimensions to products with inventory OR sales (captures transactions at stock=0)
     data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
     dim_path = f"{data_lake_root}/star-schema/dim_products.parquet"
     
-    if os.path.exists(dim_path):
-        dim_df = pl.read_parquet(dim_path).to_pandas()
+    # Get product IDs with non-zero inventory (qty_on_hand != 0 handles miscounts)
+    product_ids_with_inventory = set(on_hand_df[on_hand_df['qty_on_hand'] != 0]['product_id'].tolist())
+    
+    # Combine: products with inventory OR sales
+    product_ids_with_sales = set(sales_df['product_id'].tolist())
+    relevant_product_ids = product_ids_with_inventory.union(product_ids_with_sales)
+    
+    if os.path.exists(dim_path) and relevant_product_ids:
+        dim_pl = pl.scan_parquet(dim_path).filter(
+            pl.col('product_id').is_in(list(relevant_product_ids))
+        )
+        dim_df = dim_pl.collect().to_pandas()
     else:
         # Fallback: empty dimensions
         dim_df = pd.DataFrame(columns=['product_id', 'product_name', 'product_category', 
