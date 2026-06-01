@@ -478,12 +478,18 @@ def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
     # Get sales aggregates from DuckDB parquet
     sales_df = query_sales_by_product_duckdb(start_date, end_date)
     
-    # Load dimensions from parquet using Polars
+    # Filter dimensions to only products with sales
+    product_ids_with_sales = set(sales_df['product_id'].tolist())
+    
+    # Load dimensions from parquet using Polars with filtering
     data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
     dim_path = f"{data_lake_root}/star-schema/dim_products.parquet"
     
-    if os.path.exists(dim_path):
-        dim_df = pl.read_parquet(dim_path).to_pandas()
+    if os.path.exists(dim_path) and product_ids_with_sales:
+        dim_pl = pl.scan_parquet(dim_path).filter(
+            pl.col('product_id').is_in(list(product_ids_with_sales))
+        )
+        dim_df = dim_pl.collect().to_pandas()
         # Join sales with dimensions
         result = sales_df.merge(dim_df, on='product_id', how='left')
         result = result[['product_id', 'revenue', 'quantity', 'product_name', 'product_category', 'product_brand']]
