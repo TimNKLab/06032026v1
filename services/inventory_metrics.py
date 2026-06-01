@@ -189,9 +189,11 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
     ])
     
     # Select and order columns
-    result = result[['product_id', 'product_name', 'product_category', 'product_brand',
-                     'product_barcode', 'product_sku', 'on_hand_qty', 'reserved_qty', 'units_sold']]
-    result = result.sort_values('on_hand_qty', ascending=False)
+    result_pl = result_pl.select([
+        'product_id', 'product_name', 'product_category', 'product_brand',
+        'product_barcode', 'product_sku', 'on_hand_qty', 'reserved_qty', 'units_sold'
+    ])
+    result_pl = result_pl.sort('on_hand_qty', descending=True)
     
     return result
 
