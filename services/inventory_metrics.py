@@ -689,7 +689,7 @@ def get_abc_analysis(
 
     df = df.copy()
     df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
-    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0)
+    df["units_sold"] = pd.to_numeric(df["units_sold"], errors="coerce").fillna(0)
 
     df = df.sort_values("revenue", ascending=False).reset_index(drop=True)
     total_revenue = float(df["revenue"].sum())
