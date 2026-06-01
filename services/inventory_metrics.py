@@ -492,7 +492,7 @@ def _query_abc_products(start_date: date, end_date: date) -> pd.DataFrame:
         dim_df = dim_pl.collect().to_pandas()
         # Join sales with dimensions
         result = sales_df.merge(dim_df, on='product_id', how='left')
-        result = result[['product_id', 'revenue', 'quantity', 'product_name', 'product_category', 'product_brand']]
+        result = result[['product_id', 'revenue', 'units_sold', 'product_name', 'product_category', 'product_brand']]
         result = result.sort_values('revenue', ascending=False)
     else:
         # Fallback: return sales data without dimensions
