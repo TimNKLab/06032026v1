@@ -195,6 +195,12 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
     ])
     result_pl = result_pl.sort('on_hand_qty', descending=True)
     
+    # Apply limit
+    result_pl = result_pl.head(limit)
+    
+    # Convert to pandas for UI compatibility
+    result = result_pl.to_pandas()
+    
     return result
 
 
