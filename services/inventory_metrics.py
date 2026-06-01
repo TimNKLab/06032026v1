@@ -140,9 +140,34 @@ def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end:
         dim_df = pd.DataFrame(columns=['product_id', 'product_name', 'product_category', 
                                        'product_brand', 'product_barcode', 'product_sku'])
     
-    # Join data
-    result = on_hand_df.merge(sales_df, on='product_id', how='left')
-    result = result.merge(dim_df, on='product_id', how='left')
+    # Convert to Polars for efficient lazy joins
+    on_hand_pl = pl.from_pandas(on_hand_df)
+    
+    # Derive schema from actual DataFrames to avoid type mismatches
+    if not sales_df.empty:
+        sales_pl = pl.from_pandas(sales_df)
+    else:
+        # Use schema derived from on_hand_df's product_id type
+        product_id_dtype = on_hand_pl['product_id'].dtype
+        sales_pl = pl.DataFrame(schema={
+            'product_id': product_id_dtype,
+            'units_sold': pl.Float64,
+            'revenue': pl.Float64
+        })
+    
+    if not dim_df.empty:
+        dim_pl = pl.from_pandas(dim_df)
+    else:
+        # Use schema derived from on_hand_df's product_id type
+        product_id_dtype = on_hand_pl['product_id'].dtype
+        dim_pl = pl.DataFrame(schema={
+            'product_id': product_id_dtype,
+            'product_name': pl.Utf8,
+            'product_category': pl.Utf8,
+            'product_brand': pl.Utf8,
+            'product_barcode': pl.Utf8,
+            'product_sku': pl.Utf8
+        })
     
     # Fill missing values
     result['units_sold'] = result['units_sold'].fillna(0)
