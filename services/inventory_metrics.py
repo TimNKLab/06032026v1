@@ -89,7 +89,7 @@ def _get_snapshot_date(as_of_date: date) -> Optional[date]:
     return _normalize_snapshot_date(result[0] if result else None)
 
 
-def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end: date, limit: int = 5000) -> pd.DataFrame:
+def _query_stock_levels(snapshot_date: date, lookback_start: date, lookback_end: date, limit: int = 1000) -> pd.DataFrame:
     """Stock levels using Polars lazy evaluation + efficient filtering.
     
     Memory optimization strategy:
