@@ -17,7 +17,7 @@
 ### 📦 Components
 | ID | Name | Type | Current Path | Target Path | Status |
 |---|---|---|---|---|---|
-| C1 | ETL God File | Module | `etl_tasks.py` (2,213 lines) | `etl/` package | 🔧 IN PROGRESS — `etl/core/` extracted (1.1 done), transform/load still in god file |
+| C1 | ETL God File | Module | `etl_tasks.py` (2,213 lines) | `etl/` package | 🔧 IN PROGRESS — `etl/core/`, `etl/transform/`, `etl/load/` extracted |
 | C2 | DuckDB Connector | Service | `services/duckdb_connector.py` (1,677 lines) | `services/duckdb_connector.py` (~200 lines) | 🔧 TO REWRITE |
 | C3 | ETL Admin UI | Page | `pages/operational.py` (1,378 lines) | `admin/pages/operational.py` | 🔧 TO MOVE |
 | C4 | Sales Metrics | Service | `services/sales_metrics.py` | `services/sales_metrics.py` | 🔧 TO REWRITE |
@@ -36,6 +36,8 @@
 | C17 | ETL Transform — POS | Module | (new) | `etl/transform/pos.py` | ✅ CREATED (1.2) |
 | C18 | ETL Transform — Invoices | Module | (new) | `etl/transform/invoices.py` | ✅ CREATED (1.2) |
 | C19 | ETL Transform — Inventory | Module | (new) | `etl/transform/inventory.py` | ✅ CREATED (1.2) |
+| C20 | ETL Load — Raw | Module | (new) | `etl/load/raw.py` | ✅ CREATED (1.3) |
+| C21 | ETL Load — Star Schema | Module | (new) | `etl/load/star_schema.py` | ✅ CREATED (1.3) |
 
 ### 🔧 Technologies
 | ID | Name | Role | Status |
@@ -59,7 +61,7 @@
 | D1 | `/data-lake/raw/` | Scheduler | Admin (read-only) | Parquet |
 | D2 | `/data-lake/clean/` | Scheduler | Admin (read-only) | Parquet |
 | D3 | `/data-lake/star-schema/` | Scheduler | Dashboard + Admin | Parquet |
-| D4 | `/data-lake/admin/etl_queue.sqlite` | Admin (Streamlit) | Scheduler | SQLite |
+| D4 | `/data-lake/admin/etl_queue.duckdb` | Admin (Streamlit) | Scheduler | DuckDB |
 | D5 | `/data-lake/admin/etl_state.json` | Scheduler | Admin + Dashboard | JSON |
 | D6 | `/data-lake/admin/logs/` | Scheduler | Admin | Text |
 
@@ -103,11 +105,11 @@
 | 0 | 0.2 Bootstrap constraint revision | ✅ DONE | None — revised to Oracle Free Tier |
 | 1 | 1.1 Extract `etl/core/` | ✅ DONE | None |
 | 1 | 1.2 Extract `etl/transform/` | ✅ DONE | None |
-| 1 | 1.3 Extract `etl/load/` | 🔧 NEXT | None |
-| 1 | 1.4 Create `etl/tasks.py` | 📋 QUEUED | Depends on 1.1-1.3 |
-| 1 | 1.5 Create `scheduler/main.py` | 📋 QUEUED | Depends on 1.4 |
-| 1 | 1.6 Local dry-run test | 📋 QUEUED | Depends on 1.5 |
-| 2 | 2.1 Streamlit skeleton | 📋 QUEUED | None (parallelizable) |
+| 1 | 1.3 Extract `etl/load/` | ✅ DONE | None |
+| 1 | 1.4 Create `etl/tasks.py` | ✅ DONE | None |
+| 1 | 1.5 Create `scheduler/main.py` | ✅ DONE | None |
+| 1 | 1.6 Local dry-run test | ✅ DONE | None |
+| 2 | 2.1 Streamlit skeleton | 🔧 NEXT | None (parallelizable) |
 | 2 | 2.2-2.5 Admin pages | 📋 QUEUED | Depends on 2.1 |
 | 2 | 2.6 Queue protocol test | 📋 QUEUED | Depends on 1.5 + 2.5 |
 | 3 | 3.1 Remove operational from nav | 📋 QUEUED | None (parallelizable) |

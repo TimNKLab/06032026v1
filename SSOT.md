@@ -69,22 +69,37 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 
 ## Team Log
 
-### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Phase 0 Complete (Subtask 0.1 + Troubleshoot 0.2)
-- **Subtask 0.1:** Render topology research completed. Found blockers: Render disk cannot be shared, Render Cron cannot mount disk, Fly.io removed free tier. Codebase finding: `duckdb_connector.py` double `get_readonly_connection()` definition causes file-lock conflicts.
-- **Troubleshoot 0.2:** Bootstrap constraint clarification. User priority: $0 cost, local-first development, deployable container. Replaced Render paid tier with Oracle Cloud Free Tier (Always Free: 2 VMs + 200GB storage, never expires).
-- **Architecture decision:** Solo Mode — 1 container, 3 processes (gunicorn + streamlit + python-schedule), supervisord, pure DuckDB in-memory for queries, Parquet data lake on local bind mount.
-- **Documents updated:** `MIGRATION_MASTERPLAN.md`, `MIGRATION/reflection_0_1.md`, `docs/decisions.md`, `docs/ssot_changelog.md`.
-- **Masterplan phases:** 5 phases defined (0→5), subtasks detailed, file migration map created, risk matrix updated for bootstrap context.
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Repository Tree-shaking & Doc Consolidation
+- **Tests Cleanup**: Archived obsolete tests (SQLite manager, old Docker compose runner, and deprecated DuckDB view tests) to `tests/archive/`.
+- **Script Cleanup**: Moved root-level `check_*.py` and `refresh_*.py` scripts to `admin/legacy_ops/`.
+- **Doc Consolidation**: 
+  - Created `docs/DATA_LOGIC_GUIDE.md` as the unified source for business logic (merging Profit ETL, Inventory Spec, and Performance Policy).
+  - Archived fragmented/outdated docs to `docs/archive/`.
+- **Metadata Pruning**: Removed tool-specific metadata folders (`.kiro`, `.roo`, `.windsurf`).
+- **Dependency Update**: Updated `requirements.txt` to fix `dash-extensions` conflicts and add `schedule` and `duckdb`.
+- **Verification**: Verified `scripts/dry_run_pipeline.py` still passes after cleanup.
 
-### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Subtask 1.1 Complete (ETL Core Extraction)
-- **Scope:** Extract pure business logic from `etl_tasks.py` (lines 800-1600) into `etl/core/` package.
+
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Subtask 1.4 Complete (ETL Task Registry)
+- **Scope:** Create `etl/tasks.py` as the plain Python function registry.
+- **Implementation:** 
+  - Created `TASK_REGISTRY` dictionary mapping string identifiers to extracted functions from `etl/core/`, `etl/transform/`, `etl/load/`, and `etl/extract/`.
+  - Implemented `get_task(name)` helper for dynamic task retrieval.
+  - Zero framework dependencies (no Celery decorators).
+- **Refactoring items:**
+  - Extracted `refresh_dimensions_incremental` from `etl_tasks.py` to `etl/extract/dimensions.py`.
+  - Moved `load_beginning_costs_from_csv` to `etl/core/cost_engine.py`.
+- **Verification:** Registry covers all atomic operations previously handled by Celery tasks in `etl_tasks.py`. Orchestration pipelines (e.g., `daily_etl_pipeline`) are deferred to `scheduler/main.py`.
+- **Next subtask:** 1.5 — Create `scheduler/main.py` (Python `schedule` loop).
+
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Subtask 1.3 Complete (ETL Load Extraction)
+- **Scope:** Extract star-schema writers and raw save functions from `etl_tasks.py` into `etl/load/` package.
 - **Files created:**
-  - `etl/core/schema.py` — I/O helpers + reusable Polars schemas.
-  - `etl/core/cost_engine.py` — Tax multiplier, cost validation.
-  - `etl/core/profit_calculator.py` — Profit ETL functions, `_unified_costs` replaces DuckDB view dependency.
-- **Key rewrite:** `build_sales_lines_profit` severed from `services.duckdb_connector`; `_unified_costs()` reads Parquet directly via Polars.
-- **Dependency:** Clean (stdlib + polars + etl.config + etl.io_parquet only).
-- **Next subtask:** 1.2 — Extract cleaning functions.
+  - `etl/load/raw.py` — `save_raw_data`, `save_raw_sales_invoice_lines`, `save_raw_purchase_invoice_lines`, `save_raw_inventory_moves`, `save_raw_stock_quants`, and helper `_save_raw_account_move_lines`.
+  - `etl/load/star_schema.py` — `update_fact_inventory_moves`, `update_fact_sales_pos`, `update_fact_invoice_sales`, `update_fact_purchases`, `update_fact_stock_on_hand_snapshot`.
+- **Key changes:** Removed `@app.task` decorators; logic now pure Polars writing to filesystem. `update_fact_sales_pos` now uses `etl.transform._utils.to_local_datetime` for timezone handling.
+- **Dependency verification:** Clean (stdlib + polars + etl.config + etl.io_parquet + etl.transform._utils).
+- **Next subtask:** 1.4 — Create `etl/tasks.py` as the plain Python function registry.
 
 ### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Subtask 1.2 Complete (ETL Transform Extraction)
 - **Scope:** Extract Polars cleaning functions from `etl_tasks.py` into `etl/transform/` package.
@@ -101,6 +116,23 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 - **Syntax validation:** All 4 files parse successfully (`ast.parse`).
 - **Note:** Original functions in `etl_tasks.py` intentionally **not deleted yet** — will be removed during Subtask 1.4 (wiring) to avoid breaking existing Celery task references until scheduler migration is complete.
 - **Next subtask:** 1.3 — Extract `etl/load/` (star-schema writers + raw save functions) from `etl_tasks.py`.
+
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Subtask 1.1 Complete (ETL Core Extraction)
+- **Scope:** Extract pure business logic from `etl_tasks.py` (lines 800-1600) into `etl/core/` package.
+- **Files created:**
+  - `etl/core/schema.py` — I/O helpers + reusable Polars schemas.
+  - `etl/core/cost_engine.py` — Tax multiplier, cost validation.
+  - `etl/core/profit_calculator.py` — Profit ETL functions, `_unified_costs` replaces DuckDB view dependency.
+- **Key rewrite:** `build_sales_lines_profit` severed from `services.duckdb_connector`; `_unified_costs()` reads Parquet directly via Polars.
+- **Dependency:** Clean (stdlib + polars + etl.config + etl.io_parquet only).
+- **Next subtask:** 1.2 — Extract cleaning functions.
+
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Phase 0 Complete (Subtask 0.1 + Troubleshoot 0.2)
+- **Subtask 0.1:** Render topology research completed. Found blockers: Render disk cannot be shared, Render Cron cannot mount disk, Fly.io removed free tier. Codebase finding: `duckdb_connector.py` double `get_readonly_connection()` definition causes file-lock conflicts.
+- **Troubleshoot 0.2:** Bootstrap constraint clarification. User priority: $0 cost, local-first development, deployable container. Replaced Render paid tier with Oracle Cloud Free Tier (Always Free: 2 VMs + 200GB storage, never expires).
+- **Architecture decision:** Solo Mode — 1 container, 3 processes (gunicorn + streamlit + python-schedule), supervisord, pure DuckDB in-memory for queries, Parquet data lake on local bind mount.
+- **Documents updated:** `MIGRATION_MASTERPLAN.md`, `MIGRATION/reflection_0_1.md`, `docs/decisions.md`, `docs/ssot_changelog.md`.
+- **Masterplan phases:** 5 phases defined (0→5), subtasks detailed, file migration map created, risk matrix updated for bootstrap context.
 
 ### 2026-05-27: NK_20260527_duckdb_cleanup_9f4b - DuckDB cleanup for user-facing queries
 - **Changes:**

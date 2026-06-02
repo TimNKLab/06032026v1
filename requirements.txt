@@ -1,18 +1,24 @@
-dash==2.14.2
-odoorpc==0.10.1
-gunicorn==23.0.0
-python-dotenv
+# --- Core Dashboard ---
+dash>=3.0.0
 dash-mantine-components==2.4.0
 dash-ag-grid==31.2.0
-
-polars
+dash-extensions==2.0.4
 plotly
 pandas
-celery[redis]
-redis
-duckdb==1.2.0
-pydantic
+gunicorn==23.0.0
+Flask-Caching>=2.3.1
+
+# --- ETL Engine ---
+polars
+duckdb
 pyarrow
-Flask-Caching==2.1.0
+python-dotenv
+schedule
+odoorpc==0.10.1
+pydantic
 openpyxl
 psutil
+
+# --- Removed (Deprecated) ---
+# celery
+# redis
