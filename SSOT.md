@@ -14,7 +14,7 @@
 Canonical coordination document for NKDash repository. Links to authoritative docs, tracks milestones, and provides project oversight.
 
 ## Current Phase
-**Stabilization & Dataset Expansion** - Ensure reliable daily ETL pipelines while expanding dashboard capabilities.
+**Migration & Decoupling (M10)** — Separate ETL engine from BI Dashboard codebase; replace Celery/Redis with Python `schedule`; deploy as Render Solo Mode. Dashboard menarik data dengan DuckDB in-memory; Admin pakai Streamlit.
 
 ## Quick Links (Authoritative Docs)
 - **Architecture:** `docs/ARCHITECTURE.md` - Data lake + DuckDB architecture
@@ -38,6 +38,7 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 | M7 — UI/UX enhancement | In Progress | 2026-02-21 |
 | M8 — Sales aggregates optimization | Validated | 2026-04-08 |
 | M9 — Sales aggregates backfill (Feb 2025–Feb 2026) | Validated | 2026-04-08 |
+| M10 — Render Solo Mode Migration | In Progress | 2026-06-02 |
 
 ## Validation Standard (Option C)
 - **Correctness:** ≤0.5% revenue variance vs Odoo (3-date sampling)
@@ -56,6 +57,7 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 **Current process:** Weekly 30min sync, acting owner = person implementing changes
 
 ## Active Workstreams
+- **NK_20260602_migration_solo_render_0a1b** - Architecture migration to Render Solo Mode: single service, supervisord, pure DuckDB, no Celery (Phase 0 completed, Subtask 0.1 done)
 - **NK_20260126_design_enhancement_4a7c** - UI/UX enhancement (DMC framework)
 - **NK_20260408_ux_responsiveness_a1b2** - Dashboard UX responsiveness improvement (modal loading, explicit triggers, navigation cancellation)
 - **NK_20260121_adjustments_8d9b** - Inventory adjustments handling (in progress)
@@ -66,6 +68,39 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 - **NK_20260527_duckdb_cleanup_9f4b** - DuckDB cleanup for user-facing queries (validated)
 
 ## Team Log
+
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Phase 0 Complete (Subtask 0.1 + Troubleshoot 0.2)
+- **Subtask 0.1:** Render topology research completed. Found blockers: Render disk cannot be shared, Render Cron cannot mount disk, Fly.io removed free tier. Codebase finding: `duckdb_connector.py` double `get_readonly_connection()` definition causes file-lock conflicts.
+- **Troubleshoot 0.2:** Bootstrap constraint clarification. User priority: $0 cost, local-first development, deployable container. Replaced Render paid tier with Oracle Cloud Free Tier (Always Free: 2 VMs + 200GB storage, never expires).
+- **Architecture decision:** Solo Mode — 1 container, 3 processes (gunicorn + streamlit + python-schedule), supervisord, pure DuckDB in-memory for queries, Parquet data lake on local bind mount.
+- **Documents updated:** `MIGRATION_MASTERPLAN.md`, `MIGRATION/reflection_0_1.md`, `docs/decisions.md`, `docs/ssot_changelog.md`.
+- **Masterplan phases:** 5 phases defined (0→5), subtasks detailed, file migration map created, risk matrix updated for bootstrap context.
+
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Subtask 1.1 Complete (ETL Core Extraction)
+- **Scope:** Extract pure business logic from `etl_tasks.py` (lines 800-1600) into `etl/core/` package.
+- **Files created:**
+  - `etl/core/schema.py` — I/O helpers + reusable Polars schemas.
+  - `etl/core/cost_engine.py` — Tax multiplier, cost validation.
+  - `etl/core/profit_calculator.py` — Profit ETL functions, `_unified_costs` replaces DuckDB view dependency.
+- **Key rewrite:** `build_sales_lines_profit` severed from `services.duckdb_connector`; `_unified_costs()` reads Parquet directly via Polars.
+- **Dependency:** Clean (stdlib + polars + etl.config + etl.io_parquet only).
+- **Next subtask:** 1.2 — Extract cleaning functions.
+
+### 2026-06-02: NK_20260602_migration_solo_render_0a1b - Subtask 1.2 Complete (ETL Transform Extraction)
+- **Scope:** Extract Polars cleaning functions from `etl_tasks.py` into `etl/transform/` package.
+- **Files created:**
+  - `etl/transform/__init__.py` — Package docstring explaining zero-framework rule.
+  - `etl/transform/_utils.py` — `to_local_datetime` Polars expression. **Critical decoupling:** removed `app.conf.timezone` dependency (Celery app object); replaced with `os.environ.get('TZ', 'Asia/Jakarta')`.
+  - `etl/transform/pos.py` — `clean_pos_data` (raw POS → cast types → compute revenue → clean Parquet).
+  - `etl/transform/invoices.py` — `clean_sales_invoice_lines` + `clean_purchase_invoice_lines` (discount logic preserved exactly).
+  - `etl/transform/inventory.py` — `clean_stock_quants` + `clean_inventory_moves` (dimension parquet joins preserved exactly).
+- **Logic preservation:** All Polars expressions, column renames, filter conditions, null-fill defaults, and dimension join logic copied verbatim from `etl_tasks.py`. No behaviour changes.
+- **Dependency verification:**
+  - Imports: stdlib, `polars`, `etl.config`, `etl.io_parquet`, `etl.transform._utils`.
+  - Forbidden imports (celery, redis, dash, flask, gunicorn, odoorpc, services.*): **absent**.
+- **Syntax validation:** All 4 files parse successfully (`ast.parse`).
+- **Note:** Original functions in `etl_tasks.py` intentionally **not deleted yet** — will be removed during Subtask 1.4 (wiring) to avoid breaking existing Celery task references until scheduler migration is complete.
+- **Next subtask:** 1.3 — Extract `etl/load/` (star-schema writers + raw save functions) from `etl_tasks.py`.
 
 ### 2026-05-27: NK_20260527_duckdb_cleanup_9f4b - DuckDB cleanup for user-facing queries
 - **Changes:**
@@ -125,7 +160,13 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 - **Derived:** Cost events, profit aggregates, inventory snapshots
 
 ## Next Steps
-1. Assign real names to oversight roles
-2. Make stock.quant snapshots mandatory for inventory KPIs
-3. Complete M7 UI/UX enhancement
-4. Plan M5 cloud deployment strategy
+1. Continue M10 migration: refactor `etl_tasks.py` god file → modular `etl/` package (Subtask 1.1)
+2. Build Streamlit Admin skeleton (Subtask 2.1)
+3. Remove `pages/operational.py` from Dash nav_links (Subtask 3.1)
+4. Assign real names to oversight roles
+5. Make stock.quant snapshots mandatory for inventory KPIs
+6. Complete M7 UI/UX enhancement
+
+## Migration Artifacts
+- `MIGRATION_MASTERPLAN.md` — Full migration roadmap
+- `MIGRATION/reflection_0_1.md` — Subtask 0.1 research & troubleshooting findings

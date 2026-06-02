@@ -4,6 +4,28 @@ This is an append-only log of significant decisions made during NKDash developme
 
 ---
 
+## 2026-06
+
+### Render Solo Mode Architecture
+**Date:** 2026-06-02  
+**Context:** Need to restructure NKDash for maintainability, remove coupling between ETL and Dashboard, and deploy to Render. Discovered Render Persistent Disk cannot be shared across services, and Render Cron Jobs cannot mount disks.  
+**Decision:** Adopt "Render Solo Mode": a single Render Web Service running three isolated processes via `supervisord`:
+1. **gunicorn** (Dash BI Dashboard, port 8050, public) for C-Level and Operational users.
+2. **streamlit** (Maintainer Admin UI, proxied via `/admin`) for maintainer-only ETL operations.
+3. **python-schedule** (Background ETL runner, no port) replacing Celery + Redis + Beat.
+All processes share one local filesystem (`/var/data/data-lake`) mounted to a single Render Persistent Disk. ETL code separated into `etl/` package, Admin into `admin/`, Dashboard into `pages/` — but deployed as one unit. No distributed queue. No Redis. No Celery.  
+**Decision:** DuckDB used purely for both ETL transformations and Dashboard queries. Dashboard queries use DuckDB **in-memory** (`:memory:`) connections creating views over Parquet files, eliminating file-lock conflicts with ETL. No more SQLite hybrid layer.  
+**Impact:** Reduces infrastructure complexity from 5 Docker services to 1. Removes `pages/operational.py` from dashboard (moved to Streamlit admin). Enables solo maintainer to deploy and manage without distributed systems knowledge. Preserves Parquet data lake and star-schema.  
+**Workstream:** NK_20260602_migration_solo_render_0a1b
+
+### ETL-Dashboard Code Separation
+**Date:** 2026-06-02  
+**Context:** `etl_tasks.py` is a 2,213-line god file mixing Celery orchestration, Polars transforms, and business logic. Dashboard imports ETL modules directly, causing heavy startup and lock risks.  
+**Decision:** Split `etl_tasks.py` into `etl/pipeline.py` (pure Python scheduling), `etl/tasks/*.py` (Celery-free task wrappers), and `etl/core/*.py` (pure business logic). Move `pages/operational.py` into `admin/` as Streamlit pages. Enforce import linting: `pages/` and `services/` may not import `odoorpc`, `celery`, or `etl/`.  
+**Impact:** Dashboard becomes a true read-only consumer of the data lake. Frontend developers do not need to understand Odoo or Polars. ETL developers do not touch Dash callbacks.  
+
+---
+
 ## 2025-12
 
 ### Repository Documentation Standards

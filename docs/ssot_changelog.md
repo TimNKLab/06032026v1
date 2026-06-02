@@ -2,6 +2,46 @@
 
 This document tracks changes to the SSOT (Single Source of Truth) documentation structure and content.
 
+## Version 3.1 - 2026-06-02
+
+### Migration & Architecture Refactoring
+**Breaking Change**: New architectural direction — Render Solo Mode with code-level ETL/Dashboard separation.
+
+### Changes Made
+
+#### New Masterplan
+- **`MIGRATION_MASTERPLAN.md`** — Complete migration roadmap for Render deployment, code decoupling, and technology replacement (Celery→schedule, hybrid SQLite→pure DuckDB).
+- **`MIGRATION/reflection_0_1.md`** — Subtask 0.1 research findings and architectural decision record.
+
+#### Active Workstreams Added
+- `NK_20260602_migration_solo_render_0a1b` — Render Solo Mode migration (Phase 0 complete).
+
+#### Milestone Added
+- **M10 — Render Solo Mode Migration** (In Progress, 2026-06-02).
+
+#### Decisions Added
+- Render Solo Mode Architecture (single service, supervisord, 3 processes).
+- ETL-Dashboard code separation (god file split, import linting rules).
+- Pure DuckDB strategy (in-memory views for Dashboard, no SQLite hybrid).
+
+### Issues Addressed
+- **Render disk sharing limitation**: Cannot share Persistent Disk across services; cannot mount disk to Cron Jobs. Solved by collapsing to single Web Service.
+- **Celery/Redis complexity**: Overkill for solo maintainer, single-host, daily-batch workload. Solved by Python `schedule` library.
+- **ETL-Dashboard coupling**: `pages/operational.py` and `etl_tasks.py` imports violate separation of concerns. Solved by Streamlit admin and modular `etl/` package.
+- **DuckDB file lock confusion**: Double definition of `get_readonly_connection()` caused fallback to disk-locked connection. Solved by mandate: Dashboard always uses `:memory:` DuckDB over Parquet.
+
+### Files Modified
+- `SSOT.md` — Added M10, new phase, new active workstream.
+- `docs/decisions.md` — Prepend Render Solo Mode and ETL separation decisions.
+- `docs/ssot_changelog.md` — This entry.
+
+### Impact Assessment
+- **Maintainability**: Dramatically improved for solo maintainer; no distributed queue to debug.
+- **Deployability**: Render Solo Mode fits free/low-tier Render plans (1 service + 1 disk).
+- **Separation of Concerns**: C-level never sees ETL UI; maintainer never edits Dash pages for ETL fixes.
+
+---
+
 ## Version 3.0 - 2026-02-21
 
 ### Major Refactoring
