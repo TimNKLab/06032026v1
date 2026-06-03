@@ -208,3 +208,6 @@ __marimo__/
 
 # DuckDB temporary files
 .tmp/
+
+# Data Lake (Do not commit large Parquet files)
+data-lake/

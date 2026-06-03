@@ -1,69 +1,42 @@
-# 🏁 HANDOFF SUMMARY: NKDash Migration (Phase 1 Complete)
+# 🏁 HANDOFF SUMMARY: NKDash Migration (Phase 2 Complete)
 
 **Date:** 2026-06-02  
-**Status:** Phase 1 (ETL Engine Decoupling) COMPLETED ✅  
-**Next Step:** Phase 2 (Admin UI - Streamlit)
+**Status:** Phase 2 (Admin UI - Streamlit) COMPLETED ✅  
+**Next Step:** Phase 3 (Dashboard Decoupling & Dockerization)
 
 ---
 
-## 🎯 The Big Picture (Architecture Shift)
-We have successfully transitioned from a distributed, framework-heavy architecture to a **"Render Solo Mode"** (Local-First) architecture.
+## 🎯 Achievements in Phase 2
 
-**From (Deprecated):**
-- 5 Docker Services (Redis, Celery Worker, Beat, CLI, Dash)
-- Distributed Task Queue (Celery)
-- Hybrid SQLite/DuckDB Layer (Confusing & Locking issues)
-- High Infrastructure Overhead
+We have successfully built the **"Solo Mode" Admin Hub**, entirely decoupling the ETL operations from the Dash BI Dashboard. 
 
-**To (Active):**
-- **1 Single Container** (managed by `supervisord`) running 3 processes:
-  1. **Dash BI** (Public, Read-Only)
-  2. **Streamlit Admin** (Maintainer, Trigger/Monitor)
-  3. **Python Scheduler** (Background, ETL Execution)
-- **Pure DuckDB & Parquet**: No more SQLite. Data Lake $\rightarrow$ DuckDB in-memory $\rightarrow$ Dashboard.
-- **Bootstrap-First**: Designed for $0 cost (Oracle Cloud Free Tier).
+### 1. UI & Logic Decoupling
+- Built `admin/app.py` as a lightweight Streamlit application.
+- Implemented strict separation of concerns: `admin/core.py` handles all logic (I/O, database) and `admin/theme.py` ensures the Cohere UI standards are met (22px radius, Inter/Space Grotesk typography).
+- Eradicated the massive 1,378-line `pages/operational.py` from the Dash BI repository. 
 
----
+### 2. SQLite IPC Queue (Replacing Celery/Redis)
+- Replaced the heavy, distributed Celery architecture with a simple `etl_queue.sqlite` database acting as an Inter-Process Communication (IPC) layer.
+- Streamlit writes "jobs" to the queue, completely immune to any changes in the ETL logic itself.
 
-## 🛠️ Technical Achievements (Phase 1)
+### 3. Native Python Scheduler
+- Created `scheduler/main.py`, a background daemon that polls the SQLite queue every 10 seconds.
+- It executes the entire Odoo -> Parquet -> Aggregates pipeline entirely in pure Python and Polars, writing states back to `etl_state.json`.
+- Validated via Unit Testing (`test_scheduler_queue.py`).
 
-### 1. ETL Engine Modularization
-The 2,200-line `etl_tasks.py` god-file has been completely dismantled into a clean, modular package:
-- `etl/core/`: Pure business logic (Cost engine, Profit calculator, Schemas).
-- `etl/transform/`: Pure Polars cleaning functions (POS, Invoices, Inventory).
-- `etl/load/`: Pure persistence layer (Raw saves, Star-schema writers).
-- `etl/tasks.py`: A central **Task Registry** mapping string keys to these functions.
-
-### 2. The New Scheduler
-A lightweight background daemon (`scheduler/main.py`) now handles all ETL triggers:
-- **Automated**: Daily batch at 02:00 WIB.
-- **Manual**: Polls a `etl_queue.duckdb` file for requests from the Admin UI.
-- **Decoupled**: Does not depend on Celery or Redis.
-
-### 3. Validation
-- **Dry Run Success**: Verified the end-to-end flow ($\text{Odoo} \rightarrow \text{Raw} \rightarrow \text{Clean} \rightarrow \text{Fact}$) using mock data.
-- **Framework-Free**: Verified that core ETL logic has zero dependencies on Dash or Celery.
+### 4. Persistent Data Lake Bind-Mounting
+- Standardized paths using `DATA_LAKE_ROOT` from `etl.config`.
+- All persistent files (`queue`, `state.json`, `.log` files) are now correctly targeted into `data-lake/admin/`, ensuring data survives container restarts.
 
 ---
 
-## 📋 Current State & Next Steps
+## 📋 What is Phase 3? (Immediate Next Steps)
 
-**Completed:**
-- [x] Phase 0: Render Topology & Bootstrap Constraint Revision.
-- [x] Subtask 1.1: Core Extraction.
-- [x] Subtask 1.2: Transform Extraction.
-- [x] Subtask 1.3: Load Extraction.
-- [x] Subtask 1.4: Task Registry.
-- [x] Subtask 1.5: Scheduler Implementation.
-- [x] Subtask 1.6: Local Dry-Run Validation.
+Phase 3 is the **Dashboard Decoupling & Dockerization** phase. Now that the ETL engine and Admin UI are standing on their own, we must ensure the Dashboard becomes a **100% Read-Only Consumer**.
 
-**Immediate Next Steps (Phase 2):**
-1. **`admin/app.py`**: Build the Streamlit skeleton.
-2. **Partition Scanner**: UI to visualize the data lake.
-3. **Manual Trigger**: Interface to write to `etl_queue.duckdb`.
-4. **Log Viewer**: UI to monitor `scheduler.log`.
-
-**Crucial Notes for the next session:**
-- Use `export PYTHONPATH=.` when running scripts locally.
-- Use `Schedules` for timing, not Cron.
-- All Dashboard queries MUST use `:memory:` DuckDB reading Parquet.
+**Key Subtasks for Phase 3:**
+1. **Clean Up Imports:** Audit and remove any lingering `import odoorpc`, `celery`, or `etl_tasks` from the `pages/` and `services/` folders.
+2. **Rewrite DuckDB Connector (`services/duckdb_connector.py`):** Fix the file-lock bug by forcing the Dashboard to **ONLY** use `duckdb.connect(database=':memory:')` which reads directly from Parquet.
+3. **Refactor Metrics:** Rewrite `sales_metrics.py`, `profit_metrics.py`, and `inventory_metrics.py` to stop using the old SQLite Materialized Views and point them purely to DuckDB in-memory.
+4. **New Features:** Add the C-level Executive Summary page (`pages/executive.py`) and a Data Freshness Badge across pages.
+5. **The Grand Container:** Write the final `Dockerfile`, `supervisord.conf`, and `docker-compose.yml` to bundle Dash, Streamlit, and Scheduler into our 1-Container Solo Mode.

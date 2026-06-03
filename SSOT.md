@@ -16,6 +16,22 @@ Canonical coordination document for NKDash repository. Links to authoritative do
 ## Current Phase
 **Migration & Decoupling (M10)** — Separate ETL engine from BI Dashboard codebase; replace Celery/Redis with Python `schedule`; deploy as Render Solo Mode. Dashboard menarik data dengan DuckDB in-memory; Admin pakai Streamlit.
 
+**Scalability Context & Architecture Risks (Solo Mode)**
+*Decided: 2026-06-02*
+Solo Mode (1 container, 3 processes, shared disk) was chosen to maximize bootstrap efficiency ($0 cost, 1 maintainer). This monolithic stateful approach introduces known scalability risks:
+1. **Compute Contention:** ETL runs may spike CPU/RAM and slow down the Dashboard. Mitigated by scheduling ETL at 02:00 WIB.
+2. **No Horizontal Scaling:** Cannot spin up multiple containers because they rely on shared local storage (`/data-lake`) and SQLite queue. Architecture is vertically scalable only (up to VM limits).
+3. **Single Point of Failure (SPOF):** A memory leak in Streamlit could crash the whole container, bringing down BI and ETL.
+4. **Disk IPC Bottleneck:** Relying on `etl_queue.sqlite` for messaging is robust enough for low volume but can hit file-lock issues under high concurrency.
+*Evolution Path when scaling is needed:* Decouple into 2 containers (Web vs Admin+ETL), migrate `/data-lake` to AWS S3 (DuckDB reads S3 Parquet directly), and replace SQLite queue with SQS/Redis.
+
+**Decoupling Boundary Rules (Phase 2 Standard)**
+*Decided: 2026-06-02*
+To prevent spaghetti code, strict separation of concerns must be maintained:
+- **Streamlit (Admin UI)** is completely isolated from ETL logic. It only reads/writes to `admin/etl_queue.sqlite` and `admin/etl_state.json`. If ETL calculation logic changes, the Streamlit UI **must not** require modification.
+- **Dash BI (Public UI)** is isolated from extraction and transformation. It only reads from `.parquet` using DuckDB `:memory:`. 
+- **ETL Engine** is the only component allowed to hit external APIs (Odoo) and perform Polars transformations. Modifications to the ETL chain are handled strictly within `etl/tasks.py` and `scheduler/main.py`.
+
 ## Quick Links (Authoritative Docs)
 - **Architecture:** `docs/ARCHITECTURE.md` - Data lake + DuckDB architecture
 - **Runbook:** `docs/runbook.md` - Operational procedures + troubleshooting  

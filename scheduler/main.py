@@ -1,190 +1,156 @@
-"""
-NKDash ETL Scheduler
-====================
-
-The heart of the decoupled ETL engine. This process runs as a background
-daemon in the 'Render Solo Mode' container.
-
-Responsibilities:
-1. Scheduled Execution: Runs the full daily pipeline at 02:00 WIB.
-2. Manual Triggering: Polls a DuckDB queue for ad-hoc requests from the Admin UI.
-3. Logging: Maintains execution logs in /data-lake/admin/logs/.
-4. Error Handling: Ensures that a failure in one task doesn't crash the scheduler.
-
-Usage:
-    python -m scheduler.main
-"""
-import logging
-import os
 import time
-from datetime import datetime, date
-from typing import Optional, Dict, Any
-
 import schedule
-import duckdb
-import polars as pl
+import sqlite3
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+import sys
+import os
 
-from etl.tasks import get_task, list_registered_tasks
-from etl.config import STAR_SCHEMA_PATH, RAW_PATH
+# Add parent directory to path so it can find `etl` module
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# ---------------------------------------------------------------------------
-# Configuration & Logging
-# ---------------------------------------------------------------------------
+from etl.config import DATA_LAKE_ROOT
+from etl.tasks import get_task
+from etl.extract import pos, invoices, inventory_moves, stock_quants
 
-# Path to the job queue (created/shared with Streamlit Admin)
-# VISION: Pure DuckDB, No SQLite.
-QUEUE_DB = os.environ.get('ETL_QUEUE_DB', '/data-lake/admin/etl_queue.duckdb')
-LOG_DIR = os.environ.get('ETL_LOG_DIR', '/data-lake/admin/logs')
+# Set up logging to the data lake
+DATA_LAKE_PATH = Path(DATA_LAKE_ROOT).resolve()
+ADMIN_DIR = DATA_LAKE_PATH / "admin"
+LOG_DIR = ADMIN_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-os.makedirs(LOG_DIR, exist_ok=True)
-
+log_file = LOG_DIR / f"scheduler_{datetime.now().strftime('%Y%m')}.log"
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f'{LOG_DIR}/scheduler.log'),
-        logging.StreamHandler()
+        logging.FileHandler(log_file),
+        logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger('scheduler')
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Queue Management (Pure DuckDB IPC)
-# ---------------------------------------------------------------------------
+QUEUE_DB = ADMIN_DIR / "etl_queue.sqlite"
+STATE_FILE = ADMIN_DIR / "etl_state.json"
 
-def init_queue_db():
-    """Ensure the job queue table exists in DuckDB."""
-    try:
-        with duckdb.connect(QUEUE_DB) as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS etl_queue (
-                    id INTEGER PRIMARY KEY,
-                    task_name VARCHAR,
-                    params VARCHAR,
-                    status VARCHAR DEFAULT 'PENDING',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    started_at TIMESTAMP,
-                    completed_at TIMESTAMP,
-                    result VARCHAR
-                )
-            ''')
-    except Exception as e:
-        logger.error(f"Failed to initialize DuckDB queue: {e}", exc_info=True)
+def write_state(status: str):
+    """Write the current state to JSON so Streamlit can read it."""
+    state = {
+        "last_run_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "last_status": status
+    }
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
 
-def poll_manual_jobs():
-    """Check for pending jobs in the DuckDB queue and execute them."""
-    try:
-        # Connect to DuckDB to check for PENDING jobs
-        with duckdb.connect(QUEUE_DB) as conn:
-            # DuckDB returns results as tuples by default
-            result = conn.execute(
-                "SELECT id, task_name, params FROM etl_queue WHERE status = 'PENDING' ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
+def run_full_daily_pipeline(target_date: str):
+    """
+    Executes the entire ETL chain from Raw to Aggregates natively in Python.
+    Replaces the old Celery chains in `etl/pipelines/daily.py`.
+    """
+    logger.info(f"🚀 STARTING FULL PIPELINE FOR: {target_date}")
+    
+    # 1. Extract & Load POS
+    logger.info("-> Processing POS Data...")
+    raw_pos = pos.extract_pos_order_lines(target_date)
+    get_task('save_raw_data')(raw_pos)
+    get_task('clean_pos_data')(raw_pos, target_date)
+    get_task('update_star_schema')(target_date)
+    
+    # 2. Extract & Load Sales Invoices
+    logger.info("-> Processing Sales Invoices...")
+    raw_inv_out = invoices.extract_sales_invoice_lines(target_date)
+    get_task('save_raw_sales_invoice_lines')(raw_inv_out)
+    get_task('clean_sales_invoice_lines')(raw_inv_out, target_date)
+    get_task('update_invoice_sales_star_schema')(target_date)
+    
+    # 3. Extract & Load Dimensions (Products, Locations, etc)
+    logger.info("-> Refreshing Dimensions...")
+    get_task('refresh_dimensions')(['products', 'locations', 'uoms', 'partners', 'users', 'companies', 'lots'])
+    
+    # 4. Extract & Load Inventory
+    logger.info("-> Processing Inventory...")
+    raw_moves = inventory_moves.extract_inventory_moves(target_date)
+    get_task('save_raw_inventory_moves')(raw_moves)
+    get_task('clean_inventory_moves')(raw_moves, target_date)
+    get_task('update_inventory_moves_star_schema')(target_date)
+    
+    # 5. Extract & Load Quants (Snapshot)
+    logger.info("-> Processing Stock Quants...")
+    raw_quants = stock_quants.extract_stock_quants(target_date)
+    get_task('save_raw_stock_quants')(raw_quants)
+    get_task('clean_stock_quants')(raw_quants, target_date)
+    get_task('update_stock_quants_star_schema')(target_date)
+    
+    # 6. Aggregates & Profit (The "Ujung")
+    logger.info("-> Materializing Profit & Aggregates...")
+    get_task('update_product_cost_events')(target_date)
+    get_task('update_product_cost_latest_daily')(target_date)
+    get_task('update_sales_lines_profit')(target_date)
+    get_task('update_profit_aggregates')(target_date)
+    get_task('update_sales_aggregates')(target_date)
+    
+    logger.info(f"✅ FULL PIPELINE COMPLETED FOR: {target_date}")
 
-        if not result:
-            return
-
-        job_id, task_name, params_raw = result
-        logger.info(f"Processing manual job {job_id}: {task_name}")
+def process_queue():
+    """Polls the SQLite database for pending tasks and executes them."""
+    if not QUEUE_DB.exists():
+        return
         
-        # Mark as started
-        with duckdb.connect(QUEUE_DB) as conn:
-            conn.execute(
-                "UPDATE etl_queue SET status = 'RUNNING', started_at = ? WHERE id = ?",
-                (datetime.now(), job_id)
-            )
-
-        try:
-            # Execute the task from the registry
-            task_fn = get_task(task_name)
+    try:
+        with sqlite3.connect(QUEUE_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM queue WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
+            row = cursor.fetchone()
             
-            # Simple param handling: for now, we default to today for manual triggers.
-            target_date = date.today().isoformat()
-            
-            if task_name.startswith('save_raw'):
-                logger.warning(f"Task {task_name} requires extraction result. Skipping.")
-                job_result = "SKIPPED: Requires extraction input"
-            elif 'clean' in task_name or 'update' in task_name:
-                job_result = f"Triggered {task_name} for {target_date}"
-                # Note: in a full implementation, we'd actually call the task here
-                # but for bootstrap, we acknowledge the trigger.
-                # result = task_fn(target_date) 
-            else:
-                job_result = str(task_fn(target_date))
-
-            # Mark as completed
-            with duckdb.connect(QUEUE_DB) as conn:
-                conn.execute(
-                    "UPDATE etl_queue SET status = 'COMPLETED', completed_at = ?, result = ? WHERE id = ?",
-                    (datetime.now(), job_result, job_id)
-                )
-            logger.info(f"Job {job_id} completed successfully.")
-
-        except Exception as e:
-            logger.error(f"Job {job_id} failed: {e}", exc_info=True)
-            with duckdb.connect(QUEUE_DB) as conn:
-                conn.execute(
-                    "UPDATE etl_queue SET status = 'FAILED', completed_at = ?, result = ? WHERE id = ?",
-                    (datetime.now(), str(e), job_id)
-                )
-
+            if row:
+                task_id = row['id']
+                task_type = row['task_type']
+                target_date = row['target_date']
+                
+                # Mark as running
+                conn.execute("UPDATE queue SET status = 'running' WHERE id = ?", (task_id,))
+                conn.commit()
+                write_state("running")
+                
+                logger.info(f"Picked up task {task_id}: {task_type} for {target_date}")
+                
+                try:
+                    if task_type == 'daily_pipeline':
+                        run_full_daily_pipeline(target_date)
+                    elif task_type == 'refresh_dimensions':
+                        get_task('refresh_dimensions')(['products', 'locations', 'uoms', 'partners', 'users', 'companies', 'lots'])
+                    else:
+                        logger.warning(f"Unknown task type: {task_type}")
+                        
+                    # Mark as completed
+                    conn.execute("UPDATE queue SET status = 'completed' WHERE id = ?", (task_id,))
+                    conn.commit()
+                    write_state("success")
+                    
+                except Exception as e:
+                    logger.error(f"Task {task_id} failed: {e}")
+                    conn.execute("UPDATE queue SET status = 'failed' WHERE id = ?", (task_id,))
+                    conn.commit()
+                    write_state("failed")
+                    
     except Exception as e:
-        logger.error(f"DuckDB queue polling error: {e}", exc_info=True)
+        logger.error(f"Queue processing error: {e}")
 
-# ---------------------------------------------------------------------------
-# Pipeline Orchestration
-# ---------------------------------------------------------------------------
-
-def run_daily_pipeline(target_date: Optional[str] = None):
-    """
-    Orchestrate the full sequence of atomic tasks for a given date.
-    """
-    if target_date is None:
-        target_date = date.today().isoformat()
-    
-    logger.info(f"Starting full daily pipeline for {target_date}")
-    
-    # 1. Dimension Refresh
-    try:
-        logger.info("Step 1: Refreshing dimensions...")
-        get_task('refresh_dimensions')(None)
-    except Exception as e:
-        logger.error(f"Dimension refresh failed: {e}")
-        return f"FAILED at Dimensions: {e}"
-
-    # 2. Execution
-    try:
-        from etl.pipelines.daily import daily_etl_pipeline_impl
-        result = daily_etl_pipeline_impl(target_date)
-        logger.info(f"Pipeline finished: {result}")
-        return result
-    except Exception as e:
-        logger.error(f"Pipeline execution failed: {e}", exc_info=True)
-        return f"FAILED: {e}"
-
-# ---------------------------------------------------------------------------
-# Main Loop
-# ---------------------------------------------------------------------------
-
-def main():
-    logger.info("NKDash ETL Scheduler starting (Pure DuckDB Mode)...")
-    init_queue_db()
-    
-    # Schedule the daily run at 02:00 AM
-    schedule.every().day.at("02:00").do(run_daily_pipeline)
-    
-    logger.info("Scheduled daily pipeline for 02:00 AM WIB.")
-    logger.info(f"Polling DuckDB queue at {QUEUE_DB} every 30 seconds.")
-
-    try:
-        while True:
-            schedule.run_pending()
-            poll_manual_jobs()
-            time.sleep(30)
-    except KeyboardInterrupt:
-        logger.info("Scheduler stopped by user.")
-    except Exception as e:
-        logger.critical(f"Scheduler crashed: {e}", exc_info=True)
-
+# =====================================================================
+# Main Loop (The Daemon)
+# =====================================================================
 if __name__ == "__main__":
-    main()
+    logger.info("ETL Scheduler Daemon Started.")
+    
+    # 1. Scheduled Background Jobs (Every night at 02:00)
+    schedule.every().day.at("02:00").do(
+        lambda: run_full_daily_pipeline(datetime.now().strftime("%Y-%m-%d"))
+    )
+    
+    # 2. Polling Loop (Checks Streamlit UI Queue every 10 seconds)
+    while True:
+        process_queue()
+        schedule.run_pending()
+        time.sleep(10)
