@@ -5,8 +5,15 @@ dash-ag-grid==31.2.0
 dash-extensions==2.0.4
 plotly
 pandas
+numpy
 gunicorn==23.0.0
 Flask-Caching>=2.3.1
+
+# --- Admin UI ---
+streamlit>=1.35.0
+
+# --- Process Manager ---
+supervisor>=4.2.0
 
 # --- ETL Engine ---
 polars

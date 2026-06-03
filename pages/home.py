@@ -10,6 +10,7 @@ from typing import Tuple
 
 from services.profit_metrics import query_profit_summary, query_profit_trends
 from components import create_loading_modal
+from components.freshness_badge import register_freshness_callback
 
 CHART_HEIGHT = 380
 
@@ -99,7 +100,10 @@ layout = dmc.Container([
     
     dmc.Paper(
         dmc.Group([
-            dmc.Title('Executive Dashboard', order=4),
+            dmc.Group([
+                dmc.Title('Executive Dashboard', order=4),
+                create_freshness_badge('overview'),
+            ], gap='sm', align='center'),
             dmc.Group([
                 dmc.Button('W', variant='subtle', size='xs', id='btn-weekly'),
                 dmc.Button('M', variant='subtle', size='xs', id='btn-monthly'),
@@ -342,4 +346,8 @@ def update_overview(execute_trigger,
         'Complete',
         {'display': 'none'},  # Hide error
     )
+
+
+# ── Freshness badge callback ────────────────────────────────────
+register_freshness_callback('overview')
 

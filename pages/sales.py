@@ -26,6 +26,7 @@ from services.sales_charts import (
 from services.sales_metrics import get_revenue_comparison, get_top_products, get_hourly_sales_pattern
 from services.profit_metrics import query_profit_summary
 from components import create_loading_modal
+from components.freshness_badge import create_freshness_badge, register_freshness_callback
 
 dash.register_page(
     __name__,
@@ -60,8 +61,9 @@ def layout():
                 dmc.Stack([
                     dmc.Group([
                         dmc.Text('Sales Performance', size='xl', fw=700, c='blue'),
-                        dmc.Text('Last updated: Just now', size='xs', c='dimmed', id='sales-last-updated'),
-                    ], justify='space-between', align='center'),
+                        create_freshness_badge('sales'),
+                    ], gap='sm', align='center'),
+                    # dmc.Text('Last updated: Just now', size='xs', c='dimmed', id='sales-last-updated'),
                     dmc.Text(
                         f'Overview for {mtd_start.strftime("%d %b %Y")} - {mtd_end.strftime("%d %b %Y")} (Month-to-Date)',
                         size='sm', c='dimmed'
@@ -703,3 +705,7 @@ def update_top_products_table(query_context):
 )
 def export_sales_top_products(n_clicks):
     return True
+
+
+# ── Freshness badge callback ────────────────────────────────────
+register_freshness_callback('sales')

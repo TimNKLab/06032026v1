@@ -1,8 +1,17 @@
+"""Dataset partition scanner and dimension file checker.
+
+This module provides read-only scanning of Parquet partitions and dimension
+files in the data lake. It is used by the Admin UI for monitoring ETL state.
+
+IMPORTANT: This module has ZERO ETL/Odoo dependencies. It only reads Parquet
+files from the filesystem — no Celery, no odoorpc, no etl_tasks imports.
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Callable, Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 import os
 
 import polars as pl
@@ -29,20 +38,16 @@ from etl.config import (
     FACT_PRODUCT_COST_EVENTS_PATH,
     FACT_PRODUCT_COST_LATEST_DAILY_PATH,
 )
-from etl_tasks import (
-    daily_etl_pipeline,
-    daily_invoice_sales_pipeline,
-    daily_invoice_purchases_pipeline,
-    daily_inventory_moves_pipeline,
-    daily_stock_quants_pipeline,
-    daily_profit_pipeline,
-    refresh_dimensions_incremental,
-    group,  # Add group to the import
-)
 
 
 @dataclass(frozen=True)
 class DatasetConfig:
+    """Configuration for a single dataset partition tree.
+
+    NOTE: The `task` field has been removed (was Celery task reference).
+    ETL triggering is now handled by the scheduler process via admin/etl_queue.sqlite,
+    not by importing Celery tasks directly.
+    """
     key: str
     label: str
     raw_base: Optional[str]
@@ -51,7 +56,6 @@ class DatasetConfig:
     clean_filename: Optional[str]
     fact_base: Optional[str]
     fact_filename: Optional[str]
-    task: Optional[Callable[[str], str]]
 
 
 DATASETS: Dict[str, DatasetConfig] = {
@@ -64,7 +68,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename="pos_order_lines_clean_{date}.parquet",
         fact_base=f"{STAR_SCHEMA_PATH}/fact_sales",
         fact_filename="fact_sales_{date}.parquet",
-        task=daily_etl_pipeline,
     ),
     "invoice_sales": DatasetConfig(
         key="invoice_sales",
@@ -75,7 +78,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename="account_move_out_invoice_lines_clean_{date}.parquet",
         fact_base=f"{STAR_SCHEMA_PATH}/fact_invoice_sales",
         fact_filename="fact_invoice_sales_{date}.parquet",
-        task=daily_invoice_sales_pipeline,
     ),
     "purchases": DatasetConfig(
         key="purchases",
@@ -86,7 +88,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename="account_move_in_invoice_lines_clean_{date}.parquet",
         fact_base=f"{STAR_SCHEMA_PATH}/fact_purchases",
         fact_filename="fact_purchases_{date}.parquet",
-        task=daily_invoice_purchases_pipeline,
     ),
     "inventory_moves": DatasetConfig(
         key="inventory_moves",
@@ -97,7 +98,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename="inventory_moves_clean_{date}.parquet",
         fact_base=f"{STAR_SCHEMA_PATH}/fact_inventory_moves",
         fact_filename="fact_inventory_moves_{date}.parquet",
-        task=daily_inventory_moves_pipeline,
     ),
     "stock_quants": DatasetConfig(
         key="stock_quants",
@@ -108,7 +108,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename="stock_quants_clean_{date}.parquet",
         fact_base=f"{STAR_SCHEMA_PATH}/fact_stock_on_hand_snapshot",
         fact_filename="fact_stock_on_hand_snapshot_{date}.parquet",
-        task=daily_stock_quants_pipeline,
     ),
     "profit": DatasetConfig(
         key="profit",
@@ -119,7 +118,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename=None,
         fact_base=f"{STAR_SCHEMA_PATH}/agg_profit_daily",
         fact_filename="agg_profit_daily_{date}.parquet",
-        task=daily_profit_pipeline,
     ),
     "product_cost_events": DatasetConfig(
         key="product_cost_events",
@@ -130,7 +128,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename=None,
         fact_base=FACT_PRODUCT_COST_EVENTS_PATH,
         fact_filename="fact_product_cost_events_{date}.parquet",
-        task=None,
     ),
     "product_cost_latest": DatasetConfig(
         key="product_cost_latest",
@@ -141,7 +138,6 @@ DATASETS: Dict[str, DatasetConfig] = {
         clean_filename=None,
         fact_base=FACT_PRODUCT_COST_LATEST_DAILY_PATH,
         fact_filename="fact_product_cost_latest_daily_{date}.parquet",
-        task=None,
     ),
 }
 
@@ -157,6 +153,7 @@ DIMENSION_FILES = {
 
 
 def _partition_file(base_path: str, date_value: date, filename_template: str) -> str:
+    """Build partition path: base_path/year=YYYY/month=MM/day=DD/filename"""
     year = f"{date_value.year:04d}"
     month = f"{date_value.month:02d}"
     day = f"{date_value.day:02d}"
@@ -167,6 +164,7 @@ def _partition_file(base_path: str, date_value: date, filename_template: str) ->
 
 
 def _date_range(start: date, end: date) -> Iterable[date]:
+    """Generate dates from start to end (inclusive)."""
     if end < start:
         start, end = end, start
     delta = (end - start).days
@@ -174,6 +172,7 @@ def _date_range(start: date, end: date) -> Iterable[date]:
 
 
 def _count_parquet_rows(path: str) -> int:
+    """Count rows in a Parquet file, returns 0 on any error."""
     try:
         return pl.scan_parquet(path).collect().height
     except Exception:
@@ -181,6 +180,10 @@ def _count_parquet_rows(path: str) -> int:
 
 
 def scan_dataset_partitions(dataset_key: str, start: date, end: date) -> List[Dict[str, object]]:
+    """Scan partitions for a dataset between start and end dates.
+
+    Returns a list of dicts with raw/clean/fact status and row counts per day.
+    """
     config = DATASETS.get(dataset_key)
     if not config:
         return []
@@ -218,6 +221,10 @@ def scan_dataset_partitions(dataset_key: str, start: date, end: date) -> List[Di
 
 
 def scan_dimension_files() -> List[Dict[str, object]]:
+    """Check existence of all dimension Parquet files.
+
+    Returns a list of dicts with dimension name, path, and existence flag.
+    """
     results: List[Dict[str, object]] = []
     for name, path in DIMENSION_FILES.items():
         results.append({
@@ -228,41 +235,8 @@ def scan_dimension_files() -> List[Dict[str, object]]:
     return results
 
 
-def trigger_dataset_refresh(dataset_key: str, start: date, end: Optional[date] = None) -> Dict[str, object]:
-    if dataset_key == "dimensions":
-        result = refresh_dimensions_incremental.apply_async()
-        return {
-            "status": "queued",
-            "message": "Dimension refresh queued",
-            "task_id": result.id,
-        }
-
-    config = DATASETS.get(dataset_key)
-    if not config or not config.task:
-        return {"status": "error", "message": "Unknown dataset"}
-
-    if end is None:
-        end = start
-
-    dates = [day.isoformat() for day in _date_range(start, end)]
-    if len(dates) == 1:
-        result = config.task.apply_async(args=(dates[0],))
-        return {
-            "status": "queued",
-            "message": f"Queued {config.label} for {dates[0]}",
-            "task_id": result.id,
-        }
-
-    job = group(config.task.si(date_str) for date_str in dates)
-    result = job.apply_async()
-    return {
-        "status": "queued",
-        "message": f"Queued {config.label} for {dates[0]} → {dates[-1]} ({len(dates)} days)",
-        "task_id": result.id,
-    }
-
-
 def parse_date(value: object) -> Optional[date]:
+    """Parse a value into a date object. Handles None, date, datetime, and ISO string."""
     if value is None:
         return None
     if isinstance(value, datetime):

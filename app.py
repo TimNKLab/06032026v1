@@ -34,6 +34,7 @@ _check_versions()
 
 NAV_LINKS = [
     ("Overview", "/"),
+    ("Executive", "/executive"),
     ("Sales", "/sales"),
     ("Sales Drilldowns", "/sales-drilldown"),
     ("Inventory Management", "/inventory"),
@@ -67,14 +68,13 @@ init_cache(server)
 def health_check():
     """Health check endpoint - verifies DuckDB views are loaded and queryable."""
     try:
-        from services.duckdb_connector import get_duckdb_connection
+        from services.duckdb_connector import _query_conn
         from flask import jsonify
         import os, json
 
-        conn = get_duckdb_connection()
-
-        # Smoke test: verify agg_sales_daily is queryable
-        conn.execute("SELECT 1 FROM agg_sales_daily LIMIT 1").fetchone()
+        with _query_conn() as conn:
+            # Smoke test: verify agg_sales_daily is queryable
+            conn.execute("SELECT 1 FROM agg_sales_daily LIMIT 1").fetchone()
 
         # Check ETL state freshness
         etl_status = "unknown"

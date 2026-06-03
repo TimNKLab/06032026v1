@@ -1,137 +1,66 @@
+# =============================================================================
+# NKDash Solo Mode — Single-Container Deployment
+# =============================================================================
+# Architecture: 1 container, 3 processes via supervisord
+#   1. gunicorn    → Dash BI dashboard  (port 8050)
+#   2. streamlit   → Admin UI          (port 8501)
+#   3. scheduler   → ETL daemon         (background)
+#
+# Usage:
+#   docker-compose up --build -d
+#   docker-compose logs -f nkdash
+#   docker-compose exec nkdash supervisorctl status
+#
+# Data Lake:
+#   Bind-mount ./data-lake → /data-lake (Parquet files)
+#   Created automatically if missing.
+# =============================================================================
+
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: redis_etl
-    hostname: redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+  nkdash:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nkdash
     restart: unless-stopped
 
-  celery-worker:
-    build: .
-    user: root
+    # Resource limits (conservative for free-tier VMs)
     mem_limit: 4g
     mem_reservation: 2g
-    command: >
-      sh -c "celery -A etl_tasks worker 
-      --loglevel=info 
-      --concurrency=1
-      -Q celery,extraction,transformation,loading,dimensions"
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - ODOO_HOST=${ODOO_HOST}
-      - ODOO_PORT=${ODOO_PORT:-443}
-      - ODOO_PROTOCOL=${ODOO_PROTOCOL:-jsonrpc+ssl}
-      - ODOO_DB=${ODOO_DB}
-      - ODOO_USERNAME=${ODOO_USERNAME}
-      - ODOO_API_KEY=${ODOO_API_KEY}
-      - DATA_LAKE_ROOT=/data-lake
-      - CELERY_WORKER_RUNNING=1
-    volumes:
-      - .:/app
-      - D:\data-lake:/data-lake
-      - D:\logs:/app/logs
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
 
-  # ETL CLI service for headless ETL operations via docker-compose exec
-  # Use: docker-compose exec etl-manager-cli python scripts/etl_data_manager_cli.py <command>
-  etl-manager-cli:
-    build: .
-    user: root
-    command: >
-      sh -c "echo 'ETL Manager CLI service is ready. Use docker-compose exec to run commands.' && 
-             tail -f /dev/null"
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - ODOO_HOST=${ODOO_HOST}
-      - ODOO_PORT=${ODOO_PORT:-443}
-      - ODOO_PROTOCOL=${ODOO_PROTOCOL:-jsonrpc+ssl}
-      - ODOO_DB=${ODOO_DB}
-      - ODOO_USERNAME=${ODOO_USERNAME}
-      - ODOO_API_KEY=${ODOO_API_KEY}
-      - DATA_LAKE_ROOT=/data-lake
-      - CELERY_WORKER_RUNNING=1
-    volumes:
-      - .:/app
-      - D:\data-lake:/data-lake
-      - D:\logs:/app/logs
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: "no"
-
-  celery-beat:
-    build: .
-    user: root
-    command: >
-      sh -c "mkdir -p /var/run/celery /var/log/celery && 
-      celery -A etl_tasks beat 
-      --loglevel=info 
-      --schedule=/var/run/celery/beat-schedule"
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - ODOO_HOST=${ODOO_HOST}
-      - ODOO_PORT=${ODOO_PORT:-443}
-      - ODOO_PROTOCOL=${ODOO_PROTOCOL:-jsonrpc+ssl}
-      - ODOO_DB=${ODOO_DB}
-      - ODOO_USERNAME=${ODOO_USERNAME}
-      - ODOO_API_KEY=${ODOO_API_KEY}
-      - DATA_LAKE_ROOT=/data-lake
-    volumes:
-      - .:/app
-      - D:\data-lake:/data-lake
-      - D:\logs:/app/logs
-      - celerybeat_data:/var/run/celery
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
-  dash-app:
-    build: .
-    user: root
-    mem_limit: 4g
-    mem_reservation: 2g
-    command: gunicorn --workers 1 --threads 1 --timeout 120 --graceful-timeout 120 -b 0.0.0.0:8050 app:server
+    # Expose both Dash (public) and Streamlit (admin)
     ports:
-      - "8050:8050"
+      - "${NKDASH_PORT:-8050}:8050"
+      - "${NKDASH_ADMIN_PORT:-8501}:8501"
+
+    # Health check — hits Dash /health endpoint
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8050/health"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 30s
-    environment:
-      - REDIS_URL=redis://redis:6379/0
-      - PYTHONUNBUFFERED=1
-      - REDIS_CONNECTION_POOL_SIZE=10
-      - REDIS_MAX_CONNECTIONS=20
-      - DASH_CACHE_TTL_SECONDS=600
-      - DATA_LAKE_ROOT=/data-lake
-    volumes:
-      - .:/app
-      - D:\data-lake:/data-lake
-      - D:\logs:/app/logs
-      - ./assets:/app/assets
-    depends_on:
-      redis:
-        condition: service_healthy
-      celery-worker:
-        condition: service_started
-    restart: unless-stopped
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
-volumes:
-  redis_data:
-  celerybeat_data:
+    # Environment
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATA_LAKE_ROOT=/data-lake
+      - DASH_CACHE_TTL_SECONDS=${DASH_CACHE_TTL_SECONDS:-600}
+      - ODOO_HOST=${ODOO_HOST}
+      - ODOO_PORT=${ODOO_PORT:-443}
+      - ODOO_PROTOCOL=${ODOO_PROTOCOL:-jsonrpc+ssl}
+      - ODOO_DB=${ODOO_DB}
+      - ODOO_USERNAME=${ODOO_USERNAME}
+      - ODOO_API_KEY=${ODOO_API_KEY}
+
+    # Volumes
+    volumes:
+      # Data lake — Parquet files (shared with ETL scheduler)
+      - ${DATA_LAKE_PATH:-./data-lake}:/data-lake
+      # Application logs
+      - ./logs:/app/logs
+      # Assets (Dash theme, images)
+      - ./assets:/app/assets:ro
+
+    # supervisorctl via docker-compose exec
+    # e.g.: docker-compose exec nkdash supervisorctl restart gunicorn

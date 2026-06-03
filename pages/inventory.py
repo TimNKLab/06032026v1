@@ -9,13 +9,13 @@ import numpy as np
 import pandas as pd
 import time
 
-from services.duckdb_connector import get_duckdb_connection
+from services.duckdb_connector import _query_conn
+from components.freshness_badge import create_freshness_badge, register_freshness_callback
 from services.inventory_metrics import (
     get_abc_analysis,
     get_stock_levels_ledger,
     get_sell_through_analysis,
     get_inventory_costs,
-    query_inventory_summary,
     DEFAULT_STOCK_LOOKBACK_DAYS,
     DEFAULT_LOW_STOCK_DAYS,
     STOCK_LEDGER_BASELINE_DATE,
@@ -577,7 +577,10 @@ def layout():
             # ── Header + global filters on one row ────────────────
             dmc.Group([
                 dmc.Stack([
-                    dmc.Title('Inventory Health', order=3),
+                    dmc.Group([
+                        dmc.Title('Inventory Health', order=3),
+                        create_freshness_badge('inventory'),
+                    ], gap='sm', align='center'),
                     dmc.Text(
                         'Stock levels · Sell-through · ABC analysis',
                         c='dimmed', size='xs',
@@ -1075,29 +1078,29 @@ def apply_global_filters(
 
     distributor_values = set(_coerce_str_list(distributors))
     if distributor_values and 'product_id' in filtered.columns:
-        conn = get_duckdb_connection()
-        vendor_ids = []
-        for raw in distributor_values:
-            try:
-                vendor_ids.append(int(raw))
-            except (TypeError, ValueError):
-                continue
-        if vendor_ids:
-            placeholders = ','.join(['?'] * len(vendor_ids))
-            vendor_products_df = conn.execute(
-                f"""
-                SELECT DISTINCT product_id
-                FROM fact_purchases
-                WHERE vendor_id IN ({placeholders})
-                  AND COALESCE(product_id, 0) != 0
-                """,
-                vendor_ids,
-            ).df()
-            product_ids = set(pd.to_numeric(vendor_products_df.get('product_id'), errors='coerce').dropna().astype('int64').tolist())
-            if product_ids:
-                filtered = filtered[filtered['product_id'].isin(product_ids)]
-            else:
-                filtered = filtered.iloc[0:0]
+        with _query_conn() as conn:
+            vendor_ids = []
+            for raw in distributor_values:
+                try:
+                    vendor_ids.append(int(raw))
+                except (TypeError, ValueError):
+                    continue
+            if vendor_ids:
+                placeholders = ','.join(['?'] * len(vendor_ids))
+                vendor_products_df = conn.execute(
+                    f"""
+                    SELECT DISTINCT product_id
+                    FROM fact_purchases
+                    WHERE vendor_id IN ({placeholders})
+                      AND COALESCE(product_id, 0) != 0
+                    """,
+                    vendor_ids,
+                ).df()
+                product_ids = set(pd.to_numeric(vendor_products_df.get('product_id'), errors='coerce').dropna().astype('int64').tolist())
+                if product_ids:
+                    filtered = filtered[filtered['product_id'].isin(product_ids)]
+                else:
+                    filtered = filtered.iloc[0:0]
 
     query = (sku_search or '').strip()
     if query:
@@ -1962,49 +1965,48 @@ def export_top_xlsx(
     prevent_initial_call=False,
 )
 def populate_global_filter_options(_active_tab):
-    conn = get_duckdb_connection()
+    with _query_conn() as conn:
+        categories_df = conn.execute(
+            """
+            SELECT DISTINCT COALESCE(product_category, 'Unknown Category') AS value
+            FROM dim_products
+            WHERE COALESCE(product_category, '') <> ''
+            ORDER BY 1
+            """,
+        ).df()
+        brands_df = conn.execute(
+            """
+            SELECT DISTINCT COALESCE(product_brand, 'Unknown Brand') AS value
+            FROM dim_products
+            WHERE COALESCE(product_brand, '') <> ''
+            ORDER BY 1
+            """,
+        ).df()
 
-    categories_df = conn.execute(
-        """
-        SELECT DISTINCT COALESCE(product_category, 'Unknown Category') AS value
-        FROM dim_products
-        WHERE COALESCE(product_category, '') <> ''
-        ORDER BY 1
-        """,
-    ).df()
-    brands_df = conn.execute(
-        """
-        SELECT DISTINCT COALESCE(product_brand, 'Unknown Brand') AS value
-        FROM dim_products
-        WHERE COALESCE(product_brand, '') <> ''
-        ORDER BY 1
-        """,
-    ).df()
+        distributors_df = conn.execute(
+            """
+            SELECT DISTINCT
+                CAST(vendor_id AS VARCHAR) AS value,
+                COALESCE(NULLIF(TRIM(vendor_name), ''), CAST(vendor_id AS VARCHAR)) AS label
+            FROM fact_purchases
+            WHERE COALESCE(vendor_id, 0) != 0
+            ORDER BY 2
+            """,
+        ).df()
 
-    distributors_df = conn.execute(
-        """
-        SELECT DISTINCT
-            CAST(vendor_id AS VARCHAR) AS value,
-            COALESCE(NULLIF(TRIM(vendor_name), ''), CAST(vendor_id AS VARCHAR)) AS label
-        FROM fact_purchases
-        WHERE COALESCE(vendor_id, 0) != 0
-        ORDER BY 2
-        """,
-    ).df()
-
-    category_data = [
-        {'value': v, 'label': v}
-        for v in categories_df['value'].astype(str).tolist()
-    ]
-    brand_data = [
-        {'value': v, 'label': v}
-        for v in brands_df['value'].astype(str).tolist()
-    ]
-    distributor_data = [
-        {'value': row['value'], 'label': row['label']}
-        for _, row in distributors_df.iterrows()
-    ]
-    return category_data, brand_data, distributor_data
+        category_data = [
+            {'value': v, 'label': v}
+            for v in categories_df['value'].astype(str).tolist()
+        ]
+        brand_data = [
+            {'value': v, 'label': v}
+            for v in brands_df['value'].astype(str).tolist()
+        ]
+        distributor_data = [
+            {'value': row['value'], 'label': row['label']}
+            for _, row in distributors_df.iterrows()
+        ]
+        return category_data, brand_data, distributor_data
 
 
 # ── Stock quick-filter buttons ────────────────────────────────────────
@@ -2049,3 +2051,7 @@ def set_stock_quick_filter(_all, _low, _dead, _healthy):
             },
         }
     return {}
+
+
+# ── Freshness badge callback ────────────────────────────────────
+register_freshness_callback('inventory')

@@ -27,8 +27,8 @@ DATA_LAKE_ROOT = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
 def get_duckdb_connection():
     """Return a fresh in-memory DuckDB connection with views over Parquet."""
     conn = duckdb.connect(database=':memory:')
-    conn.execute("SET threads = 8")
-    conn.execute("SET memory_limit = '4GB'")
+    conn.execute("SET threads = 4")
+    conn.execute("SET memory_limit = '2GB'")
     _create_views(conn)
     return conn
 

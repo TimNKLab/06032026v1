@@ -1,43 +1,63 @@
-# Stage 1: Build Stage
-FROM python:3.9-slim AS build-stage
+# =============================================================================
+# NKDash Solo Mode — Multi-stage Dockerfile
+# =============================================================================
+# Single container running: gunicorn (Dash) + streamlit (Admin) + scheduler (ETL)
+# Process management: supervisord
+# =============================================================================
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# ── Stage 1: Build ─────────────────────────────────────────────────────
+FROM python:3.11-slim AS build-stage
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libzstd-dev \
-    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY . .
 
-# Stage 2: Final Stage
-FROM python:3.9-slim
+# ── Stage 2: Runtime ───────────────────────────────────────────────────
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install curl for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+# Runtime system deps: curl (healthcheck), supervisor
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy installed packages and binaries from build stage
-COPY --from=build-stage /usr/local/lib/python3.9/site-packages /usr/local/lib/python3.9/site-packages
+# Copy from build stage
+COPY --from=build-stage /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=build-stage /usr/local/bin /usr/local/bin
 COPY --from=build-stage /app /app
 
-# Create necessary directories
-RUN mkdir -p /app/data-lake /app/logs /app/assets
+# Create runtime directories
+RUN mkdir -p /data-lake/star-schema \
+             /data-lake/admin \
+             /data-lake/admin/logs \
+             /app/logs /app/assets \
+             /var/run/supervisor /var/log/supervisor
 
-ENV PYTHONPATH=/app
+# supervisord config
+COPY supervisord.conf /etc/supervisor/supervisord.conf
 
-EXPOSE 8050
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    DATA_LAKE_ROOT=/data-lake
 
-CMD ["gunicorn", "--workers", "1", "--threads", "1", "--timeout", "120", "--graceful-timeout", "120", "-b", "0.0.0.0:8050", "app:server"]
+# Ports: Dash BI (8050) + Streamlit Admin (8501)
+EXPOSE 8050 8501
+
+# Health check matches docker-compose
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
+    CMD curl -f http://localhost:8050/health || exit 1
+
+# Entrypoint: supervisord manages all 3 processes
+CMD ["supervisord", "-c", "/etc/supervisor/supervisord.conf"]

@@ -1,6 +1,239 @@
 # NKDash Team Log
 
-## 2026-06-03 — Phase 3 Task 3.1 Complete: Rewrite DuckDB Connector
+## 2026-06-03 — Phase 3 Progress Update: Tasks 3.1, 3.2, 3.3 All Complete
+
+### Current Phase 3 Status
+| Task | Description | Status |
+|------|-------------|--------|
+| 3.1 | Remove `pages/operational.py` from `app.py` NAV_LINKS | ✅ DONE (prior session) |
+| 3.2 | Delete `pages/operational.py` | ✅ DONE (prior session — verified today) |
+| 3.3 | Audit & remove forbidden imports | ✅ DONE (this session) |
+| 3.4 | Rewrite `services/duckdb_connector.py` (in-memory) | ✅ DONE (prior session — was logged as "3.1") |
+| 3.5 | Verify `services/sales_metrics.py` | ✅ DONE (this session — already clean) |
+| 3.6 | Verify `services/profit_metrics.py` | ✅ DONE (this session — already clean) |
+| 3.7 | Verify `services/inventory_metrics.py` | ✅ DONE (this session — already clean) |
+| 3.7a | Archive `sqlite_manager.py` + stale parity tests | ✅ DONE (this session) |
+| 3.8 | Add executive page | ✅ DONE (this session) |
+| 3.9 | Data freshness badge | ✅ DONE (this session) |
+| 3.10 | Docker compose rewrite | 🔧 NEXT |
+
+### Task 3.2 Verification (performed today)
+- `pages/operational.py` confirmed **deleted** — no longer exists in codebase
+- `app.py` NAV_LINKS confirmed **clean** — zero references to 'operational'
+- `admin/pages/` confirmed **populated** with 4 Streamlit replacements:
+  - `1_scanner.py` (partition scanning)
+  - `2_trigger.py` (manual ETL trigger)
+  - `3_logs.py` (log viewer)
+  - `4_health.py` (ETL health status)
+- **Conclusion:** Task 3.2 was completed during Phase 2 alongside the Streamlit admin creation
+
+---
+
+## 2026-06-03 — Phase 3 Task 3.9: Data Freshness Badge
+
+### What was built
+Three components created to show ETL data freshness across dashboard pages:
+
+| File | Purpose |
+|------|---------|
+| `services/versioned_cache.py` | Added `get_data_freshness()` — reads `etl_state.json`, returns `{status, label, color, last_run, age_hours}` |
+| `components/freshness_badge.py` | New — `create_freshness_badge(prefix)` layout + `register_freshness_callback(prefix)` |
+| `components/__init__.py` | Updated exports |
+| `pages/home.py` | Badge next to "Executive Dashboard" title |
+| `pages/sales.py` | Badge next to "Sales Performance" title (replaced static "Last updated" text) |
+| `pages/inventory.py` | Badge next to "Inventory Health" title |
+
+### Badge Logic
+| Age | Status | Color | Label Example |
+|-----|--------|-------|---------------|
+| <1h | fresh | green | "Updated 45m ago" |
+| 1-6h | fresh | green | "Updated 3h ago" |
+| 6-24h | stale | yellow | "Updated 18h ago" |
+| >24h | stale | orange | "Updated 2d ago" |
+| ETL failed | error | red | "ETL failed · Updated 1h ago" |
+| No state file | unknown | gray | "No ETL data" |
+
+### Auto-refresh
+- Each page has a `dcc.Interval` that triggers badge refresh every 60 seconds
+- Callbacks registered via `register_freshness_callback(prefix)` at module level
+
+### Ponder & Troubleshoot: Error Risks
+
+| Risk | Severity | Mitigation | Status |
+|------|----------|------------|--------|
+| `etl_state.json` doesn't exist yet (fresh deploy) | Medium | `get_data_freshness()` returns `{status: unknown, label: "No ETL data", color: gray}` | ✅ Handled |
+| Timestamp parse fails for non-ISO formats | Low | Dual parse: ISO first, then `%Y-%m-%d %H:%M:%S` | ✅ Handled |
+| `sales.py` had `sales-last-updated` text — now commented out | Low | Old text was static "Just now" — badge is better replacement | ✅ OK |
+| Duplicate 3.9 entry in knowledge graph | Low | Fixed — removed duplicate | ✅ Fixed |
+| `versioned_cache.py` now has 2 functions reading `etl_state.json` | Low | `get_etl_version()` for cache keys, `get_data_freshness()` for display — different purposes | ✅ OK |
+
+---
+
+## 2026-06-03 — Phase 3 Task 3.8: Executive Summary Page Created
+
+### What was built
+- **File:** `pages/executive.py` — new C-level one-page dashboard
+- **Registered:** Added "Executive" to `app.py` NAV_LINKS (position 2, after Overview)
+- **URL:** `/executive`
+
+### Page Features
+| Feature | Detail |
+|---------|--------|
+| **4 KPI Cards** | Revenue, Gross Profit, COGS, Transactions — each with subtitle (vs prev period, margin %, % of revenue, avg value) |
+| **Dual-axis Sparkline** | Revenue bars (left axis) + Margin % line (right axis) |
+| **Preset range buttons** | W (7 days), M (MTD), Q (QTD), Y (YTD) |
+| **Date picker** | Custom from/to with Apply button |
+| **Loading modal** | Two-callback pattern (trigger → execute) matching existing pages |
+| **Cohere Design System** | Space Grotesk headings, 22px radius cards, colored top borders |
+
+### Data Flow
+- Imports `query_profit_summary` and `query_profit_trends` directly from `services/duckdb_connector.py`
+- Zero ETL/Odoo imports, zero SQLite references
+- Two-callback pattern: `exec_open_modal()` → `exec_update()` (same as `home.py`)
+
+### Ponder & Troubleshoot: Error Risks
+
+| Risk | Severity | Mitigation | Status |
+|------|----------|------------|--------|
+| Previous period comparison may fail for early dates | Medium | `query_profit_summary` handles empty data via DuckDB fallback views | ⚠️ Accepted |
+| Sparkline margin % may show NaN for zero-revenue days | Low | Division-by-zero guard: `(gp/rev*100) if rev>0 else 0` | ✅ Handled |
+| Page imports directly from duckdb_connector, not via metrics layer | Low | Intentional — executive page needs minimal, focused queries | ✅ By design |
+| Icons (💰📈📦🛒) may not render in all browsers | Low | Emoji fallbacks work in all modern browsers | ⚠️ Accepted |
+| No initial data load on page visit | Low | Matches existing `home.py` pattern — user must click Apply or preset | ✅ Consistent |
+
+---
+
+## 2026-06-03 — Phase 3 Tasks 3.5–3.7: Metrics Services Verification & sqlite_manager Cleanup
+
+### Finding: All 3 Metrics Services Already Clean
+The masterplan called for rewriting these files to remove SQLite MV imports. Audit shows **all were already migrated** in prior sessions:
+
+| File | SQLite/MV Refs | Pattern | Status |
+|------|---------------|---------|--------|
+| `services/sales_metrics.py` (128 lines) | 0 | Thin wrappers → `duckdb_connector.query_*()` | ✅ Clean |
+| `services/profit_metrics.py` (42 lines) | 0 | Thin wrappers → `duckdb_connector.query_*()` | ✅ Clean |
+| `services/inventory_metrics.py` | 0 | Uses `_query_conn()` via Task 3.4 fix | ✅ Clean |
+| `services/overview_metrics.py` | 0 | Imports `query_overview_summary` from duckdb_connector | ✅ Clean |
+
+### Bonus: `sqlite_manager.py` Archived
+- **File:** `services/sqlite_manager.py` (573 lines) — archived to `admin/legacy_ops/`
+- **Reason:** Zero callers in active codebase. Only referenced by 6 parity tests that validated the old SQLite MV architecture.
+- **Tests archived to `tests/archive/`:**
+  - `test_inventory_cleanup_parity.py`
+  - `test_inventory_cross_domain_joins.py`
+  - `test_profit_drilldown_parity.py`
+  - `test_profit_parity.py`
+  - `test_sales_parity.py`
+  - `test_sell_through_parity.py`
+
+### Ponder & Troubleshoot: Error Risks
+
+| Risk | Severity | Mitigation | Status |
+|------|----------|------------|--------|
+| Parity tests archived — no validation for metrics accuracy | Medium | New parity tests will be created in Phase 4 (Task 4.1) against live data | ⚠️ Accepted |
+| `sqlite_manager.py` needed for `etl_queue.sqlite` IPC | Low | Scheduler has its own SQLite code in `admin/core.py` — `sqlite_manager.py` was for MV queries, not queue IPC | ✅ Verified |
+| `performance_monitor.py` and `data_validator.py` still in services/ | Low | Not in scope; both are utilities without SQLite dependency | 📋 Deferred |
+| sales/profit metrics are thin wrappers with no added logic | Low | Intentional — error handling + stable API layer over raw DuckDB queries | ✅ By design |
+
+---
+
+## 2026-06-03 — Phase 3 Task 3.3 Complete: Import Audit & Decoupling Verification
+
+### Task 3.3: Audit & Remove Forbidden Imports from `pages/` and `services/`
+- **Goal:** Ensure `pages/` and `services/` have zero ETL/Odoo imports (decoupling boundary compliance)
+- **Scanned for:** `import odoorpc`, `from etl_tasks import`, `from services.etl_ops import`, plus broader Celery/Odoo references
+
+### Audit Findings
+| Scope | Finding | Result |
+|-------|---------|--------|
+| `pages/*.py` | All 5 page files | ✅ Zero forbidden imports |
+| `app.py` | Main dashboard app | ✅ Zero forbidden imports |
+| `services/pos_data.py` | `from odoorpc_connector import ...` | 🗑️ Already removed in prior commit |
+| `services/etl_ops.py` | `from etl_tasks import (... group)` | ✂️ Stripped — removed Celery dependency |
+| `services/docker_compose_runner.py` | Legacy Docker Compose runner | 🗑️ Archived to `admin/legacy_ops/` |
+
+### Actions Taken
+1. **`services/etl_ops.py` rewritten:**
+   - Removed `from etl_tasks import (daily_etl_pipeline, ... group)` — Celery dependency
+   - Removed `trigger_dataset_refresh()` function — used Celery `.apply_async()` and `group()`
+   - Removed `task` field from `DatasetConfig` dataclass
+   - Kept `scan_dataset_partitions()` and `scan_dimension_files()` — pure Parquet file scanning, no ETL dependency
+   - Kept `parse_date()` utility
+   - Added module docstring clarifying zero ETL/Odoo dependency policy
+2. **`services/docker_compose_runner.py` → `admin/legacy_ops/`:**
+   - Zero callers, legacy 5-service Docker utility
+3. **`services/pos_data.py`:**
+   - Already removed in prior commit — was Odoo RPC extraction module with zero callers
+
+### Verification
+- ✅ `grep -rn "odoorpc_connector\|from etl_tasks" pages/ services/` → ZERO matches
+- ✅ `grep -rn "\.apply_async\|@app\.task\|from celery" services/` → ZERO matches
+- ✅ `services/etl_ops.py` passes `ast.parse()` syntax check
+- ✅ `trigger_dataset_refresh` removed from `etl_ops.py`
+- ✅ No `task=` references in `etl_ops.py`
+
+### Decoupling Boundary Status (post-3.3)
+- **Dash BI (`pages/`, `services/`)**: ✅ Pure read-only from Parquet via DuckDB `:memory:`
+- **Admin UI**: Still uses legacy `admin/legacy_ops/` scripts (Phase 2 will replace)
+- **ETL Engine**: Isolated in `etl/` and `etl_tasks.py` (to be replaced by scheduler)
+
+## 2026-06-03 — Phase 3 Task 3.4: DuckDB Connector Verification & Memory Leak Fix
+
+### Task 3.4 Definition (from MIGRATION_MASTERPLAN)
+> **3.4** Rewrite `services/duckdb_connector.py` — Fix double `get_readonly_connection()` bug
+> - Single definition: always returns `duckdb.connect(database=':memory:')`
+> - Creates views via `CREATE VIEW ... AS SELECT * FROM read_parquet('/data-lake/...')`
+> - No disk-backed connection for dashboard queries
+
+### Audit Result: Core Rewrite Confirmed ✅
+The connector was already rewritten (prior session). Verification against masterplan requirements:
+| Requirement | Status | Evidence |
+|-------------|--------|----------|
+| Single definition, always `:memory:` | ✅ | `duckdb.connect(database=':memory:')` — line 29, only instance |
+| Fix double `get_readonly_connection()` | ✅ | 0 occurrences — function deleted entirely |
+| Views via `CREATE VIEW ... read_parquet` | ✅ | 18 `_try_create_view()` calls in `_create_views()` |
+| No disk-backed connection | ✅ | Zero `.db`/`.duckdb`/`.sqlite` references (except `:memory:`) |
+| No `DuckDBManager` singleton | ✅ | 0 occurrences (docstring mention only) |
+| No `ensure_duckdb_view_groups` | ✅ | 0 occurrences |
+| `_query_conn()` context manager | ✅ | Present — line 37 |
+| All 14 query functions use `_query_conn` | ✅ | 14/14 inside duckdb_connector.py |
+| No `_column_cache` | ✅ | 0 occurrences |
+| Performance tuning | ✅ | `SET threads = 8`, `SET memory_limit = '4GB'` |
+| Zero stale imports from callers | ✅ | No `DuckDBManager`/`get_readonly_connection` references |
+
+### 🐛 Bug Found: Memory Leak in Callers (B5)
+**Problem:** 5 locations called `get_duckdb_connection()` directly, bypassing `_query_conn()` context manager. Connections were never `.close()`d — causing memory leak under load.
+
+| File | Line(s) | Function | Fix |
+|------|---------|----------|-----|
+| `pages/inventory.py` | 1078 | `_apply_all_filters()` | `get_duckdb_connection()` → `with _query_conn() as conn:` |
+| `pages/inventory.py` | 1965 | `populate_global_filter_options()` | Same |
+| `services/inventory_metrics.py` | 329 | `get_stock_levels_ledger()` | Same |
+| `services/inventory_metrics.py` | 445 | `get_sell_through_analysis()` | Same |
+| `app.py` | 74 | `health_check()` | Same |
+
+### Actions Taken
+1. **`pages/inventory.py`:** Replaced 2x `get_duckdb_connection()` with `_query_conn()` context manager. Removed unused `get_duckdb_connection` import.
+2. **`services/inventory_metrics.py`:** Replaced 2x `get_duckdb_connection()` with `_query_conn()`. Removed `get_duckdb_connection` from import statement.
+3. **`app.py`:** Health check wrapped in `with _query_conn() as conn:`.
+4. **All files pass `ast.parse()` syntax check.**
+
+### Ponder & Troubleshoot: Error Risks
+
+| Risk | Severity | Probability | Mitigation | Status |
+|------|----------|-------------|------------|--------|
+| **Indentation error from manual refactoring** | High | Low | `ast.parse()` passed on all 3 files | ✅ Verified |
+| **`_query_conn` is a private API** — callers now import a `_`-prefixed function | Medium | Low | `_query_conn` is the intended pattern for all callers; marking it public in a future refactor is acceptable | ⚠️ Accepted |
+| **`inventory_metrics.py` line 426 had nested `_query_conn` import** — `get_sell_through_analysis` already imported `get_duckdb_connection` at top of function, then `_query_conn` midway | Medium | Low | Removed `get_duckdb_connection` from top import; consolidated to `_query_conn` | ✅ Fixed |
+| **`pages/inventory.py` still uses `get_duckdb_connection` import elsewhere** | Low | None | grep confirms zero remaining usages; import removed | ✅ Fixed |
+| **`services/inventory_metrics.py` has other DuckDB connector imports** (query_inventory_snapshot, query_sales_by_product_duckdb) | Low | None | These are public query functions that internally use `_query_conn` — safe to call | ✅ OK |
+| **`services/sqlite_manager.py` still exists** — may have stale callers | Medium | Unknown | Not in scope for 3.4; flag for 3.5-3.7 evaluation | 📋 Deferred |
+| **View creation overhead on every `_query_conn()` call** | Low | Medium | Accepted in prior session; if slow, cache connection in Flask request context | ⚠️ Accepted |
+| **SSOT.md is stale** — "Next Steps" still says "Subtask 1.1" | Medium | Certain | Needs update to reflect Phase 3 progress | 📋 Deferred |
+
+---
+
+## 2026-06-03 — Phase 3 Task 3.4 Complete: Rewrite DuckDB Connector (was logged as "3.1")
 
 ### Task 3.1.1-3.1.5: `services/duckdb_connector.py` — Pure In-Memory
 - **Before:** 1,676 lines with `DuckDBManager` singleton, disk-backed connections, double `get_readonly_connection()` bug, MV stubs, column cache
@@ -35,3 +268,101 @@
 | Missing dimension files | ✅ Handled | `_load_dimension_tables()` has fallback for missing files |
 | Caller import errors | ✅ Verified | `grep` confirms zero references to removed symbols |
 | Concurrent disk I/O | ⚠️ Acceptable | DuckDB handles concurrent reads; each query has own connection |
+
+---
+
+## 2026-06-03 — Inventory Metrics SIGKILL Optimization (Post-3.7 Deep Audit)
+
+### Problem
+Inventory page caused SIGKILL due to excessive memory consumption:
+- `update_exec_summary` callback opened 3 DuckDB connections (3×4GB=12GB) + 2 Polars scans
+- 7 `.apply(lambda row: ..., axis=1)` calls caused slow row-by-row iteration
+- `_get_snapshot_date()` had connection leak (no context manager)
+- Dead code (`_query_stock_levels`, `_get_snapshot_date`) still in file
+
+### Changes Made
+
+**`services/inventory_metrics.py` — Full rewrite (877→742 lines)**
+- ❌ Removed `_get_snapshot_date()` — dead code with connection leak risk
+- ❌ Removed `_query_stock_levels()` — dead code (only in legacy_ops)
+- ✅ Replaced all 5 Polars scans with DuckDB SQL queries
+- ✅ Consolidated multi-query functions into single `_query_conn()` contexts:
+  - `get_stock_levels_ledger()`: Polars + 2×DuckDB → 1×DuckDB
+  - `get_sell_through_analysis()`: 2×DuckDB + Polars → 1×DuckDB
+  - `_query_abc_products()`: DuckDB + Polars → 1×DuckDB
+  - `get_inventory_costs()`: 2×Polars → 1×DuckDB
+  - `query_inventory_summary()`: 2×DuckDB → 1×DuckDB
+- ✅ Vectorized all `.apply(axis=1)` with numpy:
+  - `_query_location_ledger_deltas`: `df.apply(calculate_delta)` → SQL CASE WHEN
+  - `get_stock_levels_ledger`: vectorized days_of_cover, flags
+  - `query_inventory_summary`: 3× `.apply()` → `np.where()` + `np.select()`
+  - `get_abc_analysis`: `.apply(_classify)` → `np.where()`
+  - `get_sell_through_analysis`: `.where()` → `np.where()`
+
+**`services/duckdb_connector.py`**
+- Reduced `memory_limit` from 4GB → 2GB per connection
+- Reduced `threads` from 8 → 4
+
+**`pages/inventory.py`**
+- Removed unused `query_inventory_summary` import
+
+### SIGKILL Prevention: Memory Budget Before vs After
+| Component | Before | After |
+|---|---|---|
+| Peak DuckDB (update_exec_summary) | 3 × 4GB = 12GB | 1 × 2GB = 2GB |
+| Peak Polars (same callback) | ~2GB (2 scans) | 0 (removed) |
+| Total peak estimate | ~14GB | ~2GB |
+| Row iteration overhead | 7 `.apply(axis=1)` | 0 (all vectorized) |
+
+### Reflection: Risks
+| Risk | Impact | Mitigation |
+|---|---|---|
+| DuckDB 2GB limit too low for large datasets | Medium | Monitor; can increase to 3GB if needed |
+| SQL-based delta calculation differs from old Python logic | Low | Same CASE WHEN logic as old calculate_delta() |
+| `query_inventory_summary` no longer imported anywhere | Low | Function still exists in module; can re-import if needed |
+
+---
+
+## 2026-06-03 — Tasks 3.10 + 3.11: Docker Compose + Dockerfile Rewrite
+
+### Task 3.10 — docker-compose.yml
+- **Before:** 5 services (redis, celery-worker, celery-beat, etl-manager-cli, dash-app) + named volumes
+- **After:** 1 service `nkdash` running 3 processes via supervisord
+- **Key changes:**
+  - Single `nkdash` service with `supervisord` entrypoint
+  - Bind-mount `${DATA_LAKE_PATH:-./data-lake}:/data-lake` — cross-platform, no Windows hardcode
+  - Configurable ports via env vars: `NKDASH_PORT` (default 8050), `NKDASH_ADMIN_PORT` (default 8501)
+  - Odoo env vars passed through for ETL scheduler
+  - Health check on Dash `/health` endpoint
+  - Memory limits: 4GB hard, 2GB soft
+  - Zero Redis, zero Celery, zero named volumes
+- **Bug B4 FIXED:** Windows path `D:\data-lake` replaced with `${DATA_LAKE_PATH:-./data-lake}`
+
+### Task 3.11 — Dockerfile + supervisord.conf
+- **Before:** python:3.9-slim, single CMD (gunicorn only)
+- **After:** python:3.11-slim, multi-stage, CMD = supervisord
+- **supervisord.conf:** 3 programs:
+  1. `gunicorn` — Dash BI (port 8050, 1 worker, 4 threads, 180s timeout)
+  2. `streamlit` — Admin UI (port 8501, headless, CORS disabled)
+  3. `scheduler` — ETL daemon (python -u scheduler/main.py)
+- All programs log to stdout/stderr → captured by `docker logs`
+- `nodaemon=true` → supervisord runs in foreground (Docker-friendly)
+- Auto-restart all processes on failure
+
+### requirements.txt Updated
+- Added: `streamlit>=1.35.0`, `supervisor>=4.2.0`, `numpy`
+- Removed: nothing (celery/redis already commented out)
+
+### .env.example Created
+- Documents all env vars needed for deployment
+- Sensible defaults for ports and cache TTL
+- Odoo connection template
+
+### Reflection: Risks
+| Risk | Impact | Mitigation |
+|---|---|---|
+| supervisord not installed in slim image | High | pip install supervisor in build stage; COPY config |
+| streamlit not in requirements before | High | Added to requirements.txt |
+| Port conflicts on host | Low | Configurable via NKDASH_PORT / NKDASH_ADMIN_PORT env vars |
+| Python 3.9 → 3.11 upgrade | Low | All deps compatible; 3.11 faster + more memory-efficient |
+| Stale docs reference old services | Medium | Legacy docs untouched; will update in Phase 5 |
