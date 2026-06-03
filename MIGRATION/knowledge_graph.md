@@ -18,7 +18,7 @@
 | ID | Name | Type | Current Path | Target Path | Status |
 |---|---|---|---|---|---|
 | C1 | ETL God File | Module | `etl_tasks.py` (2,213 lines) | `etl/` package | 🔧 IN PROGRESS — `etl/core/`, `etl/transform/`, `etl/load/` extracted |
-| C2 | DuckDB Connector | Service | `services/duckdb_connector.py` (1,677 lines) | `services/duckdb_connector.py` (~200 lines) | 🔧 TO REWRITE |
+| C2 | DuckDB Connector | Service | `services/duckdb_connector.py` (1,677 lines) | `services/duckdb_connector.py` (695 lines) | ✅ REWRITTEN — Pure in-memory |
 | C3 | ETL Admin UI | Page | `pages/operational.py` (1,378 lines) | `admin/pages/operational.py` | 🔧 TO MOVE |
 | C4 | Sales Metrics | Service | `services/sales_metrics.py` | `services/sales_metrics.py` | 🔧 TO REWRITE |
 | C5 | Profit Metrics | Service | `services/profit_metrics.py` | `services/profit_metrics.py` | 🔧 TO REWRITE |
@@ -114,7 +114,7 @@
 | 2 | 2.6 Queue protocol test | 📋 QUEUED | Depends on 1.5 + 2.5 |
 | 3 | 3.1 Remove operational from nav | 📋 QUEUED | None (parallelizable) |
 | 3 | 3.2-3.3 Delete/move imports | 📋 QUEUED | Depends on 2.1 |
-| 3 | 3.4 Rewrite DuckDB connector | 📋 QUEUED | Depends on 1.1 |
+| 3 | 3.1 Rewrite DuckDB connector (in-memory) | ✅ DONE | None |
 | 3 | 3.5-3.7 Rewrite metric services | 📋 QUEUED | Depends on 3.4 |
 | 3 | 3.8 Add executive page | 📋 QUEUED | None (parallelizable) |
 | 3 | 3.9-3.11 Docker/compose rewrite | 📋 QUEUED | Depends on 1.5 + 2.1 |

@@ -11,36 +11,19 @@ from .cache import cache
 def get_etl_version() -> str:
     """Get current ETL version for cache invalidation.
     
-    Uses max(last_refresh_date) from SQLite MV metadata, or falls back to file-based version.
+    Uses scheduler state file (admin/etl_state.json) or falls back to 
+    file modification time of the latest aggregate parquet.
     """
-    # Try SQLite metadata first (since we migrated to SQLite MVs)
+    # Try scheduler state file first
     try:
-        from .sqlite_manager import SQLiteManager
-        manager = SQLiteManager()
-        manager.initialize_db()
-        conn = manager.get_reader_conn()
-        result = conn.execute("""
-            SELECT COALESCE(MAX(last_refresh_date), 'v1') 
-            FROM mv_refresh_metadata
-        """).fetchone()
-        conn.close()
-        if result and result[0]:
-            # Hash the timestamp to create a short version string
-            return hashlib.md5(str(result[0]).encode()).hexdigest()[:8]
-    except Exception:
-        pass
-    
-    # Fallback: Try DuckDB metadata (for backward compatibility)
-    try:
-        from .duckdb_connector import DuckDBManager
-        conn = DuckDBManager().get_connection()
-        result = conn.execute("""
-            SELECT COALESCE(MAX(last_refresh_date), 'v1') 
-            FROM mv_refresh_metadata
-        """).fetchone()
-        if result and result[0]:
-            # Hash the timestamp to create a short version string
-            return hashlib.md5(str(result[0]).encode()).hexdigest()[:8]
+        data_lake = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
+        state_file = os.path.join(data_lake, 'admin', 'etl_state.json')
+        if os.path.exists(state_file):
+            with open(state_file) as f:
+                state = json.load(f)
+            last_run = state.get('last_run_time', '')
+            if last_run:
+                return hashlib.md5(str(last_run).encode()).hexdigest()[:8]
     except Exception:
         pass
     

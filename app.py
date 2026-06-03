@@ -67,21 +67,33 @@ init_cache(server)
 def health_check():
     """Health check endpoint - verifies DuckDB views are loaded and queryable."""
     try:
-        from services.duckdb_connector import get_duckdb_connection, ensure_duckdb_view_groups
+        from services.duckdb_connector import get_duckdb_connection
         from flask import jsonify
-        
-        # Ensure DuckDB views are loaded
-        ensure_duckdb_view_groups({"overview"})
+        import os, json
+
         conn = get_duckdb_connection()
-        
+
         # Smoke test: verify agg_sales_daily is queryable
         conn.execute("SELECT 1 FROM agg_sales_daily LIMIT 1").fetchone()
-        
+
+        # Check ETL state freshness
+        etl_status = "unknown"
+        try:
+            state_file = os.path.join(os.environ.get('DATA_LAKE_ROOT', '/data-lake'),
+                                      'admin', 'etl_state.json')
+            if os.path.exists(state_file):
+                with open(state_file) as f:
+                    state = json.load(f)
+                etl_status = state.get('last_status', 'unknown')
+        except Exception:
+            pass
+
         return jsonify({
             'status': 'healthy',
-            'backend': 'duckdb'
+            'backend': 'duckdb_in_memory',
+            'etl_status': etl_status,
         }), 200
-        
+
     except Exception as e:
         from flask import jsonify
         return jsonify({

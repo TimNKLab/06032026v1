@@ -65,24 +65,24 @@ def _normalize_snapshot_date(value: Optional[object]) -> Optional[date]:
 
 
 def _get_snapshot_date(as_of_date: date) -> Optional[date]:
-    """Get snapshot date from DuckDB view over parquet with read-only connection."""
-    from services.duckdb_connector import DuckDBManager
+    """Get snapshot date from DuckDB in-memory connection over parquet."""
+    import duckdb
     import os
-    
+
     data_lake_root = os.environ.get('DATA_LAKE_ROOT', '/data-lake')
     snapshot_path = f"{data_lake_root}/star-schema/fact_stock_on_hand_snapshot/**/*.parquet"
-    
-    manager = DuckDBManager()
-    conn = manager.get_readonly_connection()
-    
+
+    conn = duckdb.connect(database=':memory:')
+    conn.execute("SET threads = 4")
     query = f"""
     SELECT DISTINCT snapshot_date
     FROM read_parquet('{snapshot_path}', hive_partitioning=1)
     WHERE snapshot_date = ?
     LIMIT 1
     """
-    
+
     result = conn.execute(query, [as_of_date]).fetchone()
+    conn.close()
     return _normalize_snapshot_date(result[0] if result else None)
 
 
@@ -324,8 +324,7 @@ def get_stock_levels_ledger(
     
     lookback_start = as_of_date - timedelta(days=lookback_days - 1)
     
-    from services.duckdb_connector import ensure_duckdb_view_groups, get_duckdb_connection
-    ensure_duckdb_view_groups({"sales", "dims", "inventory"})
+    from services.duckdb_connector import get_duckdb_connection
     
     conn = get_duckdb_connection()
     
@@ -425,19 +424,14 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
     """
     import polars as pl
     from services.duckdb_connector import (
-        DuckDBManager, 
-        query_inventory_snapshot, 
+        get_duckdb_connection,
+        query_inventory_snapshot,
         query_sales_by_product_duckdb,
-        ensure_duckdb_view_groups
     )
     
     query_start = time.time()
     
-    # Ensure required views are loaded
-    ensure_duckdb_view_groups({"dims", "inventory"})
-    
     # Get stock at beginning of period (as of start_date)
-    # Use the same ledger approach as get_stock_levels_ledger
     begin_as_of_ts = datetime.combine(start_date, datetime.min.time()).replace(hour=7, minute=0, second=0)
     
     # Get stock at end of period (as of end_date)
@@ -448,8 +442,7 @@ def get_sell_through_analysis(start_date: date, end_date: date) -> Dict[str, obj
     # This gives us stock levels as of a specific date
     
     # Get beginning inventory from DuckDB snapshot (or compute from ledger)
-    manager = DuckDBManager()
-    conn = manager.get_readonly_connection()
+    conn = get_duckdb_connection()
     
     # Try to get stock at start_date from snapshots
     begin_stock_query = f"""
